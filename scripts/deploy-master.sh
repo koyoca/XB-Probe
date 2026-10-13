@@ -79,6 +79,49 @@
 set -eu
 
 # ---------------------------------------------------------------------------
+# 版本指纹：让"我到底跑的是哪一版脚本"变成一个可核对的事实
+# ---------------------------------------------------------------------------
+#
+# 起因是一次很难查的故障：用户机器上取到的部署脚本是**旧版**（raw CDN 缓存了
+# `main`），于是脚本里已经修好的逻辑根本没生效，而仓库、CI、我们这边的核对
+# 全都显示"已经修好了"。用户看到的只有同一个错误反复出现。
+#
+# 光靠"输出一个哈希"不够——用户没有对照物。所以这里做三件事：
+#   ① 打印本脚本的 sha256 前 8 位（有对照物的人一眼能认出跑的是不是同一份）；
+#   ② 打印脚本里那几处**关键修复**的标记（用 grep 探，探不到就明确说"这份脚本
+#      里没有某某修复"）——这才是可执行的诊断，不必去做哈希对比；
+#   ③ 通过入口脚本进来时（PROBE_SELF_ENTRY=bin/src），顺带说明脚本与二进制
+#      可能来自不同的 ref。
+script_self_check() {
+	_sha=""
+	if command -v sha256sum >/dev/null 2>&1; then
+		_sha="$(sha256sum "$0" 2>/dev/null | awk '{print $1}')"
+	elif command -v shasum >/dev/null 2>&1; then
+		_sha="$(shasum -a 256 "$0" 2>/dev/null | awk '{print $1}')"
+	fi
+	if [ -n "$_sha" ]; then
+		printf '部署脚本    scripts/deploy-master.sh sha256=%s…\n' "$(printf '%s' "$_sha" | cut -c1-8)" >&2
+	fi
+	# 每一项都是"某个已修的缺陷"的**唯一标记**。取的是那段代码里最不会因为
+	# 重构而消失的一个串（函数名、报错文案），而不是行号——行号会漂。
+	_missing=""
+	for _mark in binary_supports_config_key Caddyfile_has_domain CADDY_MARK PLAIN_HTTP; do
+		if ! grep -q "$_mark" "$0" 2>/dev/null; then
+			_missing="$_missing $_mark"
+		fi
+	done
+	if [ -n "$_missing" ]; then
+		printf '  ⚠ 本脚本缺少以下修复标记：%s\n' "$_missing" >&2
+		printf '    → 你拿到的是旧版脚本（很可能是 CDN 缓存）。请重跑安装命令，\n' >&2
+		printf '      或改用带随机串的地址强制回源：\n' >&2
+		printf '      curl -fsSL "https://raw.githubusercontent.com/koyoca/XB-Probe/main/install-master-bin.sh?t=$(date +%%s)" -o imb.sh\n' >&2
+	fi
+	if [ -n "${PROBE_SELF_ENTRY:-}" ]; then
+		printf '  入口 %s（部署脚本来自 --script-ref，二进制来自 Release 标签，两者可能不同）\n' "$PROBE_SELF_ENTRY" >&2
+	fi
+}
+
+# ---------------------------------------------------------------------------
 # 交互输入的可编辑性：尽量在 bash 下运行本脚本
 # ---------------------------------------------------------------------------
 #
@@ -153,8 +196,20 @@ SELF_ENTRY_ARGS="${PROBE_SELF_ENTRY_ARGS:-}"
 # 二进制的配置键能力：见 binary_supports_config_key 的注释。
 # 空＝二进制比脚本旧，不能写 sync_obtain（严格解析会拒绝启动）。
 SYNC_OBTAIN_OK=""
-# "用户是否显式给过"这几个标记，用来区分"没给"和"给了一个恰好等于默认值的值"。
-# 缺了它们，像 TLS_MODE / PUBLIC_LISTEN 这种自带默认值的项就永远分不清
+# 用户选的是"纯 HTTP"（对外访问方式 5）。归一化后 TLS_MODE 会变成 none，
+# 两者在下游大部分分支里行为相同，只有"不许配反代"那条判断需要区分。
+PLAIN_HTTP=""
+# Caddy 的位置与"我们那段"的标记。
+# 定义放在这里（而不是用到它的 1400 行附近）是因为**卸载路径也要用**——
+# 卸载段在 TLS 问答之前就执行了，那时后面那些变量还没赋值。之前只有一个
+# CADDYFILE 定义、且在卸载段之后，于是卸载只能选择"Caddy 完全不管"。
+CADDY_DIR="${PROBE_CADDY_DIR:-/etc/caddy}"
+CADDYFILE="$CADDY_DIR/Caddyfile"
+# 追加站点块时写在前面的一行注释。卸载时靠它精确定位"哪一段是我们的"，
+# 这样用户自己加的站点不会被牵连；反过来，文件里没有这一行就意味着
+# "我们没动过它"（或者整份都是我们写的，见下面的判据）。
+CADDY_MARK="# ---- 以下由 scripts/deploy-master.sh 追加 ----"
+# "用户是否显式给过"这几个标记，用来区分"没给"和"给了一个恰好等于默认值的值"。# 缺了它们，像 TLS_MODE / PUBLIC_LISTEN 这种自带默认值的项就永远分不清
 # "来自默认值"还是"人来指定过"，结果是该问的没问、不该问的反复问。
 PUBLIC_LISTEN_GIVEN=""
 ADMIN_LISTEN_GIVEN=""
@@ -166,6 +221,8 @@ if [ -n "${PROBE_ADMIN_LISTEN:-}" ]; then ADMIN_LISTEN_GIVEN="1"; fi
 if [ -n "${PROBE_TLS_MODE:-}" ]; then TLS_MODE_GIVEN="1"; fi
 if [ -n "${PROBE_ADMIN_USER:-}" ]; then ADMIN_USER_GIVEN="1"; fi
 if [ -n "${PROBE_ACME_CHALLENGE:-}" ]; then ACME_CHALLENGE_GIVEN="1"; fi
+
+script_self_check
 
 # yaml_list 把 "a, b,c" 渲染成 YAML 行内序列 `"a", "b", "c"`。
 # 用 tr 把逗号换成空格再交给 for 做字段切分——这里刻意**只认逗号**：
@@ -282,6 +339,32 @@ if [ -z "$NO_ASK" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# 0-1) 清掉 stdin 里不属于用户的残留
+# ---------------------------------------------------------------------------
+#
+# 用户报的现象："有时候交互式输入后，会出现过几秒才提示输入下一个，但是提前回车了，
+# 还有就是我并没有输入任何字符却出现无用的字符"。他贴的证据里有一句
+# `https://mo.319082.xyzL，不带末尾斜杠）` —— 那个 `L` 不是他敲的。
+#
+# 那个 `L` 来自启动方式的管道：`curl -fsSL … | sh` 时，curl 的**选项字面量**在某些
+# 终端/PTY 组合下会有一部分落进管道残留，而管道那侧正是脚本的 stdin。下面几个
+# read 于是"凭空"读到一个字符，把一道题答成它意料之外的内容；紧接着的下一题就被
+# 这一轮的错位顶到几秒后才显示。
+#
+# 判据必须精确：**只在 stdin 其实就是管道/文件（非 tty）时**才清。真 tty 上用户
+# 完全可能在脚本启动的瞬间就开始打字，那时清空就等于吃掉他的输入。
+# 清法用 `read -t 0`：它只探测"现在能不能立刻读到"，不阻塞、不等待；读到东西就
+# 丢掉再试一次，直到缓冲区空。`-n 1` 保证一次只吃一个字符，不会连用户后续的
+# 输入一起吞掉。
+if [ -n "$ASK" ] && [ ! -t 0 ]; then
+	_drain=0
+	while [ "$_drain" -lt 64 ] && IFS= read -r -t 0 -n 1 _junk 2>/dev/null; do
+		_drain=$((_drain + 1))
+	done
+	unset _junk 2>/dev/null || true
+fi
+
+# ---------------------------------------------------------------------------
 # 0a) 答过的内容记下来：<配置目录>/.answers
 # ---------------------------------------------------------------------------
 #
@@ -379,16 +462,33 @@ if [ -f "$ANSWERS_FILE" ] && [ -z "$FRESH_ANSWERS" ] && [ -n "$ASK" ]; then
 	ANSWERS_HINT="1"
 fi
 
-# read_line <变量名>：读一行。
+# read_line <变量名> [提示]：读一行。
 #
-# bash 下用 `read -e`（走 readline）：退格、方向键、Home/End 都正常，且 ^H 与 ^?
-# 两种退格码都被绑为 backward-delete-char——这正是"按退格却打出 ^H"的根治办法。
-# 其它 shell 退回普通 read（由内核 tty 决定，行为不如前者，但不比现在更差）。
-# 脚本开头会尽量把自己换到 bash 下运行，所以这里通常走得到 -e 分支。
+# 关于提示为什么要**交给 readline 自己打印**（-p），而不是在外面 printf 一句：
+#
+# 用户报过两件事，根因是同一个——
+#   · "按删除键时，本行的提示却消失了：输入 1 再删除 1，整行变成空行"；
+#   · "没有输入任何字符却出现无用的字符"。
+# readline（`read -e`）并不知道"这一行前面已经有别的东西"。它把自己管理的区域
+# 当作从光标当前位置开始的整行，于是：
+#   · 退格删到行首时，它重新输出整行 —— 我们 printf 出来的那句提示正好在它
+#     认为的这行里，被一并擦掉；用户看到的就是"提示没了、只剩空行"；
+#   · 若此时终端里还残留着上一次的输出（例如上一行末尾的字符），readline 会把
+#     它当作自己这行的一部分参与重绘，屏幕上就冒出莫名其妙的多余字符。
+# 把提示用 `-p` 交给 readline，它就知道这是"提示"而不是"我的输入"，会把它
+# 排除在重绘范围之外——退格删到提示右边就停住，提示始终在。
+#
+# 非 bash 分支同样把提示交给 read：`read -r <var>?<prompt>` 是 POSIX 之外的
+# bash 扩展，所以这里退回"各自打印 + 读"，行为不如 bash，但不会打错行。
 read_line() {
 	if [ -n "${BASH_VERSION:-}" ]; then
-		IFS= read -e -r "$1"
+		if [ $# -ge 2 ]; then
+			IFS= read -e -r -p "$2" "$1"
+		else
+			IFS= read -e -r "$1"
+		fi
 	else
+		if [ $# -ge 2 ]; then printf '%s' "$2" >&2; fi
 		IFS= read -r "$1"
 	fi
 }
@@ -397,9 +497,8 @@ read_line() {
 # 不问时直接把默认值交回去——"问"与"不问"对后面的逻辑是同一件事。
 ask() {
 	if [ -z "$ASK" ]; then ASK_REPLY="${2:-}"; return 0; fi
-	if [ -n "${2:-}" ]; then printf '%s [%s]: ' "$1" "$2" >&2
-	else printf '%s: ' "$1" >&2; fi
-	read_line ASK_REPLY || ASK_REPLY=""
+	if [ -n "${2:-}" ]; then _prompt="$1 [$2]: "; else _prompt="$1: "; fi
+	read_line ASK_REPLY "$_prompt" || ASK_REPLY=""
 	if [ -z "$ASK_REPLY" ]; then ASK_REPLY="${2:-}"; fi
 }
 
@@ -431,8 +530,7 @@ ask_required() {
 # confirm <提示>：回车算"是"。
 confirm() {
 	if [ -z "$ASK" ]; then return 0; fi
-	printf '%s [Y/n]: ' "$1" >&2
-	read_line _ca || _ca=""
+	read_line _ca "$1 [Y/n]: " || _ca=""
 	case "$_ca" in
 	n | N | no | NO | No) return 1 ;;
 	*) return 0 ;;
@@ -463,8 +561,7 @@ if [ -z "$UNINSTALL" ] && [ -n "$ASK" ]; then
   2) 卸载 Master（停服务 → 删单元、二进制、配置、数据、系统用户）
 
 EOF
-	printf '请输入 1 或 2 [1]: ' >&2
-	read_line _mode || _mode=""
+	read_line _mode "请输入 1 或 2 [1]: " || _mode=""
 	case "$_mode" in
 	2 | uninstall | UNINSTALL | Uninstall | 卸载) UNINSTALL="1" ;;
 	*) : ;;
@@ -528,8 +625,7 @@ if [ -n "$UNINSTALL" ]; then
 	done
 
 	if [ -z "$KEEP_DATA" ] && [ -z "$DRY_RUN" ] && [ -n "$ASK" ]; then
-		printf '这会删除数据目录 %s（含数据库与 master.key），不可恢复。继续？ [y/N]: ' "$DATA" >&2
-		read_line _uc || _uc=""
+		read_line _uc "这会删除数据目录 $DATA（含数据库与 master.key），不可恢复。继续？ [y/N]: " || _uc=""
 		case "$_uc" in
 		y | Y | yes | YES | Yes) : ;;
 		*)
@@ -567,7 +663,7 @@ if [ -n "$UNINSTALL" ]; then
 		echo "    （dry-run：只列出将要做的事，不删除任何东西）"
 	fi
 
-	echo "==> 1/6 停止并注销服务"
+	echo "==> 1/8 停止并注销服务"
 	UNIT_PATH=/etc/systemd/system/probe-master.service
 	if [ -n "$DRY_RUN" ]; then
 		echo "    [dry-run] systemctl disable --now probe-master；删除 $UNIT_PATH"
@@ -586,7 +682,7 @@ if [ -n "$UNINSTALL" ]; then
 		echo "    没有 systemctl：跳过（若用 OpenRC，见下一步）"
 	fi
 
-	echo "==> 2/6 其它 init 系统残留"
+	echo "==> 2/8 其它 init 系统残留"
 	for _f in /etc/init.d/probe-master /etc/supervisor/conf.d/probe-master.conf; do
 		if [ -e "$_f" ]; then
 			rm_path "$_f" "其它进程管理器的单元"
@@ -598,20 +694,110 @@ if [ -n "$UNINSTALL" ]; then
 		fi
 	done
 
-	echo "==> 3/6 删除二进制"
+	echo "==> 3/8 删除二进制"
 	rm_path "$BIN_DIR/probe-master" "Master 可执行文件"
 
-	echo "==> 4/6 删除配置目录"
+	echo "==> 4/8 删除配置目录"
 	rm_path "$DIR" "配置（master.yaml、master.key）"
 
-	echo "==> 5/6 删除数据目录"
+	echo "==> 5/8 删除数据目录"
 	if [ -n "$KEEP_DATA" ]; then
 		echo "    保留（--keep-data）：$DATA"
 	else
 		rm_path "$DATA" "数据（数据库、主题、发布件、证书）"
 	fi
 
-	echo "==> 6/6 删除系统用户"
+	echo "==> 6/8 停止并清理 Caddy（仅当它由本脚本安装/配置）"
+	# 用户的原话："卸载脚本时候，caddy并没有停止监听和卸载"。
+	# 这里最难的不是停服务，而是**分清哪些是我们的、哪些是别人的**：
+	# 这台机器上很可能原本就有一个 Caddy（发行版包、x-ui 之类），把它一并停掉删掉
+	# 是比"没卸载干净"严重得多的错误。所以三项各用各的判据，且都偏向"不动"：
+	#   · 服务单元：Description 里带 "Server Probe" 才是我们写的那份（官方包那份
+	#     写的是 "Caddy web server"）；不是我们的就只停不禁用不删。
+	#   · Caddyfile：有 .bak 说明我们**追加**过 → 用 .bak 还原；没有 .bak 且整份
+	#     都是我们写的 → 删掉；都没有就只摘掉我们那一段（按追加速记行切分）。
+	#   · 命令/二进制：本脚本不会装系统包，所以 /usr/bin/caddy 一律不动。
+	CADDY_SVC=/etc/systemd/system/caddy.service
+	_caddy_is_ours=""
+	if [ -f "$CADDY_SVC" ] && grep -q 'Server Probe' "$CADDY_SVC" 2>/dev/null; then
+		_caddy_is_ours="1"
+	fi
+	if [ -n "$DRY_RUN" ]; then
+		echo "    [dry-run] systemctl stop caddy（若在跑）"
+		if [ -n "$_caddy_is_ours" ]; then
+			echo "    [dry-run] 删除 $CADDY_SVC（本脚本写的单元）"
+		elif [ -f "$CADDY_SVC" ]; then
+			echo "    保留 $CADDY_SVC（不是本脚本写的：$CADDY_SVC 里没有 Server Probe 标记）"
+		else
+			echo "    $CADDY_SVC 不存在"
+		fi
+		if [ -f "$CADDYFILE.bak" ]; then
+			echo "    [dry-run] 还原 $CADDYFILE（来自 .bak）"
+		elif [ -f "$CADDYFILE" ] && grep -q "$CADDY_MARK" "$CADDYFILE" 2>/dev/null; then
+			echo "    [dry-run] 摘除 $CADDYFILE 里本脚本追加的段落"
+		else
+			echo "    $CADDYFILE 无本脚本痕迹，保留"
+		fi
+	else
+		if command -v systemctl >/dev/null 2>&1; then
+			if systemctl is-active caddy >/dev/null 2>&1; then
+				systemctl stop caddy >/dev/null 2>&1 || true
+				echo "    已停止 caddy"
+			else
+				echo "    caddy 未在运行"
+			fi
+			if [ -n "$_caddy_is_ours" ]; then
+				systemctl disable caddy >/dev/null 2>&1 || true
+				rm -f "$CADDY_SVC" 2>/dev/null || true
+				systemctl daemon-reload >/dev/null 2>&1 || true
+				systemctl reset-failed caddy >/dev/null 2>&1 || true
+				if [ -f "$CADDY_SVC" ]; then echo "    ⚠ 残留：$CADDY_SVC"
+				else echo "    已删除 $CADDY_SVC（本脚本写的单元）"; fi
+			elif [ -f "$CADDY_SVC" ]; then
+				echo "    保留 $CADDY_SVC（不是本脚本写的：里面没有 Server Probe 标记）"
+				echo "      它已被停止，但开机仍会自启——需要的话手工 systemctl disable caddy"
+			else
+				echo "    $CADDY_SVC 不存在"
+			fi
+		else
+			echo "    没有 systemctl：跳过"
+		fi
+		# caddyfile_restore：把 Caddyfile 恢复成"我们动它之前"的样子。
+		# 用户可能已经在这份文件里加了自己的站点，所以能还原就还原、能摘除就摘除，
+		# 只有"整份都是我们写的"才删文件。
+		if [ -f "$CADDYFILE.bak" ]; then
+			mv -f "$CADDYFILE.bak" "$CADDYFILE" 2>/dev/null || true
+			if [ -f "$CADDYFILE.bak" ]; then echo "    ⚠ 残留：$CADDYFILE.bak（请手工处理）"
+			else echo "    已还原 $CADDYFILE（来自 $CADDYFILE.bak）"; fi
+		elif [ -f "$CADDYFILE" ]; then
+			if grep -q "$CADDY_MARK" "$CADDYFILE" 2>/dev/null; then
+				# 摘掉本脚本追加的那一段（从速记行到文件末尾）。
+				# 用 awk 而不是 sed：速记行里含 `#`，而 sed 的地址里写 `#` 会与
+				# 分隔符打架；awk 的字符串比较没有这个问题。
+				awk -v mark="$CADDY_MARK" '
+					$0 == mark { skip = 1; next }
+					!skip { print }
+				' "$CADDYFILE" >"$CADDYFILE.tmp" 2>/dev/null || true
+				mv -f "$CADDYFILE.tmp" "$CADDYFILE" 2>/dev/null || true
+				# 摘完之后只剩空行/注释时，文件留着没有意义，删掉更诚实。
+				if ! grep -Eq '^[[:space:]]*[^#{[:space:]]' "$CADDYFILE" 2>/dev/null; then
+					rm -f "$CADDYFILE" 2>/dev/null || true
+					echo "    已删除 $CADDYFILE（摘除本脚本追加的段落后已无有效站点）"
+				else
+					echo "    已摘除 $CADDYFILE 里本脚本追加的段落（其余站点保留）"
+				fi
+			elif ! grep -Eq '^[[:space:]]*[^#{[:space:]]' "$CADDYFILE" 2>/dev/null; then
+				rm -f "$CADDYFILE" 2>/dev/null || true
+				echo "    已删除 $CADDYFILE（空配置）"
+			else
+				echo "    保留 $CADDYFILE（里面没有本脚本写的标记，像是你自己的配置）"
+			fi
+		else
+			echo "    $CADDYFILE 不存在"
+		fi
+	fi
+
+	echo "==> 8/8 删除系统用户"
 	if [ -n "$DRY_RUN" ]; then
 		echo "    [dry-run] userdel probe；groupdel probe"
 	elif id -u probe >/dev/null 2>&1; then
@@ -634,6 +820,15 @@ if [ -n "$UNINSTALL" ]; then
 	else
 		echo "==> 卸载完成。"
 		echo "    未删除的只有系统包（本脚本从未安装过它们）与你自己放进来的文件。"
+		# 卸载后还留着监听端口的进程，是"卸载完成"这句话最容易骗人的地方。
+		# 直接把还在听的端口列出来，用户不必自己 netstat 去对。
+		if command -v ss >/dev/null 2>&1; then
+			_leftover="$(ss -lntp 2>/dev/null | awk 'NR>1 && ($4 ~ /:(80|443|8080|8081)$/) {print "      " $1, $4, $6}' | head -n 10)"
+			if [ -n "$_leftover" ]; then
+				echo "    以下监听端口与本次部署相关，仍在使用中（本脚本不认领的进程不代你停）："
+				printf '%s\n' "$_leftover"
+			fi
+		fi
 	fi
 	exit 0
 fi
@@ -714,28 +909,41 @@ admin_user_ok() {
 PUBIP=""
 if [ -z "$PUBLIC_ORIGIN" ] && [ -n "$ASK" ]; then PUBIP="$(detect_public_ip)"; fi
 
+# 这一问回答的是**对外看起来是什么**，不是"证书从哪来"。
+# 早先这一问直接叫"TLS 方式"，选项 1 的标签是 `none`，说明里却写着"自动装 Caddy
+# 申请证书"——于是"选 1 = 没有 https"这个字面意思和"会去申请证书"正好相反，
+# 用户看出的矛盾是文案的错，不是他的错。改法是把两件事摆到台面上各占一个选项：
+#   1) auto  —— 要 HTTPS，证书交给本脚本装好的 Caddy 自动办（最省事）
+#   2) acme  —— 要 HTTPS，证书由 Master 进程自己申请
+#   3) selfsigned —— 要 HTTPS，自签（没有域名、只有 IP 时唯一可行）
+#   4) files —— 要 HTTPS，用你已有的证书
+#   5) plain —— 不要 HTTPS，只有纯 HTTP（**这种模式下脚本不会装任何反代**）
+# 选 1 与选 2~4 的差别只是"谁去申请证书"，都会终结 TLS；选 5 才是真正的 none。
 if [ -z "$TLS_MODE_GIVEN" ]; then
 	if [ -n "$ASK" ]; then
 		cat >&2 <<'EOF'
 
 下面几个问题决定对外访问方式，直接回车取方括号里的默认值。
 
-TLS 方式：
-  1) none       由前置反代终结 TLS。若选这一项，本脚本会**自动装好 Caddy 并配好
-                反代**（证书申请与续期由 Caddy 负责），你只需要把域名解析到本机
-  2) acme       Master 自己申请证书（需要一个已解析到本机的域名）
-  3) selfsigned 自签证书（用纯 IP 访问时，这是唯一可行的加密方式）
-  4) files      使用你已有的证书与私钥
+对外访问方式：
+  1) auto       使用 HTTPS。证书自动申请与续期（本脚本会装好 Caddy 并配好反代，
+                证书由 Caddy 负责），你只需要把域名解析到本机。**最省事，推荐**
+  2) acme       使用 HTTPS。证书由 Master 进程自己申请（需要一个已解析到本机的域名）
+  3) selfsigned 使用 HTTPS，但用自签证书（没有域名、只能用纯 IP 访问时，这是
+                唯一可行的加密方式；浏览器会提示证书不受信任）
+  4) files      使用 HTTPS，证书与私钥用你已有的文件
+  5) plain      不使用 HTTPS，只提供纯 HTTP（不装任何反代，证书与 443 都不涉及）
 
-四种都不需要你自己去装 Caddy/Nginx 并手写反代配置。
+四种 HTTPS 方式都不需要你自己去装 Caddy/Nginx 并手写反代配置。
 EOF
 	fi
-	ask "选择 TLS 方式（1/2/3/4）" "1"
+	ask "选择对外访问方式（1/2/3/4/5）" "1"
 	case "$ASK_REPLY" in
-	1 | none | NONE | None) TLS_MODE="none" ;;
+	1 | auto | AUTO | Auto) TLS_MODE="none" ;;
 	2 | acme | ACME | Acme) TLS_MODE="acme" ;;
 	3 | selfsigned | SelfSigned | SELF_SIGNED) TLS_MODE="selfsigned" ;;
 	4 | files | FILES | Files) TLS_MODE="files" ;;
+	5 | plain | PLAIN | Plain | none | NONE | None) TLS_MODE="plain" ;;
 	*) TLS_MODE="$ASK_REPLY" ;;
 	esac
 	ans_put TLS_MODE "$TLS_MODE"
@@ -750,21 +958,24 @@ fi
 #
 # 默认值按 TLS 方式给，且**只有这一处**给默认值（install-master.sh 里那份是同一个
 # 规则的镜像，两处都改了才一致；见 deploy_flags 护栏）：
-#   · none → caddy ：既然选了"由前置反代终结"，那就把这个反代装上，别让用户自己来；
-#   · 其它 → master：证书就是给 Master 自己用的。
+#   · 1=auto（脚本内部是 none）→ caddy：这一项的含义就是"证书交给本脚本装的
+#                                        反代去办"，所以终结者只能是 caddy；
+#   · plain（纯 HTTP）           → 不留终结者，见下面的"矛盾组合"处理；
+#   · 其它                        → master：证书就是给 Master 自己用的。
 if [ -z "$TLS_TERMINATOR" ]; then
 	case "$TLS_MODE" in
 	none) TLS_TERMINATOR="caddy" ;;
+	plain) TLS_TERMINATOR="" ;;
 	*) TLS_TERMINATOR="master" ;;
 	esac
 fi
-if [ -z "$TLS_TERMINATOR_GIVEN" ] && [ -n "$ASK" ]; then
+if [ -z "$TLS_TERMINATOR_GIVEN" ] && [ -n "$ASK" ] && [ "$TLS_MODE" != "plain" ]; then
 	cat >&2 <<'EOF'
 
-TLS 由谁终结：
-  1) caddy   本脚本自动安装 Caddy、生成反代配置。证书申请与续期全自动，
+TLS 由谁终结（证书由谁拿着、由谁监听 443）：
+  1) caddy   本脚本自动安装 Caddy、生成反代配置，证书申请与续期全自动。
              你只需保证：域名已解析到本机、80/443 没被别的服务占用
-  2) master  Master 进程自己监听并终结 TLS（内置 ACME / 自签 / 你给的证书）
+  2) master  Master 进程自己监听 443 并终结 TLS（用你上面选的那种证书）
 EOF
 	ask "选择终结者（1=caddy / 2=master）" "$TLS_TERMINATOR"
 	case "$ASK_REPLY" in
@@ -777,6 +988,13 @@ ans_put TLS_TERMINATOR "$TLS_TERMINATOR"
 
 case "$TLS_TERMINATOR" in
 master | caddy) : ;;
+'')
+	# 只有 pure HTTP 允许空终结者；其它情况空值意味着上面某一段漏了赋值。
+	if [ "$TLS_MODE" != "plain" ]; then
+		echo "错误：未能确定 TLS 终结者（tls.mode=$TLS_MODE）。请显式给 --tls-terminator。" >&2
+		exit 2
+	fi
+	;;
 *)
 	echo "错误：--tls-terminator 只能是 master 或 caddy（收到 $TLS_TERMINATOR）。" >&2
 	exit 2
@@ -787,7 +1005,12 @@ esac
 # "address already in use"，会被读成"端口被别的程序占了"，离真正的原因很远。
 # 这里就地纠正而不是只警告：从"选 Caddy 终结"到"Master 该用哪种 tls.mode"之间
 # 的推理不该由用户完成。
-if [ "$TLS_TERMINATOR" = "caddy" ] && [ "$TLS_MODE" != "none" ]; then
+#
+# 但 `plain` 要排除在外：它表达的正是"我不要 https"，若在这里被悄悄改成 none 并
+# 装上一个 Caddy，结果与用户的意图相反，而且下面那条"纯 HTTP 不该配反代"的检查
+# 会因为 `PLAIN_HTTP` 还没被设上而永远不触发（踩过）。让 `plain` 原样走到
+# 归一化那一步，由那里的互斥判断明确报错。
+if [ "$TLS_TERMINATOR" = "caddy" ] && [ "$TLS_MODE" != "none" ] && [ "$TLS_MODE" != "plain" ]; then
 	printf '注意：Caddy 终结 TLS，因此 Master 侧改为 --tls-mode none。\n' >&2
 	printf '      你选的 %s 的证书参数不再使用。\n' "$TLS_MODE" >&2
 	TLS_MODE="none"
@@ -795,6 +1018,33 @@ if [ "$TLS_TERMINATOR" = "caddy" ] && [ "$TLS_MODE" != "none" ]; then
 	TLS_KEY=""
 	TLS_DOMAINS=""
 	TLS_IPS=""
+fi
+
+# `plain` 归一化 + 与反代的互斥判断。
+#
+# `plain`（问答第 5 项，纯 HTTP）落到配置文件里就是 tls.mode: none——"不要 https"
+# 在 Master 侧的表示本来就只有这一种。归一化放在**这里**（终结者确定之后、
+# 参数校验与所有下游分支之前）的理由：
+#   · 下游所有 `TLS_MODE = none` 的分支（地址默认值、证书段、收尾总结）自然生效，
+#     不需要每处再多认一个值；
+#   · `PLAIN_HTTP` 则为"这是刻意选的纯 HTTP，还是选 1 得到的 none"留下区分依据——
+#     两者在配置里长得一样，只有意图不同，而下面这条判断判的正是意图。
+#
+# 顺序上踩过两次：①最初放在参数校验之后，`--tls-mode plain --tls-terminator caddy`
+# 照样装上了 Caddy；②改到"即将执行"确认之后，用户要先按一次回车才看到错误。
+# 现在它在问答刚结束的位置，错误在任何确认与落盘之前就报出来。
+if [ "$TLS_MODE" = "plain" ]; then
+	PLAIN_HTTP="1"
+	TLS_MODE="none"
+fi
+
+# 纯 HTTP 却让 Caddy 去终结 TLS：配置形状自洽（两边都是 tls.mode=none），
+# 但与用户意图（"我不要 https"）相反——把反代装上、证书办下来，对外就是 https 了。
+# 所以按**意图**拦住，而不是按配置的形状放过。
+if [ -n "$PLAIN_HTTP" ] && [ "$TLS_TERMINATOR" = "caddy" ]; then
+	echo "错误：选了纯 HTTP（对外访问方式 5）就不该让 Caddy 终结 TLS（--tls-terminator caddy）。" >&2
+	echo "      要 HTTPS 请选对外访问方式 1/2/3/4；坚持纯 HTTP 请去掉 --tls-terminator。" >&2
+	exit 2
 fi
 
 # 每种 TLS 模式各自的必填项。这里只负责"问"，合法性由下面的校验段统一判。
@@ -1005,9 +1255,19 @@ if [ -n "$ASK" ]; then
 	printf '  %s：%s\n' "管理端监听" "$ADMIN_LISTEN" >&2
 	printf '  %s：%s\n' "公开地址" "${PUBLIC_ORIGIN:-（留空：按请求 Host 回填）}" >&2
 	printf '  %s：%s\n' "管理地址" "${ADMIN_ORIGIN:-（与公开站同一个域名）}" >&2
-	_tls_note="$TLS_MODE"
-	if [ "$TLS_MODE" = "acme" ]; then _tls_note="$TLS_MODE（challenge=$ACME_CHALLENGE）"; fi
-	printf '  %s：%s\n' "TLS" "$_tls_note（终结者=$TLS_TERMINATOR）" >&2
+	# 清单里的 TLS 一行要说清"对外是 http 还是 https、证书谁办"，
+	# 而不是把内部的 tls.mode 值原样抛给用户——`none` 这个词在两种场景下
+	# 对外含义完全相反（Caddy 终结时对外是 https），直接显示只会误导。
+	if [ "$TLS_MODE" = "plain" ]; then
+		_tls_note="纯 HTTP（不使用 HTTPS）"
+	elif [ "$TLS_MODE" = "none" ] && [ "$TLS_TERMINATOR" = "caddy" ]; then
+		_tls_note="HTTPS，证书由 Caddy 自动申请与续期"
+	else
+		_tls_note="$TLS_MODE"
+		if [ "$TLS_MODE" = "acme" ]; then _tls_note="$TLS_MODE（challenge=$ACME_CHALLENGE）"; fi
+		_tls_note="$_tls_note（终结者=$TLS_TERMINATOR）"
+	fi
+	printf '  %s：%s\n' "对外访问" "$_tls_note" >&2
 	if [ "$TLS_TERMINATOR" = "caddy" ]; then
 		printf '  %s：%s\n' "反代" "安装 Caddy，反代 ${PROXY_DOMAINS:-$PUBLIC_ORIGIN} → $PUBLIC_LISTEN" >&2
 	fi
@@ -1031,6 +1291,7 @@ fi
 # 配置文件是**严格解析**的（LoadMaster 用 KnownFields），写错键名会让 Master
 # 启动即失败；但"值合法、语义不成立"（比如 acme 却没给任何域名/IP）解析得过，
 # 却要等到启动后申请证书才暴露。所以这里把每种模式的前置条件前置校验。
+# （`plain` 已在上游归一化成 `none`，这里不再需要认它。）
 case "$TLS_MODE" in
 none | files | selfsigned | acme) : ;;
 *)
@@ -1273,19 +1534,18 @@ render_config() {
 #   · 单文件静态二进制，安装不牵动发行版的包管理器。
 # 代价是引入一个第三方组件：所以它**只在用户选了 caddy 终结时**才装上，
 # 且装之前会明确告诉用户"接下来要装什么"。
-CADDY_DIR="${PROBE_CADDY_DIR:-/etc/caddy}"
-CADDYFILE="$CADDY_DIR/Caddyfile"
-
-# caddy_proxy_target：反代指向哪儿。
+# CADDY_DIR / CADDYFILE / CADDY_MARK 定义在文件顶部的变量区（卸载路径也要用）。
+# proxy_target [监听地址]：反代指向哪儿。不给参数时用 PUBLIC_LISTEN（兼容旧调用）。
 # 必须是 Caddy 能连到的**目的地址**，而 0.0.0.0/[::] 是"监听所有网卡"的写法——
 # 不是个能连的地址。Linux 上连 0.0.0.0 恰好常被当成 localhost，若 Caddy 跑在
 # 容器里或另一台机器上就直接失败，而失败信息完全看不出原因。
 proxy_target() {
-	case "$PUBLIC_LISTEN" in
-	0.0.0.0:*) printf '127.0.0.1:%s' "${PUBLIC_LISTEN#0.0.0.0:}" ;;
-	"[::]:"*) printf '127.0.0.1:%s' "${PUBLIC_LISTEN#\[::\]:}" ;;
+	_pt_addr="${1:-$PUBLIC_LISTEN}"
+	case "$_pt_addr" in
+	0.0.0.0:*) printf '127.0.0.1:%s' "${_pt_addr#0.0.0.0:}" ;;
+	"[::]:"*) printf '127.0.0.1:%s' "${_pt_addr#\[::\]:}" ;;
 	":::" | "[::]") printf '127.0.0.1' ;;
-	*) printf '%s' "$PUBLIC_LISTEN" ;;
+	*) printf '%s' "$_pt_addr" ;;
 	esac
 }
 
@@ -1311,10 +1571,23 @@ render_caddyfile() {
 	if [ -n "$_adm" ]; then
 		_adm="$(printf '%s' "$_adm" | sed -e 's|^[a-zA-Z][a-zA-Z0-9+.-]*://||' -e 's|/.*$||' -e 's|:[0-9]*$||')"
 	fi
+	# 管理端是否在**另一个监听地址**上——这决定了要不要多写一条反代规则。
+	#
+	# 用户实测报过："访问 https://域名/ 一切正常，但 https://域名/admin/ 提示
+	# 404 page not found"。原因就在这里：默认配置是公开站 0.0.0.0:8080、
+	# 管理端 127.0.0.1:8081（两个不同地址），而 Caddy 原来把所有请求都转给
+	# 8080——8080 上的路由树里根本没有 /admin/，于是 404。
+	# "管理端只监听回环"这个安全默认没错，错在反代没有把后台那几条路径分流过去。
+	# 判据用 proxy_target 的产物而不是原始字符串：0.0.0.0:8080 与 127.0.0.1:8080
+	# 指的是同一个进程，直接比字符串会把它们当成两个。
+	_adm_target="$(proxy_target "$ADMIN_LISTEN")"
+	_pub_target="$(proxy_target "$PUBLIC_LISTEN")"
+	_need_split_admin=""
+	if [ "$_adm_target" != "$_pub_target" ]; then _need_split_admin="1"; fi
 
 	echo "# 由 scripts/deploy-master.sh 生成"
 	echo "# Caddy 负责 https（证书自动申请与续期）并把请求反代给 Master。"
-	echo "# Master 自己只监听 $PUBLIC_LISTEN（明文），证书与 443 都由 Caddy 管。"
+	echo "# 公开站 $PUBLIC_LISTEN、管理端 $ADMIN_LISTEN（都是明文，证书与 443 由 Caddy 管）。"
 	echo
 	if [ -n "$_adm" ] && [ "$_adm" != "$_pub" ]; then
 		# 分离形态。管理域名的 /admin/ 由它自己兜；公开域名**显式拒绝** /admin/，
@@ -1323,17 +1596,50 @@ render_caddyfile() {
 		echo "	encode gzip"
 		echo "	@admin path /admin /admin/*"
 		echo "	respond @admin 404"
-		echo "	reverse_proxy $(proxy_target)"
+		echo "	reverse_proxy $_pub_target"
 		echo "}"
 		echo
 		echo "$_adm {"
 		echo "	encode gzip"
-		echo "	reverse_proxy $(proxy_target)"
+		if [ -n "$_need_split_admin" ]; then
+			# 管理域名上，后台与它的 API 转给管理端监听，其余（公开看板本身）
+			# 仍走公开站——同站形态下这两部分本来就住在一个域名下。
+			echo "	@adminui path /admin /admin/*"
+			echo "	@adminapi path /api/admin/*"
+			echo "	handle @adminui {"
+			echo "		reverse_proxy $_adm_target"
+			echo "	}"
+			echo "	handle @adminapi {"
+			echo "		reverse_proxy $_adm_target"
+			echo "	}"
+			echo "	handle {"
+			echo "		reverse_proxy $_pub_target"
+			echo "	}"
+		else
+			echo "	reverse_proxy $_pub_target"
+		fi
 		echo "}"
 	else
 		echo "$_pub {"
 		echo "	encode gzip"
-		echo "	reverse_proxy $(proxy_target)"
+		if [ -n "$_need_split_admin" ]; then
+			# 同站形态 + 管理端独立监听：一个域名，但后台那几条路径要分流。
+			# 顺序要紧：Caddy 按 handle 出现的先后匹配，先给 /admin/、/api/admin/
+			# 两个更具体的前缀，剩下的才落到公开站。
+			echo "	@adminui path /admin /admin/*"
+			echo "	@adminapi path /api/admin/*"
+			echo "	handle @adminui {"
+			echo "		reverse_proxy $_adm_target"
+			echo "	}"
+			echo "	handle @adminapi {"
+			echo "		reverse_proxy $_adm_target"
+			echo "	}"
+			echo "	handle {"
+			echo "		reverse_proxy $_pub_target"
+			echo "	}"
+		else
+			echo "	reverse_proxy $_pub_target"
+		fi
 		echo "}"
 	fi
 }
@@ -1638,9 +1944,11 @@ fi
 
 echo "==> 4/7 初始化管理员"
 if [ -z "$ADMIN_PASSWORD" ]; then
+	# 与 ask_secret 同一个道理：这里也**不用** read -e（readline 会重新打开回显），
+	# 但提示仍然要打在光标所在处、读完后补一个换行，否则下一条输出会接在这一行后面。
 	printf '管理员 %s 的口令（不回显）：' "$ADMIN_USER" >&2
 	stty -echo 2>/dev/null || true
-	read -r ADMIN_PASSWORD
+	IFS= read -r ADMIN_PASSWORD || ADMIN_PASSWORD=""
 	stty echo 2>/dev/null || true
 	printf '\n' >&2
 fi
@@ -1796,7 +2104,7 @@ if [ "$TLS_TERMINATOR" = "caddy" ]; then
 		cp -f "$CADDYFILE" "$CADDYFILE.bak" 2>/dev/null || true
 		if [ -n "$_caddy_dom" ] && grep -Eq "^[[:space:]]*[^#{]" "$CADDYFILE" 2>/dev/null; then
 			{
-				printf '\n# ---- 以下由 scripts/deploy-master.sh 追加 ----\n'
+				printf '\n%s\n' "$CADDY_MARK"
 				render_caddyfile
 			} >>"$CADDYFILE"
 			echo "    $CADDYFILE 里没有 $_caddy_dom 的站点块 → 已追加（原内容备份为 $CADDYFILE.bak）"

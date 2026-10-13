@@ -105,11 +105,37 @@ err() { printf '错误：%s\n' "$*" >&2; }
 # download <URL>：curl 或 wget 二选一，把内容写到 stdout。
 # 失败时不打印 HTML 错误页——那会让后面的 sha256 校验报出"被篡改"这种
 # 完全指错方向的结论（真原因常常只是 404）。
+#
+# **缓存规避**：用户实测撞过一次很难查的故障——他的机器上取到的
+# `scripts/deploy-master.sh` 是**旧版**，于是脚本里已经修好的探测逻辑（写配置键前
+# 先问二进制认不认识）根本没生效，安装反复失败在同一个地方；而仓库里的文件、
+# CI、以及我们这边的核对全部显示"已经修好了"。
+#
+# 原因：raw.githubusercontent.com 前面有一层 CDN，`main` 这种**可变引用**会被它
+# 缓存。文件名不变、内容变了，CDN 仍可能把旧内容发出来（GitHub 侧刷新有延迟）。
+# 两个办法一起用，缺一都可能不够：
+#   · 请求头 no-cache / Pragma 让 CDN 与中间代理回源校验；
+#   · URL 上带一个每次都不同的查询串——CDN 的缓存键含查询串，于是必然 miss。
+# 查询串对 raw 服务是**无害**的（它按路径取文件，忽略查询），所以不必担心取不到。
+# 取回后再用 check_script_freshness 核对指纹并提示，见下面。
 download() {
+	_url="$1"
+	_bust="xbp=$(date +%s 2>/dev/null || echo 0)$$"
+	_url_sep='?'
+	case "$_url" in
+	*\?*) _url_sep='&' ;;
+	esac
 	if command -v curl >/dev/null 2>&1; then
-		curl -fsSL "$1"
+		curl -fsSL \
+			-H 'Cache-Control: no-cache' \
+			-H 'Pragma: no-cache' \
+			"$_url${_url_sep}${_bust}"
 	elif command -v wget >/dev/null 2>&1; then
-		wget -q --show-progress -O - "$1" 2>/dev/null || wget -q -O - "$1"
+		wget -q --no-cache --show-progress -O - \
+			--header='Cache-Control: no-cache' \
+			"$_url${_url_sep}${_bust}" 2>/dev/null || \
+			wget -q --no-cache -O - --header='Cache-Control: no-cache' \
+			"$_url${_url_sep}${_bust}"
 	else
 		err "找不到 curl 或 wget，无法下载。"
 		exit 1

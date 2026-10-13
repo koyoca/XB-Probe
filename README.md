@@ -63,9 +63,25 @@ sudo sh -c "$(curl -fsSL https://raw.githubusercontent.com/koyoca/XB-Probe/main/
 
 ### 两种方式共同的注意事项
 
-脚本会依次问你：**TLS 方式（`none` / `acme` / `selfsigned` / `files`）**、域名与邮箱、**公开站与管理端
+脚本会依次问你：**对外访问方式（HTTPS 由谁办证书 / 纯 HTTP）**、域名与邮箱、**公开站与管理端
 各监听哪个端口**、公开站与管理端地址、管理员账号与口令，**每一步直接回车取方括号里的默认值**。
 最后会把将要做的事列一遍让你确认。
+
+第一问的五个选项，说的是"**对外看起来是什么**"，不是"证书从哪来"：
+
+| 选项 | 对外 | 证书谁办 |
+|---|---|---|
+| `1) auto`（默认） | HTTPS | 脚本自动装好 Caddy，证书由 Caddy 申请与续期 |
+| `2) acme` | HTTPS | `probe-master` 自己申请（内置 ACME 客户端） |
+| `3) selfsigned` | HTTPS（浏览器会提示不受信任） | 自签，适合只能用纯 IP 访问的场景 |
+| `4) files` | HTTPS | 用你已有的证书与私钥 |
+| `5) plain` | 纯 HTTP | ——不涉及，脚本**不装任何反代** |
+
+> 为什么把 `none` 这个标签去掉了：早先这一问叫"TLS 方式"，选项 1 的标签是 `none`，
+> 说明里却写着"自动装好 Caddy 申请证书"——字面意思是"不要证书"，与说明正好相反。
+> 现在 HTTPS 与纯 HTTP 各占一项，不再自相矛盾。<br>
+> 想显式表达同一件事：`--tls-mode none --tls-terminator caddy` 等价于选项 1，
+> `--tls-mode plain` 等价于选项 5。
 
 也就是说：**不需要事后手改 `master.yaml`**。想先看看会写成什么样，用部署脚本自己的预览：
 
@@ -149,6 +165,12 @@ sudo sh -c "$(curl -fsSL https://raw.githubusercontent.com/koyoca/XB-Probe/main/
 
 此时 Master 侧自动改成 `tls.mode: none`（只监听回环），反代来源网段自动填进 `trusted_proxies`。
 `--tls-terminator master`（默认）表示仍由 Master 自己终结 TLS。
+
+> **后台走哪条路**：公开站与管理端默认是**两个监听地址**（`0.0.0.0:8080` 与 `127.0.0.1:8081`），
+> 所以 Caddyfile 里会把 `/admin/`、`/admin/*`、`/api/admin/*` **单独反代到管理端那个地址**，
+> 其余走公开站。少这一条的话，用 `https://<域名>/` 一切正常、而 `https://<域名>/admin/`
+> 会返回 `404 page not found`——因为请求全被转给了公开站，那棵树里没有后台路由。
+> 两个监听**相同**时（同源部署）则不会多这一层分流。
 
 脚本在收尾会**真的请求一次 `https://<域名>`** 来确认 443 与证书都就绪，而不是打印一句
 "稍后验证"——失败时给出可直接照做的诊断并回滚。这一点是刻意的：
@@ -349,6 +371,41 @@ Windows 同理：`powershell -File install-master.ps1 -Uninstall -KeepData`。
 - 每一项都**逐条回显**"已删除 / 残留 / 不存在"——卸载最常出问题的地方不是删错，而是
   "以为删了、其实因为只读挂载或权限没删掉"，那件事原本对用户完全不可见。
 - `--dry-run` 只列计划、不动系统；`--keep-data` 保留数据目录（里面有数据库与 `master.key`）。
+- 收尾还会把仍在监听的 `80/443/8080/8081` 列出来，**免去你自己 `netstat` 去核对**。
+
+### Caddy 也会被一起停掉
+
+选了「交给 Caddy 代管」的部署，卸载时会**停掉 `caddy.service`**（否则它继续占着 80/443，
+听起来卸干净了、实际没有），并处理它的配置。但这里最要紧的是**分清哪些是我们的**：
+
+- **服务单元**：只有 `caddy.service` 里带 `Server Probe` 标记（我们自己写的那份）才禁用并删除。
+  发行版包或 x-ui 自带的那份会被**停掉但不删**，并明确告诉你"它开机仍会自启，需要的话手工
+  `systemctl disable caddy`"——把别人的服务删掉比没卸载干净严重得多。
+- **Caddyfile**：有过追加就会留下 `Caddyfile.bak`，卸载时**从备份还原**；没有备份则按脚本写入的
+  标记行**精确摘除我们那一段**（同文件里别人的站点保留）；只有在"整份都是我们写的"情况下才删文件。
+- **二进制**：本脚本从不通过包管理器装 Caddy，所以 `/usr/bin/caddy` 之类的**一律不动**。
+
+## 脚本自身版本核对
+
+部署脚本启动时会打印自己的指纹与**关键修复标记**：
+
+```
+部署脚本    scripts/deploy-master.sh sha256=6f296988…
+```
+
+若这份脚本缺少某个修复标记（说明你拿到的是**旧版**，最常见的原因是 `raw.githubusercontent.com`
+前面的 CDN 缓存了 `main`），它会直接点出来并给出强制回源的取法：
+
+```
+  ⚠ 本脚本缺少以下修复标记： binary_supports_config_key
+    → 你拿到的是旧版脚本（很可能是 CDN 缓存）。请重跑安装命令，
+      或改用带随机串的地址强制回源：
+      curl -fsSL "https://raw.githubusercontent.com/koyoca/XB-Probe/main/install-master-bin.sh?t=…" -o imb.sh
+```
+
+入口脚本（`install-master-bin.sh`）在取部署脚本时已经带上了 `Cache-Control: no-cache` 与随机会话串，
+所以正常情况下不会再取到旧版——这一步是给"上游缓存行为不如预期"留的**可诊断**退路：
+不必去比哈希，看那行警告就知道。
 
 ## 从源码构建（开发）
 

@@ -329,15 +329,16 @@ if (-not $TlsMode) {
         Write-Host ""
         Write-Host "下面几个问题决定对外访问方式，直接回车取方括号里的默认值。" -ForegroundColor Cyan
         Write-Host ""
-        Write-Host "TLS 方式："
-        Write-Host "  1) none        由前置 Caddy/Nginx 终结 TLS（默认；也适合本机/内网调试）"
-        Write-Host "  2) acme        内置 ACME 客户端自动申请证书（需要一个已解析到本机的域名）"
-        Write-Host "  3) selfsigned  自签证书（用纯 IP 访问时，这是唯一可行的加密方式）"
-        Write-Host "  4) files       使用你已有的证书与私钥"
+        Write-Host "对外访问方式："
+        Write-Host "  1) none        不使用 https，只提供纯 HTTP（默认；也适合本机/内网调试）"
+        Write-Host "  2) acme        使用 https，证书由 Master 内置 ACME 客户端自动申请"
+        Write-Host "                 （需要一个已解析到本机的域名）"
+        Write-Host "  3) selfsigned  使用 https，但用自签证书（用纯 IP 访问时，这是唯一可行的方式）"
+        Write-Host "  4) files       使用 https，证书与私钥用你已有的文件"
         Write-Host ""
-        Write-Host "想让 Agent 直接用 https 连上来，就得在这里选一种；选 none 就必须由前置反代终结 TLS。" -ForegroundColor Gray
+        Write-Host "想让 Agent 直接用 https 连上来，就得在这里选一种；选 1 就只能由前置反代终结 TLS。" -ForegroundColor Gray
     }
-    $ans = Read-Answer "选择 TLS 方式（1/2/3/4）" "1"
+    $ans = Read-Answer "选择对外访问方式（1/2/3/4）" "1"
     switch ($ans) {
         "1" { $TlsMode = "none" }
         "2" { $TlsMode = "acme" }

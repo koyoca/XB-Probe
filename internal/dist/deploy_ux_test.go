@@ -346,3 +346,317 @@ func TestConfigKeysAreProbedBeforeWriting(t *testing.T) {
 			"  探测结果就全部不可信了。")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// 本轮（第六轮）的六条：都来自真机实测
+// ---------------------------------------------------------------------------
+
+// 用户原话："脚本这里的第一项选择 1 none，那么应该是没有 https，而是 http，
+// 为啥还要安装 caddy 申请证书进行反代"。
+//
+// 矛盾确实存在，而且是文案的错：那一问回答的是"证书从哪来"，选项 1 的标签却
+// 叫 `none`（字面意思是"不要证书"），说明里写着"自动装好 Caddy 申请证书"。
+// 修法是把这一问改成"对外访问方式"，HTTPS 与纯 HTTP 各占一个选项。
+//
+// 这条护栏钉两件事：
+//
+//	① 选项 1 的标签不许再是 `none`（它与同一段说明里的"申请证书"直接冲突）；
+//	② "纯 HTTP"必须是一个**独立可见**的选项，不能只是"不选 HTTPS 就没有"。
+func TestTLSPromptDoesNotCallTheHTTPSOptionNone(t *testing.T) {
+	body := readRepoFile(t, "../../scripts/deploy-master.sh")
+
+	// ① 找问答段里纯 HTTP 那一项。它就是"不要 https"的正式选项。
+	if !strings.Contains(body, "不使用 HTTPS，只提供纯 HTTP") {
+		t.Error("TLS 问答里没有「纯 HTTP」这一项的说明：\n" +
+			"  用户看到选项 1 叫 none、说明却写着「自动装 Caddy 申请证书」，得出\n" +
+			"  「那到底有没有 https」的疑问是完全合理的。HTTPS 与纯 HTTP 必须各占一项。")
+	}
+
+	// ② 该选项必须能被选到，而不是只有说明没有分支。
+	if !strings.Contains(body, `5 | plain | PLAIN | Plain | none | NONE | None) TLS_MODE="plain"`) {
+		t.Error("「纯 HTTP」这一项没有对应的解析分支：\n" +
+			"  说明里列了第 5 项却解析不到，用户选 5 会被当成一个未知值塞给 tls.mode。")
+	}
+
+	// ③ 反向钉：选项 1（auto，内部仍是 none）必须映射到 caddy 终结者。
+	// 只改文案、没改默认值链路的话，"选 1 = 自动办证书"这句说明就是假的。
+	if !strings.Contains(body, `1 | auto | AUTO | Auto) TLS_MODE="none"`) {
+		t.Error("选项 1（auto）没有映射到 tls.mode=none：\n" +
+			"  auto 的语义是「HTTPS 由脚本装的 Caddy 终结」，而 Caddy 终结时\n" +
+			"  Master 侧本来就该是 none——两条链路必须接上。")
+	}
+}
+
+// 用户原话："我访问 https://域名/ 一切正常，但是访问 https://域名/admin/ 提示
+// 404 page not found"。
+//
+// 根因：默认是公开站 0.0.0.0:8080、管理端 127.0.0.1:8081（两个不同监听），
+// 而 Caddy 把所有请求都转给了 8080——8080 上的路由树里没有 /admin/，于是 404。
+// "管理端只监听回环"这个安全默认没错，错在反代没有把后台那几条路径分流过去。
+//
+// 这条护栏钉：只要两个监听地址不是同一个，Caddyfile 里就必须有 /admin/ 与
+// /api/admin/ 的分流规则，且它们指向**管理端**那个地址。
+func TestCaddyfileSplitsAdminPathsToAdminListener(t *testing.T) {
+	body := readRepoFile(t, "../../scripts/deploy-master.sh")
+
+	// 分流规则必须存在。
+	for _, must := range []string{
+		"@adminui path /admin /admin/*",
+		"@adminapi path /api/admin/*",
+	} {
+		if !strings.Contains(body, must) {
+			t.Errorf("Caddyfile 里缺分流规则 %q：\n"+
+				"  公开站与管理端默认是两个监听地址，不按路径分流的话 /admin/ 永远\n"+
+				"  落在公开站那棵路由树上——它的 404 就是用户看到的现象。", must)
+		}
+	}
+
+	// 分流的**目标**必须是管理端，不是公开站。只写 handle 不写对的目标，
+	// 表面上"配了分流"，实际仍在同一个地址上打转。
+	if !strings.Contains(body, `_adm_target="$(proxy_target "$ADMIN_LISTEN")"`) {
+		t.Error("分流规则没有取管理端地址（_adm_target）：\n" +
+			"  handle @adminui { reverse_proxy <谁> } 里的 <谁> 必须是 ADMIN_LISTEN\n" +
+			"  的代理目标，否则分流等于没分。")
+	}
+
+	// proxy_target 必须**接受参数**。不带参数时它读 PUBLIC_LISTEN——那正是
+	// "管理端被转到公开站"这个 bug 的写法。取的是函数定义那一行，注释不算。
+	if !strings.Contains(body, `_pt_addr="${1:-$PUBLIC_LISTEN}"`) {
+		t.Error("proxy_target 不接受地址参数：\n" +
+			"  它只认 PUBLIC_LISTEN 时，管理端分流的目标地址无从表达，\n" +
+			"  /admin/ 只能被转到公开站（就是那个 404）。")
+	}
+
+	// 反向钉：两个地址**相同**时不该多写分流（那会让同源部署的 Caddyfile
+	// 凭空多一层 handle，且把请求绕一圈回到同一个进程）。
+	if !strings.Contains(body, `if [ "$_adm_target" != "$_pub_target" ]; then _need_split_admin="1"; fi`) {
+		t.Error("没有按「两个监听是否相同」来决定要不要分流：\n" +
+			"  无条件分流会在同源部署时把请求绕一圈；无条件不分流则会漏掉\n" +
+			"  默认配置（8080/8081 两个地址）——两种都要防。")
+	}
+}
+
+// 用户原话："卸载脚本时候，caddy 并没有停止监听和卸载"。
+//
+// 这是真缺陷：卸载路径原来只处理六件事（服务单元、二进制、配置、数据、
+// 系统用户、init 残留），**完全没有 Caddy**——Caddy 继续占着 80/443，
+// 用户以为卸载干净了。
+//
+// 但补这段时最容易犯的错是"把别人的 Caddy 也删了"：这台机器上很可能原本
+// 就有一个（发行版包、x-ui 之类）。所以护栏要同时钉住"要清理"和"只清理
+// 我们自己的"两个方向。
+func TestUninstallStopsAndCleansCaddy(t *testing.T) {
+	body := readRepoFile(t, "../../scripts/deploy-master.sh")
+
+	if !strings.Contains(body, "停止并清理 Caddy") {
+		t.Fatal("卸载路径里没有 Caddy 清理步骤：\n" +
+			"  这是用户实测报的缺陷——卸载后 Caddy 仍在监听 80/443。")
+	}
+
+	// ① 必须**停**服务。只删配置不停进程的话，Caddy 手里的监听不会释放。
+	//
+	// 判据要同时躲开两个陷阱（变异验证时都踩到过）：
+	//   · dry-run 分支里有一句 `echo "    [dry-run] systemctl stop caddy（若在跑）"`
+	//     也含这个子串，全文 Contains 会把它当实现；
+	//   · **回滚段**里也有一条真实的 `systemctl stop caddy`（安装失败时停掉
+	//     本次装的 Caddy），它是另一条路径的实现，不能替卸载那段作证。
+	// 所以：只在"卸载段"这个区间里找行首的真实命令。
+	// 区的边界用卸载独有的步骤标题——它们只在卸载路径里出现。
+	uniStart := strings.Index(body, "==> 1/8 停止并注销服务")
+	uniEnd := strings.Index(body, "==> 8/8 删除系统用户")
+	if uniStart < 0 || uniEnd < 0 || uniEnd <= uniStart {
+		t.Fatal("找不到卸载段的边界标记（判据与脚本脱节）")
+	}
+	uniBody := body[uniStart:uniEnd]
+
+	stopReal, stopDry := 0, 0
+	for _, line := range strings.Split(uniBody, "\n") {
+		trimmed := strings.TrimLeft(line, " \t")
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "systemctl stop caddy") {
+			stopReal++
+		}
+		if strings.HasPrefix(trimmed, "echo ") && strings.Contains(trimmed, "systemctl stop caddy") {
+			stopDry++
+		}
+	}
+	if stopReal < 1 {
+		t.Error("卸载段里没有真的停 caddy 服务：\n" +
+			"  进程还活着，80/443 就还占着；删掉配置文件只影响下次启动。\n" +
+			"  （回滚段里那条 stop 是安装失败的善后，不能替卸载作证。）")
+	}
+	if stopDry < 1 {
+		t.Error("卸载的 dry-run 没有列出「将停止 caddy」：\n" +
+			"  dry-run 的意义就是把会做的事列全，漏一项就少一次预演。")
+	}
+
+	// ② 只删**我们写的**单元。判据是 Description 里的 "Server Probe"——
+	// 官方包那份写的是 "Caddy web server"。用"文件存在"当判据会把别人的删掉。
+	if !strings.Contains(body, `grep -q 'Server Probe' "$CADDY_SVC"`) {
+		t.Error("没有用 Description 标记分辨 caddy.service 是不是本脚本写的：\n" +
+			"  只看「文件存在」会把用户自己的 Caddy 单元删掉——那比没卸载干净严重得多。")
+	}
+
+	// ③ Caddyfile 优先从 .bak 还原（我们追加过就会留 .bak），
+	// 这样用户自己加的站点不会被牵连。
+	if !strings.Contains(body, `mv -f "$CADDYFILE.bak" "$CADDYFILE"`) {
+		t.Error("Caddyfile 没有从 .bak 还原的路径：\n" +
+			"  本脚本往已有 Caddyfile **追加**过站点块，卸载就该用备份把它恢复原样；\n" +
+			"  直接删文件会把用户原来的站点一起带走。")
+	}
+
+	// ④ 没有 .bak 时要能按标记行**精确摘除**我们那一段（而不是整份删）。
+	if !strings.Contains(body, `awk -v mark="$CADDY_MARK"`) {
+		t.Error("没有按 CADDY_MARK 摘除追加段落的逻辑：\n" +
+			"  没有 .bak 说明我们没追加过、或者用户手工删了备份；这时只能靠标记行\n" +
+			"  定位我们写过的那一段，整份删文件会牵连别人的站点。")
+	}
+
+	// ⑤ 卸载只在**卸载路径**里清理 Caddy，不能顺手影响安装路径的判定。
+	// 这段用的是变量 CADDY_SVC（卸载局部），安装路径用的是 CADDY_UNIT——
+	// 两者别混，混了会让安装时"以为已经装过单元文件"。
+	if !strings.Contains(body, "CADDY_UNIT=/etc/systemd/system/caddy.service") {
+		t.Error("安装路径的 CADDY_UNIT 不见了：\n" +
+			"  卸载用 CADDY_SVC、安装用 CADDY_UNIT，两者刻意分开；\n" +
+			"  删掉安装侧那个会让「单元已存在就跳过」的保护失效。")
+	}
+}
+
+// 用户原话："按删除键时，本行的提示却消失了，例如
+// `选择 TLS 方式（1/2/3/4） [1]:` 输入 1 再删除 1，就变成空行"。
+//
+// 根因是 readline 不知道"这一行前面已经有别的东西"：它把自己管理的范围当作
+// 从光标处开始的整行，退格删到行首时重绘，把外面 printf 出来的提示一并擦掉。
+// 修法是把提示用 `read -e -p` 交给 readline，它就知道那是提示而非输入。
+//
+// 这条护栏钉：read_line 必须支持提示参数，且 ask/confirm 都要走这条路径。
+func TestPromptIsOwnedByReadlineSoBackspaceKeepsIt(t *testing.T) {
+	body := readRepoFile(t, "../../scripts/deploy-master.sh")
+
+	if !strings.Contains(body, `IFS= read -e -r -p "$2" "$1"`) {
+		t.Error("read_line 没有把提示交给 readline（-p）：\n" +
+			"  提示用 printf 另打一句时，退格删到行首会把提示一起擦掉——\n" +
+			"  这正是用户看到的「提示直接消失、变成空行」。")
+	}
+
+	// ask 必须走 read_line 的提示参数，而不是自己 printf。
+	if !strings.Contains(body, `read_line ASK_REPLY "$_prompt"`) {
+		t.Error("ask 没有把提示传给 read_line：\n" +
+			"  一 printf 一 read 的写法就是上面那个缺陷的成因。")
+	}
+
+	// confirm 与卸载确认同理。
+	if !strings.Contains(body, `read_line _ca "$1 [Y/n]: "`) {
+		t.Error("confirm 的提示没有交给 readline。")
+	}
+	if !strings.Contains(body, `read_line _uc "这会删除数据目录`) {
+		t.Error("卸载确认的提示没有交给 readline。")
+	}
+}
+
+// 用户原话："有时候交互式输入后，会出现过几秒才提示输入下一个，但是提前回车了，
+// 还有就是我并没有输入任何字符却出现无用的字符"。
+//
+// 他贴的证据里有一句 `https://mo.319082.xyzL，不带末尾斜杠）`——那个 L 不是他敲的，
+// 而是启动管道 `curl -fsSL … | sh` 里 curl 选项的残留字符落在了脚本的 stdin 上。
+// 下面几个 read 于是"凭空"读到一个字符，把一道题答歪，并且把后续问答错位。
+//
+// 这条护栏钉：问答开始前要清一次 stdin 残留，**且只在 stdin 不是 tty 时清**
+// （真 tty 上用户可能已经开始打字，清空会吃掉他的输入）。
+func TestStdinIsDrainedOnlyWhenNotATTY(t *testing.T) {
+	body := readRepoFile(t, "../../scripts/deploy-master.sh")
+
+	if !strings.Contains(body, `[ ! -t 0 ]`) {
+		t.Fatal("没有「只在非 tty 时才清 stdin」的判断：\n" +
+			"  无条件清空会吃掉用户已经开始敲的输入——那比残留字符更糟。")
+	}
+
+	// 清的动作要存在，且用 -t 0 探测（非阻塞），不能用会阻塞的读。
+	if !strings.Contains(body, `IFS= read -r -t 0 -n 1 _junk`) {
+		t.Error("没有用 `read -t 0` 非阻塞地清 stdin 残留：\n" +
+			"  残留字符来自 `curl … | sh` 的管道，不处理就会答歪题目。\n" +
+			"  用阻塞读会直接把脚本挂在那儿等人回车。")
+	}
+
+	// 反向钉：这个清理不能在**卸载**路径之外的地方乱吃输入。
+	// 它必须排在 ASK 判定之后（非交互时根本不需要清）。
+	iDrain := strings.Index(body, `IFS= read -r -t 0 -n 1 _junk`)
+	iAsk := strings.Index(body, "ASK=\"\"")
+	if iDrain < 0 || iAsk < 0 {
+		t.Fatal("找不到清 stdin 或 ASK 判定的位置（判据与脚本脱节）")
+	}
+	if iDrain < iAsk {
+		t.Error("清 stdin 排在了 ASK 判定之前：\n" +
+			"  非交互部署（CI、--yes）根本不需要清，也不该去碰 stdin。")
+	}
+}
+
+// 用户第二次撞同一个错（`field sync_obtain not found`）时，我核对发现**远端
+// 脚本已经是最新的**——他拿到的是 raw.githubusercontent.com 的 CDN 缓存。
+// 于是"仓库里修好了"与"用户跑的是旧版"同时成立，他看到的只有同一个错误反复出现。
+//
+// 这条护栏钉两件事：① 取脚本时必须做缓存规避；② 部署脚本要能自报身份，
+// 让"跑的是哪一版"从猜测变成一个可核对的事实。
+func TestScriptFetchBypassesCDNCache(t *testing.T) {
+	entry := readRepoFile(t, "../../install-master-bin.sh")
+
+	// ① 请求头 + 查询串，两个都要（只加头，有些中间代理照样命中缓存）。
+	//
+	// **两条分支各查各的**：curl 那支与 wget 那支都要带缓存规避。用全文
+	// Contains 查一个子串时，只改 curl 那支、wget 那支留着，护栏照样绿——
+	// 而用 wget 的机器正是复制到旧脚本的那一半（变异验证时踩到过）。
+	if !strings.Contains(entry, "curl -fsSL \\\n\t\t\t-H 'Cache-Control: no-cache'") {
+		t.Error("curl 分支没有发 Cache-Control: no-cache：\n" +
+			"  raw 前面有 CDN，`main` 这种可变引用会被缓存，用户会拿到旧脚本。")
+	}
+	if !strings.Contains(entry, "wget -q --no-cache") {
+		t.Error("wget 分支没有 --no-cache：\n" +
+			"  只用 wget 的机器（最小化容器很常见）会照旧拿到 CDN 缓存的旧脚本。")
+	}
+	// wget 那支有**两条调用**（带进度条优先、失败退回静默），两条都必须是
+	// --no-cache。只查一次 Contains 时，改掉其中一条另一条仍绿——那正是
+	// 变异验证里 H2 仍然绿的原因（护栏判据不够紧，不是实现有问题）。
+	wgetCalls, wgetNoCache := 0, 0
+	for _, line := range strings.Split(entry, "\n") {
+		trimmed := strings.TrimLeft(line, " \t")
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "wget ") {
+			wgetCalls++
+			if strings.Contains(trimmed, "--no-cache") {
+				wgetNoCache++
+			}
+		}
+	}
+	if wgetCalls == 0 {
+		t.Error("找不到 wget 调用（判据与脚本脱节）")
+	} else if wgetNoCache != wgetCalls {
+		t.Errorf("wget 有 %d 条调用，其中只有 %d 条带 --no-cache：\n"+
+			"  两条分支是「先带进度条、失败退回静默」，退化的那条同样会被 CDN 缓存骗到。",
+			wgetCalls, wgetNoCache)
+	}
+	if !strings.Contains(entry, "_bust=") || !strings.Contains(entry, "date +%s") {
+		t.Error("取脚本时 URL 上没有随机会话串：\n" +
+			"  CDN 的缓存键含查询串，带上它才必然回源。")
+	}
+
+	// ② 部署脚本要打印自己的指纹与关键修复标记。
+	body := readRepoFile(t, "../../scripts/deploy-master.sh")
+	if !strings.Contains(body, "script_self_check()") {
+		t.Fatal("部署脚本没有 script_self_check：\n" +
+			"  用户没有对照物时，「我跑的是哪一版」只能靠猜。")
+	}
+	if !strings.Contains(body, "本脚本缺少以下修复标记") {
+		t.Error("script_self_check 没有报「缺少哪些修复标记」：\n" +
+			"  只说「我是 sha256=…」而用户无从对照，等于没说；\n" +
+			"  直接报「这份脚本里没有 binary_supports_config_key」才是可执行的诊断。")
+	}
+	// 标记清单必须真的探脚本内容，而不是写死的常量。
+	if !strings.Contains(body, `for _mark in binary_supports_config_key Caddyfile_has_domain CADDY_MARK PLAIN_HTTP`) {
+		t.Error("修复标记清单不完整：\n" +
+			"  每一项都对应一个已修的真机缺陷，少一项就少一次「你拿到旧脚本」的提醒。")
+	}
+}
