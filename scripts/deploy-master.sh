@@ -196,6 +196,10 @@ RELEASE_ONLY=""
 UPGRADE_ONLY=""
 # 只重置管理员密码（不动二进制与配置）——问答题里的第 5 项。
 RESET_PASSWORD=""
+# 老布局迁移开关：检测到改名之前（probe-master 时代）的安装时，全量安装必须
+# 显式给这个开关才肯动手。不给的话装出来的是一套**空库**的新 Master——
+# 数据不会自动搬家，看起来就像"数据全丢了"。
+MIGRATE_LEGACY=""
 # 上面这几个"只做一件事"的开关与 UNINSTALL / RELEASE_ONLY 是同一类：**必须**在这里
 # 给出默认值。`set -eu` 下少一个就会在"判断它有没有被设置"的那一行直接 unbound
 # variable 退出——而那行恰好在问答题派发处，等于整个交互入口全废（本轮真实踩过）。
@@ -354,6 +358,13 @@ TLS：
                             都没给就交互输入两次。
                             与其它三种"只做一件事"的模式互斥；配 --dry-run 只回显计划。
 
+改名之前（probe-master 时代）装过的机器：
+  --migrate-legacy          只与"安装 / 升级 Master"搭配。检测到老布局时，脚本会
+                            停掉旧服务、把 /var/lib/probe-master 与 /etc/probe-master
+                            搬到新路径（目标已有内容**绝不覆盖**，可反复重跑），
+                            然后照常安装。不加它而检测到老布局时：安装与四个
+                            "只做一件事"的模式都会拒绝执行并打印手工迁移办法。
+
 给入口脚本用的两个（一般不需要手工敲）：
   --ask-mode                只问"做什么"（1 安装/升级、2 卸载、3 只更新发布文件、
                             4 只升级本体、5 重置管理员密码），把答案写到 stdout
@@ -400,6 +411,7 @@ while [ $# -gt 0 ]; do
 	--release-only) RELEASE_ONLY="1"; shift ;;
 	--upgrade-only) UPGRADE_ONLY="1"; shift ;;
 	--reset-password) RESET_PASSWORD="1"; shift ;;
+	--migrate-legacy) MIGRATE_LEGACY="1"; shift ;;
 	--ask-mode) ASK_MODE="1"; shift ;;
 	--mode) MODE_IN="${2:-}"; shift 2 ;;
 	--keep-data) KEEP_DATA="1"; shift ;;
@@ -1178,6 +1190,101 @@ if [ -z "$UNINSTALL" ] && [ -z "$RELEASE_ONLY" ] && [ -z "$UPGRADE_ONLY" ] &&
 	if [ -n "$UNINSTALL" ]; then
 		printf '已选择卸载。默认**连数据一起删**（数据目录里有数据库与 master.key）。\n' >&2
 		printf '想保留数据请在下一个问题里回答 n，或改用 --keep-data。\n' >&2
+	fi
+fi
+
+# ---------------------------------------------------------------------------
+# 0-1) 老布局检测：改名之前（probe-master 时代）装过的机器
+# ---------------------------------------------------------------------------
+#
+# 改名那一轮把服务单元、二进制、配置目录、数据目录全部从 probe-master 换成了
+# xb-probe-master。Agent 侧有 service.MigrateLegacy 兜底，Master 侧没有——
+# 而且不该有静默迁移：搬迁牵涉数据库与 master.key（丢了它加密凭证就解不开），
+# 塞进"只做一件事"的模式里顺手做，违反模式本身的承诺。
+# 但完全不认老布局的下场是用户实测撞到的那种：新单元不存在 → "Unit not found"
+# → 回滚也失败 → 留下一个看不懂的现场。所以这里只做两件事：
+#   · 四个"只做一件事"的模式：新布局没装时拒绝执行并给出迁移办法；
+#   · 全量安装：老单元仍在运行/自启时，要么显式给 --migrate-legacy（脚本停旧、
+#     搬数据、目标已有内容绝不覆盖），要么拒绝。
+# 位置在交互菜单**之后**：菜单才把 2/3/4/5 真正置进标志位，放早了
+# "菜单选 4"这条会绕过检测（显式 --upgrade-only 与 --mode 4 反而拦得住）。
+LEGACY_UNIT=/etc/systemd/system/probe-master.service
+LEGACY_BIN=/usr/local/bin/probe-master
+NEW_MASTER_UNIT=/etc/systemd/system/xb-probe-master.service
+legacy_master_present() {
+	[ -e "$LEGACY_UNIT" ] || [ -x "$LEGACY_BIN" ]
+}
+# 在运行或仍自启＝搬迁没做过。我们自己的迁移会 stop+disable 旧单元，
+# 所以"既不运行也不自启"就视为已经搬过（或用户手工处理过），不再拦。
+legacy_master_live() {
+	systemctl is-active --quiet probe-master.service 2>/dev/null ||
+		systemctl is-enabled --quiet probe-master.service 2>/dev/null
+}
+new_master_installed() {
+	[ -e "$NEW_MASTER_UNIT" ]
+}
+legacy_master_recipe() {
+	echo "  这台机器装的是改名之前的老布局（probe-master 时代）。改名后" >&2
+	echo "  /etc/probe-master → /etc/xb-probe-master、/var/lib/probe-master →" >&2
+	echo "  /var/lib/xb-probe-master，数据**不会**自动搬家——直接装新布局会得到" >&2
+	echo "  一套空库，看起来就像数据全丢了。两条路任选其一：" >&2
+	echo "  A) 让脚本搬：重跑本次命令并加 --migrate-legacy（停旧服务、搬数据与" >&2
+	echo "     配置、目标已有内容绝不覆盖，搬完自动继续安装）。" >&2
+	echo "  B) 自己搬：先 systemctl stop probe-master（库是 SQLite，运行中拷贝" >&2
+	echo "     会撕坏），然后" >&2
+	echo "       mkdir -p /var/lib/xb-probe-master /etc/xb-probe-master" >&2
+	echo "       cp -a /var/lib/probe-master/. /var/lib/xb-probe-master/" >&2
+	echo "       cp -a /etc/probe-master/. /etc/xb-probe-master/" >&2
+	echo "     （master.key 与 .answers 都在 /etc/probe-master 里：前者丢了加密" >&2
+	echo "     凭证就解不开；后者带来全部问答答案，安装时不会再问一遍），再" >&2
+	echo "     systemctl disable probe-master，最后重跑本次命令。" >&2
+	if [ -x "$BIN_DIR/xb-probe-master" ]; then
+		echo "  另：$BIN_DIR/xb-probe-master 是此前失败的升级留下的孤儿文件，" >&2
+		echo "  连同 $BIN_DIR/xb-probe-master.bak 一起删掉即可，不影响迁移。" >&2
+	fi
+}
+# 四个单次模式：新布局没装就没有可操作的对象。判据用**单元文件**而不是二进制——
+# 二进制可能只是失败升级留下的孤儿（那时 systemctl 一样起不来，报错只会更晚）。
+if [ -n "$UNINSTALL" ] || [ -n "$RELEASE_ONLY" ] || [ -n "$UPGRADE_ONLY" ] ||
+	[ -n "$RESET_PASSWORD" ]; then
+	if ! new_master_installed; then
+		echo "错误：这台机器上没有新布局（xb-probe-master.service）的安装，" >&2
+		echo "  \"只做一件事\"的模式没有可操作的对象。" >&2
+		if legacy_master_present; then
+			legacy_master_recipe
+		else
+			echo "  先跑一遍\"安装 / 升级 Master\"（菜单 1）装出这套布局。" >&2
+		fi
+		exit 2
+	fi
+fi
+# 全量安装：老单元还活着就装新布局＝两套服务抢端口，而新库是空的。
+# 放在单次模式检测之后：四个单次模式与迁移无关，先按各自的道理由去拒绝。
+if [ -z "$UNINSTALL" ] && [ -z "$RELEASE_ONLY" ] && [ -z "$UPGRADE_ONLY" ] &&
+	[ -z "$RESET_PASSWORD" ] && legacy_master_present && legacy_master_live; then
+	if [ -n "$MIGRATE_LEGACY" ]; then
+		echo "==> 检测到老布局（probe-master 时代），按 --migrate-legacy 搬迁"
+		systemctl stop probe-master.service 2>/dev/null || true
+		# 目标"已有内容"就绝不动：搬迁必须可以反复重跑（幂等）。第二次跑时
+		# 数据已经搬进去了，再 cp 一遍等于用旧库盖掉新库。
+		if [ -d /var/lib/probe-master ] &&
+			[ -z "$(ls -A "$DATA" 2>/dev/null)" ]; then
+			mkdir -p "$DATA"
+			cp -a /var/lib/probe-master/. "$DATA"/
+			echo "    已搬数据：/var/lib/probe-master → $DATA"
+		fi
+		if [ -d /etc/probe-master ] &&
+			[ -z "$(ls -A "$DIR" 2>/dev/null)" ]; then
+			mkdir -p "$DIR"
+			cp -a /etc/probe-master/. "$DIR"/
+			echo "    已搬配置：/etc/probe-master → $DIR（含 master.key 与 .answers）"
+		fi
+		systemctl disable probe-master.service 2>/dev/null || true
+		echo "    旧单元已停用（unit 文件保留，供回滚参考；确认无误后可删除）"
+	else
+		echo "错误：检测到改名之前的老布局（probe-master.service 仍在运行或自启）。" >&2
+		legacy_master_recipe
+		exit 2
 	fi
 fi
 

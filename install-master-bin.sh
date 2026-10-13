@@ -249,6 +249,7 @@ while [ $# -gt 0 ]; do
 	--release-only) RELEASE_ONLY="1"; PASSTHRU="$PASSTHRU --release-only"; shift ;;
 	--upgrade-only) UPGRADE_ONLY="1"; PASSTHRU="$PASSTHRU --upgrade-only"; shift ;;
 	--reset-password) RESET_PASSWORD="1"; PASSTHRU="$PASSTHRU --reset-password"; shift ;;
+	--migrate-legacy) PASSTHRU="$PASSTHRU --migrate-legacy"; shift ;;
 	--keep-data) KEEP_DATA="1"; PASSTHRU="$PASSTHRU --keep-data"; shift ;;
 	-h | --help) usage; exit 0 ;;
 	--)

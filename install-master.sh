@@ -101,6 +101,9 @@ RELEASE_ONLY=""
 UPGRADE_ONLY=""
 # 只重置管理员密码：不需要源码、不需要 Go，所以和卸载一样走"编译之前"的早退通路。
 RESET_PASSWORD=""
+# 改名前老布局（probe-master 时代）的迁移开关：原样转给部署脚本，由它停旧服务、
+# 搬数据与配置（目标已有内容绝不覆盖）。不加速改装出来的是一套空库。
+MIGRATE_LEGACY=""
 KEEP_DATA=""
 
 # go.mod 声明的最低 Go 版本。低于它构建会直接失败，所以先在依赖检查时拦下，
@@ -193,6 +196,7 @@ while [ $# -gt 0 ]; do
 	--release-only) RELEASE_ONLY="1"; shift ;;
 	--upgrade-only) UPGRADE_ONLY="1"; shift ;;
 	--reset-password) RESET_PASSWORD="1"; shift ;;
+	--migrate-legacy) MIGRATE_LEGACY="1"; shift ;;
 	--keep-data) KEEP_DATA="1"; shift ;;
 	-h | --help) usage; exit 0 ;;
 	*) err "未知参数：$1"; usage; exit 2 ;;
@@ -905,9 +909,11 @@ if [ -n "$UPGRADE_ONLY" ]; then
 	[ -n "$DIR" ] && set -- "$@" --dir "$DIR"
 	[ -n "$DATA" ] && set -- "$@" --data "$DATA"
 	[ -n "$BIN_DIR" ] && set -- "$@" --bin-dir "$BIN_DIR"
+	[ -n "$MIGRATE_LEGACY" ] && set -- "$@" --migrate-legacy
 else
 set -- --bin "$SRC/bin/xb-probe-master"
 [ -n "$__ASKED_MODE" ] && set -- "$@" --mode "$__ASKED_MODE"
+[ -n "$MIGRATE_LEGACY" ] && set -- "$@" --migrate-legacy
 [ -n "$PUBLIC_ORIGIN" ] && set -- "$@" --public-origin "$PUBLIC_ORIGIN"
 [ -n "$ADMIN_ORIGIN" ] && set -- "$@" --admin-origin "$ADMIN_ORIGIN"
 [ -n "$ADMIN_USER" ] && set -- "$@" --admin-user "$ADMIN_USER"

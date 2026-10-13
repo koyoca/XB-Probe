@@ -54,7 +54,7 @@ func modeMapping(t *testing.T, body string) string {
 // "初始化被挪到使用点之后"时照样绿，而那正是同一种失效。
 func TestOneShotFlagsHaveDefaultsBeforeUse(t *testing.T) {
 	body := readRepoFile(t, "../../scripts/deploy-master.sh")
-	for _, v := range []string{"UNINSTALL", "RELEASE_ONLY", "UPGRADE_ONLY", "RESET_PASSWORD"} {
+	for _, v := range []string{"UNINSTALL", "RELEASE_ONLY", "UPGRADE_ONLY", "RESET_PASSWORD", "MIGRATE_LEGACY"} {
 		init := strings.Index(body, v+`=""`)
 		if init < 0 {
 			t.Errorf("%s 没有拿到默认值（%s=\"\"）：\n"+
@@ -380,5 +380,53 @@ func TestEntryScriptsAskBeforeCompiling(t *testing.T) {
 		t.Error("install-master-bin.sh 把「只升级本体」也放进了早退通路：\n" +
 			"  那条路根本不下载二进制，而升级本体要的就是它——必然以\n" +
 			"  「只升级本体需要指定新二进制」收场。")
+	}
+}
+
+// TestLegacyLayoutIsRefusedNotSilentlyBroken 守改名前老布局的机器。
+//
+// 起因是用户实测：v0.1.2 时代装的老布局（probe-master.service）跑新的
+// --upgrade-only，脚本按新布局写死路径 →「Unit xb-probe-master.service not
+// found」→ 回滚也失败。改名那一轮只给 Agent 配了 MigrateLegacy，Master 侧
+// 对老布局没有任何感知。修法是**拒绝并给出迁移办法**（--migrate-legacy 让
+// 脚本搬，目标已有内容绝不覆盖），而不是静默搬家——"只做一件事"的模式
+// 不该顺手改半个系统。
+//
+// 判据有三层：
+//  1. 开关与关键件都在（少一个就是功能没了）；
+//  2. 拦截在交互菜单**之后**——菜单选 4/5 的答案要到菜单那里才置进标志位，
+//     放早了"菜单选 4"这条路会绕过检测（显式 --upgrade-only 反而拦得住，
+//     是最阴的一种假绿）；
+//  3. 拦截在四个单次模式块**之前**——放晚了老布局机器会先走进 0c/0d/0e，
+//     报错回到 systemd 那句 Unit not found。
+func TestLegacyLayoutIsRefusedNotSilentlyBroken(t *testing.T) {
+	body := readRepoFile(t, "../../scripts/deploy-master.sh")
+	for _, m := range []string{
+		`--migrate-legacy) MIGRATE_LEGACY="1"; shift ;;`,
+		`legacy_master_present()`,
+		`legacy_master_recipe()`,
+		`systemctl stop probe-master.service`,
+		`已搬数据：/var/lib/probe-master → $DATA`,
+		`systemctl disable probe-master.service`,
+	} {
+		if !strings.Contains(body, m) {
+			t.Errorf("老布局拦截缺关键件：%s", m)
+		}
+	}
+	iMenu := strings.Index(body, `case "$(ask_mode_menu)" in`)
+	iGuard := strings.Index(body, `0-1) 老布局检测`)
+	iOneShot := strings.Index(body, "\nif [ -n \"$RELEASE_ONLY\" ]; then\n")
+	if iMenu < 0 || iGuard < 0 || iOneShot < 0 {
+		t.Fatal("判据锚点丢了——脚本结构与本测试的假设脱节，先改锚点再改实现。")
+	}
+	if iGuard < iMenu {
+		t.Errorf("老布局拦截(%d)排在了交互菜单(%d)之前：\n"+
+			"  菜单选 4/5 的答案要到菜单那里才置进标志位，放早了拦不住这条路。",
+			iGuard, iMenu)
+	}
+	if iGuard > iOneShot {
+		t.Errorf("老布局拦截(%d)排在了单次模式块(%d)之后：\n"+
+			"  那样老布局机器会先走进 0c/0d/0e，报错回到 systemd 的 Unit not found。",
+			iGuard, iOneShot)
 	}
 }

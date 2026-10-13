@@ -256,3 +256,35 @@ func TestWindowsScriptsMirrorTheShellOnes(t *testing.T) {
 		}
 	}
 }
+
+// TestWindowsLegacyLayoutGuard 追 Windows 侧同一件事：改名之前（probe-master
+// 时代）装过的机器，跑新脚本会按新路径写死 → 摸不到对象。shell 侧的对应判据
+// 在 TestLegacyLayoutIsRefusedNotSilentlyBroken。Windows 不做自动搬迁（用得少、
+// 牵涉 master.key），但必须同样**拦下来给能照着做的手工步骤**，且拦在
+// 交互问答之前。
+func TestWindowsLegacyLayoutGuard(t *testing.T) {
+	ps := readRepoFile(t, "../../scripts/deploy-master.ps1")
+	for _, m := range []string{
+		`Get-ScheduledTask -TaskName "probe-master"`,
+		`C:/ProgramData/probe-master`,
+		`Unregister-ScheduledTask -TaskName probe-master`,
+	} {
+		if !strings.Contains(ps, m) {
+			t.Errorf("Windows 侧老布局拦截缺关键件：%s", m)
+		}
+	}
+	iMutex := strings.Index(ps, `$oneShot.Count -gt 1`)
+	iGuard := strings.Index(ps, `0.1c-2) 老布局检测`)
+	iRel := strings.Index(ps, `# 0.2b) 只更新 Agent 发布文件`)
+	if iMutex < 0 || iGuard < 0 || iRel < 0 {
+		t.Fatal("判据锚点丢了——ps1 结构与本测试的假设脱节，先改锚点再改实现。")
+	}
+	if iGuard < iMutex {
+		t.Errorf("Windows 老布局拦截(%d)排在了互斥(%d)之前：\n"+
+			"  互斥是更基本的参数合法性检查，应该先拦自相矛盾，再拦老布局。", iGuard, iMutex)
+	}
+	if iGuard > iRel {
+		t.Errorf("Windows 老布局拦截(%d)排在了模式块(%d)之后：\n"+
+			"  那样老布局机器会先走进 0.2b/0.3/0.4，摸不到对象才报错。", iGuard, iRel)
+	}
+}
