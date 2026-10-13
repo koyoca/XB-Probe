@@ -387,6 +387,44 @@ EOF
 fi
 
 # ---------------------------------------------------------------------------
+# 0b) 先问"做什么"（同样排在依赖检查与编译之前）
+# ---------------------------------------------------------------------------
+#
+# 与免编译入口同一个道理，这里省的更多：这个脚本的代价是**装一套 Go 工具链 +
+# 克隆仓库 + 编译几分钟**。老流程是先把这些都做完、到 deploy-master.sh 里才问
+# "做什么"——于是选了"卸载"或"只更新 Agent 发布文件"的人白等一次完整编译，
+# 而这两件事**根本不需要源码，也不需要 Go**。
+#
+# 菜单只有一份（在 scripts/deploy-master.sh 的 0a-3），这里用 --ask-mode 把答案
+# 取回来。取回来之后：
+#   · 2 / 3 → 折成 --uninstall / --release-only，交给下面那段早退通路（它本来
+#     就是为这两个模式准备的，不走源码与 Go）；
+#   · 1 → 记下 __ASKED_MODE，最后交给部署脚本时带上 --mode 1，免得用户被问第二遍。
+#
+# 问不到就**什么都不做**，退回原来的行为（由 deploy-master.sh 稍后再问）：网络不通、
+# --repo 不是 GitHub 地址、--ref 指到了一个还没有 --ask-mode 的旧标签——这些都不该
+# 让安装直接失败，因为"多问一次"只是体验差一点，而"因此装不上"是真损失。
+__ASKED_MODE=""
+if [ -z "$UNINSTALL" ] && [ -z "$RELEASE_ONLY" ] &&
+	[ -z "$NON_INTERACTIVE" ] && [ -z "$DRY_RUN" ] && [ -t 0 ]; then
+	_base="$(raw_base "$REPO" "$REF")"
+	if [ -n "$_base" ]; then
+		_tmpq="$(mktemp -d 2>/dev/null || echo "/tmp/xb-askmode.$$")"
+		mkdir -p "$_tmpq"
+		if download "$_base/scripts/deploy-master.sh" >"$_tmpq/deploy-master.sh" 2>/dev/null &&
+			[ -s "$_tmpq/deploy-master.sh" ]; then
+			# 菜单与提示走它的 stderr（直接显示给用户），答案只可能是 1/2/3。
+			case "$(sh "$_tmpq/deploy-master.sh" --ask-mode 2>/dev/null || true)" in
+			1) __ASKED_MODE="1" ;;
+			2) UNINSTALL="1" ;;
+			3) RELEASE_ONLY="1" ;;
+			esac
+		fi
+		rm -rf "$_tmpq" 2>/dev/null || true
+	fi
+fi
+
+# ---------------------------------------------------------------------------
 # 卸载 / 只更新 Agent 发布文件（排在依赖检查与编译之前）
 # ---------------------------------------------------------------------------
 # 这两个模式都不需要源码、不需要 Go，所以必须排在
@@ -416,7 +454,9 @@ if [ -n "$UNINSTALL" ] || [ -n "$RELEASE_ONLY" ]; then
 		set -- --uninstall
 		[ -n "$KEEP_DATA" ] && set -- "$@" --keep-data
 	else
-		_early_what="只更新 Agent 发布文件"
+		# 措辞要能被套进下面那两句（"取部署脚本…以执行X" / "开始X…"），
+		# 所以不要再带"只"字：那会读成"开始只更新…"，像是漏了一个词。
+		_early_what="更新 Agent 发布文件"
 		set -- --release-only
 	fi
 	[ -n "$DRY_RUN" ] && set -- "$@" --dry-run
@@ -427,7 +467,9 @@ if [ -n "$UNINSTALL" ] || [ -n "$RELEASE_ONLY" ]; then
 	_tmpd="$(mktemp -d 2>/dev/null || echo "/tmp/xb-uninst.$$")"
 	mkdir -p "$_tmpd"
 	# shellcheck disable=SC2064
-	trap "rm -rf '$_tmpd'" EXIT HUP INT TERM
+	# `|| true`：EXIT trap 的返回值会成为整个脚本的退出码，清理失败不该把一次
+	# 成功的卸载/更新变成"失败"（详见 install-master-bin.sh 里同一处的说明）。
+	trap "rm -rf '$_tmpd' 2>/dev/null || true" EXIT HUP INT TERM
 	if ! download "$_base/scripts/deploy-master.sh" >"$_tmpd/deploy-master.sh" 2>/dev/null ||
 		[ ! -s "$_tmpd/deploy-master.sh" ]; then
 		err "取不到 $_base/scripts/deploy-master.sh（网络？--ref 写错了？）"
@@ -773,6 +815,11 @@ say "已生成 $SRC/bin/probe-master"
 # ---------------------------------------------------------------------------
 
 set -- --bin "$SRC/bin/probe-master"
+# 0b 已经问过"做什么"且答案是 1，把答案带下去，免得用户被问第二遍。
+# **只在真的问出来过的时候才传**：--mode 是新加的，老版本的部署脚本对未知参数
+# 是硬失败（exit 2）。而"上面那次 --ask-mode 成功了"正好等价于"这个脚本认识
+# --mode"（同一个文件），所以这个条件本身就把兼容性判断做完了。
+[ -n "$__ASKED_MODE" ] && set -- "$@" --mode 1
 [ -n "$PUBLIC_ORIGIN" ] && set -- "$@" --public-origin "$PUBLIC_ORIGIN"
 [ -n "$ADMIN_ORIGIN" ] && set -- "$@" --admin-origin "$ADMIN_ORIGIN"
 [ -n "$ADMIN_USER" ] && set -- "$@" --admin-user "$ADMIN_USER"

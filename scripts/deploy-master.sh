@@ -192,6 +192,11 @@ NO_ASK=""
 UNINSTALL=""
 # 只更新 Agent 发布文件（不动 Master 的二进制、配置与服务）——问答题里的第 3 项。
 RELEASE_ONLY=""
+# "做什么"这一问由谁问：--ask-mode 只问不做事（入口脚本用），--mode 是入口问完之后
+# 把答案传回来（于是不会再问第二遍）。两者都见 0a-3。
+ASK_MODE=""
+MODE_IN=""
+MODE_GIVEN=""
 KEEP_DATA=""
 # 谁在终结 TLS：
 #   master  Master 自己（内置 ACME / 自签 / 你给的证书）——今天的行为
@@ -327,6 +332,14 @@ TLS：
                             版本号由脚本自己查（不必再手敲 --version），也不需要
                             注册码；已装好的节点随后用 `probe-agent upgrade` 升级。
                             与 --uninstall 互斥；配 --dry-run 只查版本不写盘。
+
+给入口脚本用的两个（一般不需要手工敲）：
+  --ask-mode                只问"做什么"（1 安装/升级、2 卸载、3 只更新发布文件），
+                            把答案写到 stdout 就退出。不碰系统、不需要 root。
+                            install-master-bin.sh / install-master.sh 靠它**在下载
+                            二进制、装工具链之前**就知道用户要做什么。
+  --mode <1|2|3>            入口脚本问完之后把答案传回来，于是不会再问第二遍。
+                            2 等价于 --uninstall、3 等价于 --release-only。
 EOF
 }
 
@@ -362,6 +375,8 @@ while [ $# -gt 0 ]; do
 	--proxy-domain) PROXY_DOMAINS="${2:-}"; shift 2 ;;
 	--uninstall) UNINSTALL="1"; shift ;;
 	--release-only) RELEASE_ONLY="1"; shift ;;
+	--ask-mode) ASK_MODE="1"; shift ;;
+	--mode) MODE_IN="${2:-}"; shift 2 ;;
 	--keep-data) KEEP_DATA="1"; shift ;;
 	-h | --help) usage; exit 0 ;;
 	*) echo "未知参数：$1" >&2; usage; exit 2 ;;
@@ -399,9 +414,32 @@ riscv64) _mp_arch="riscv64" ;;
 esac
 _mp_plat="${_mp_os}_${_mp_arch}"
 
+# --mode <1|2|3>：入口脚本已经问过"做什么"了，把答案原样带过来。
+# 三个取值与 0a-3 的菜单一一对应。入口脚本用它是为了"不再问第二遍"——
+# 不然用户会在入口那里答一次、进了部署脚本又被问一次同一件事。
+case "${MODE_IN:-}" in
+'') : ;;
+1) MODE_GIVEN="1" ;;
+2)
+	UNINSTALL="1"
+	MODE_GIVEN="1"
+	;;
+3)
+	RELEASE_ONLY="1"
+	MODE_GIVEN="1"
+	;;
+*)
+	echo "错误：--mode 只能是 1、2 或 3（收到「$MODE_IN」）。" >&2
+	echo "  1 = 安装 / 升级 Master，2 = 卸载 Master，3 = 只更新 Agent 发布文件。" >&2
+	exit 2
+	;;
+esac
+
 # --uninstall 与 --release-only 是两种**互斥**的模式。同时给就是自相矛盾的
 # 要求，直接拒绝——而不是让其中一个悄悄赢：悄悄赢的那种，用户以为做了 A、
 # 实际做了 B，而且两条路都不会报错。
+# 这个判断必须放在 --mode 的映射**之后**：--mode 2 / --mode 3 也会把对应的标志
+# 置起来，于是 `--mode 2 --release-only` 这种自相矛盾的组合同样会被拦下。
 if [ -n "$UNINSTALL" ] && [ -n "$RELEASE_ONLY" ]; then
 	echo "错误：--uninstall 与 --release-only 不能同时使用（一个是卸载、一个是只更新发布文件）。" >&2
 	exit 2
@@ -697,7 +735,7 @@ ask_dist_pull_scope() {
 	ans_put DIST_PULL "$DIST_PULL"
 }
 
-# pull_agent_release <版本> <范围 all|local>：把发布文件取回来并确认真的落了盘。
+# pull_agent_release <版本> <范围 all|local> <二进制路径>：把发布文件取回来并确认真的落了盘。
 #
 # 返回 0 表示"磁盘上确实有了"；非 0 表示失败（**由调用方决定怎么处理**，
 # 不在这里 exit——部署流程里这一步失败不该把整个部署拖倒，见 6c 的 ①）。
@@ -705,13 +743,32 @@ ask_dist_pull_scope() {
 # 判据落在磁盘上（`-s .../SHA256SUMS` + 产物计数），不落在 HTTP 状态码上：
 # /dist/ 受 install.mode 门控，刚部署完一台新 Master 时它返回 404 是**预期行为**，
 # 拿它当判据会把每次正常部署都报成失败。见 6c 的 ②。
+#
+# **二进制必须是参数，不能靠全局变量**：这里原先直接用 `$_mp_bin`，而它是在 6c
+# （部署收尾）里才赋值的。6c 与 0c 共用本函数，可 0c 走的是"只更新发布文件"模式，
+# **6c 根本不会执行** → 变量未定义 → `set -u` 下硬报错：
+#
+#     deploy-master.sh: line 729: _mp_bin: unbound variable
+#
+# 这正是用户实测撞到的。教训：一个被两条路共用的函数，不能依赖"某一条路恰好在上文
+# 设过的变量"——那种依赖在另一条路上是**隐式**的，读代码时看不出来，只有真跑才炸。
+# 改成参数之后，"这条路上的二进制是哪个"变成调用点上一句明摆着的话。
 pull_agent_release() {
 	_pa_ver="$1"
 	_pa_scope="$2"
+	_pa_bin="${3:-}"
 	# 版本号是本函数唯一的参数来源；空值绝不能带进 dist pull —— 那会拼出
 	# `--version ""`，而下游按目录名去创建 data_dir/dist//，症状是"拉了个空版本"。
 	if [ -z "$_pa_ver" ]; then
 		echo "错误：没有可用的发布版本号，不拉取。" >&2
+		return 1
+	fi
+	# 同理：二进制没给或不可执行就当场说清楚，不要让它变成一句
+	# "unbound variable"（那既不说明是哪个变量，也不说明该怎么办）。
+	if [ -z "$_pa_bin" ] || [ ! -x "$_pa_bin" ]; then
+		echo "错误：找不到可执行的 Master 二进制：${_pa_bin:-（调用方没给）}" >&2
+		echo "      它要用 dist pull 把发布文件写进 $DATA/dist/。用 --bin-dir 指定已安装" >&2
+		echo "      的 Master 在哪，或用 --bin 给一份二进制（例如刚编译出来的那份）。" >&2
 		return 1
 	fi
 	if [ -z "$DIST_SOURCE" ]; then
@@ -722,11 +779,11 @@ pull_agent_release() {
 	_pa_rc=""
 	if [ "$_pa_scope" = "local" ]; then
 		echo "    范围：只拉 $_mp_plat"
-		"$_mp_bin" dist pull --config "$CFG" --version "$_pa_ver" \
+		"$_pa_bin" dist pull --config "$CFG" --version "$_pa_ver" \
 			--platform "$_mp_plat" --from "$DIST_SOURCE" || _pa_rc=$?
 	else
 		echo "    范围：全部平台"
-		"$_mp_bin" dist pull --config "$CFG" --version "$_pa_ver" --all \
+		"$_pa_bin" dist pull --config "$CFG" --version "$_pa_ver" --all \
 			--from "$DIST_SOURCE" || _pa_rc=$?
 	fi
 	_pa_rc="${_pa_rc:-0}"
@@ -826,6 +883,57 @@ resolve_latest_agent_version() {
 }
 
 # ---------------------------------------------------------------------------
+# 0a-3) "做什么"这一问：0b 与入口脚本**共用同一份**
+# ---------------------------------------------------------------------------
+#
+# 入口脚本（install-master-bin.sh / install-master.sh）也要问这一问，而且必须**在
+# 它自己动手之前**问：
+#   · 免编译入口要先知道答案，才知道**要不要下载**那几十 MB 的 probe-master；
+#   · 编译入口要先知道答案，才知道**要不要装一套 Go 工具链并编译几分钟**。
+# 用户实测反馈过一次：跑一键命令，先看它下完二进制、才被问"做什么"，然后他选了 3
+# （只更新发布文件）——那次下载纯属浪费，而这台机器上本来就是有二进制的。
+#
+# 让入口自己再抄一份菜单是不行的：那样就有两份"做什么"，将来加第 4 个模式时
+# 入口那份不会跟着变，用户会看到一个**缺项**的菜单，而这不会报任何错。
+# 所以菜单只在这里，入口用 `--ask-mode` 取答案（见下面）。
+#
+# 通道约定（很重要，入口要靠它解析）：
+#   · 菜单与提示走 **stderr** —— 那是"给人看的"；
+#   · 答案（`1`/`2`/`3`）走 **stdout** —— 那是"给脚本用的"，调用方要能
+#     `$(...)` 拿到一个干净的数字，不会被菜单文本污染。
+ask_mode_menu() {
+	cat >&2 <<'EOF'
+
+这个脚本可以做三件事：
+
+  1) 安装 / 升级 Master
+     装（或升级）Master 本体：二进制、配置、systemd 服务，以及新节点要用的
+     Agent 发布文件。
+
+  2) 卸载 Master
+     停服务 → 删单元、二进制、配置、数据、系统用户。默认**连数据一起删**。
+
+  3) 只更新 Agent 发布文件
+     去 GitHub 查最新 Release，把它的 Agent 发布文件拉进 data_dir/dist/。
+     不动 Master 的二进制、配置与服务（不重启、也不重问任何配置）。
+
+EOF
+	read_line _mode "请输入 1、2 或 3 [1]: " || _mode=""
+	case "$_mode" in
+	2 | uninstall | UNINSTALL | Uninstall | 卸载) echo "2" ;;
+	3 | release | RELEASE | Release | 更新 | 发布文件) echo "3" ;;
+	*) echo "1" ;;
+	esac
+}
+
+# --ask-mode：只问这一问，把答案写到 stdout 然后退出。**不碰系统、不需要 root、
+# 不读配置、也不要求二进制已经装好**——入口脚本是在"什么都还没做"的时候调它的。
+if [ -n "$ASK_MODE" ]; then
+	ask_mode_menu
+	exit 0
+fi
+
+# ---------------------------------------------------------------------------
 # 0b) 第一个问题：安装/升级、卸载，还是只更新 Agent 发布文件
 # ---------------------------------------------------------------------------
 #
@@ -838,8 +946,7 @@ resolve_latest_agent_version() {
 #   · 卸载的入口也放进问答里，第一问就是"装还是卸"——于是卸载这件事至少
 #     有一次是用户**从脚本自己嘴里**知道的，不必先去看文档。
 #
-# 只问不设默认（回车取 1=安装）：卸载是破坏性操作，不该被"一路回车"选中。
-# 已经给了 --uninstall 就不再问——显式参数优先于面试。
+# 不设"默认选中卸载"：卸载是破坏性操作，不该被"一路回车"选中（回车取 1=安装）。
 #
 # 第 3 项（只更新发布文件）是用户加的：Master 装着某个版本、GitHub 上已经有更新的
 # Agent 发布版时，更新它原本要人肉敲一条带具体版本号的 dist pull 命令
@@ -848,22 +955,13 @@ resolve_latest_agent_version() {
 #
 # 它是**只读发布目录之外什么都不碰**的模式：不重装二进制、不重写配置、不重启服务，
 # 所以放在卸载位之后、TLS 问答之前，选它就直接做完退出（见 0c）。
-if [ -z "$UNINSTALL" ] && [ -z "$RELEASE_ONLY" ] && [ -n "$ASK" ]; then
-	cat >&2 <<'EOF'
-
-这个脚本可以做三件事：
-
-  1) 安装 / 升级 Master（默认）
-  2) 卸载 Master（停服务 → 删单元、二进制、配置、数据、系统用户）
-  3) 只更新 Agent 发布文件（拉 GitHub 上最新的 Release 到 data_dir/dist/，
-     不动 Master 的二进制、配置与服务）
-
-EOF
-	read_line _mode "请输入 1、2 或 3 [1]: " || _mode=""
-	case "$_mode" in
-	2 | uninstall | UNINSTALL | Uninstall | 卸载) UNINSTALL="1" ;;
-	3 | release | RELEASE | Release | 更新 | 发布文件) RELEASE_ONLY="1" ;;
-	*) : ;;
+#
+# 三种"不问"：已经给了 --uninstall / --release-only（显式参数优先于面试）、
+# 入口脚本已经问过并把答案通过 --mode 传下来了（MODE_GIVEN）、以及全局的 ASK 关掉时。
+if [ -z "$UNINSTALL" ] && [ -z "$RELEASE_ONLY" ] && [ -z "$MODE_GIVEN" ] && [ -n "$ASK" ]; then
+	case "$(ask_mode_menu)" in
+	2) UNINSTALL="1" ;;
+	3) RELEASE_ONLY="1" ;;
 	esac
 	if [ -n "$UNINSTALL" ]; then
 		printf '已选择卸载。默认**连数据一起删**（数据目录里有数据库与 master.key）。\n' >&2
@@ -886,27 +984,45 @@ fi
 # 放在卸载块**之前**：两者都是"只做一件事就退出"的模式，紧挨着 0b 更好读。
 # 同时给 --uninstall 与 --release-only 的组合已在 0-0 段拒绝，不会走到这里。
 if [ -n "$RELEASE_ONLY" ]; then
-	echo "==> 只更新 Agent 发布文件（Master 的二进制、配置与服务都不动）"
+	echo "==> 只更新 Agent 发布文件"
+	echo "    不动 Master 的二进制、配置与服务——只把 Agent 发布文件拉进数据目录。"
 
 	# 用哪个二进制去取件，优先级：--bin（调用方刚编译/刚下载的那份）> 已安装的那份。
 	# 允许 --bin 是有意的：安装入口（install-master.sh）编译出来的二进制一定不比
 	# 节点上装着的旧，用它就不必"先升级 Master 才能更新 Agent 发布文件"。
 	if [ -n "$BIN_SRC" ]; then
 		_ro_bin="$BIN_SRC"
+		_ro_from="--bin 指定的那份"
 	else
 		_ro_bin="$BIN_DIR/probe-master"
+		_ro_from="已安装的那份"
 	fi
 
-	# dry-run 不需要那个二进制（它一个字节都不写），所以缺了只报警告：
-	# dry-run 的价值正是"什么都还没装的时候先看看会发生什么"。
-	if [ -n "$DRY_RUN" ] && [ ! -x "$_ro_bin" ]; then
-		echo "    [dry-run] 注意：$_ro_bin 不可执行，正式执行到这一步会失败。" >&2
-		echo "              （用 --bin-dir 指定已安装的 Master 在哪，或用 --bin 给一份二进制）" >&2
+	# **先校验二进制，再去用它**。这一步原先排在使用之后（`$_ro_bin version` 写在
+	# 前面），于是"二进制不可执行"时会先跑一次注定失败的调用、再由下面那句
+	# 报错——报错来得太晚，中间那句 `version` 的输出还得靠 `2>/dev/null` 藏起来。
+	# 顺序应当是"能用的前提先成立"，而不是先撞一下再解释。
+	#
+	# dry-run 是唯一的例外：它一个字节都不写，正是"什么都还没装的时候先看看会发生
+	# 什么"的场合，所以缺二进制只警告。非 dry-run 缺了就直接停——它要靠这个二进制
+	# 读配置并把文件写进 data_dir/dist/，没有它做什么都是假的。
+	if [ ! -x "$_ro_bin" ]; then
+		if [ -n "$DRY_RUN" ]; then
+			echo "    [dry-run] 注意：$_ro_bin 不可执行，正式执行会在这里停下。" >&2
+			echo "              （用 --bin-dir 指定已安装的 Master 在哪，或用 --bin 给一份二进制）" >&2
+		else
+			echo "错误：找不到可执行的 Master 二进制：$_ro_bin（$_ro_from）" >&2
+			echo "      它要用来读 $CFG 并把发布文件写进 $DATA/dist/。" >&2
+			echo "      用 --bin-dir 指定已安装的 Master 在哪，或用 --bin 给一份二进制" >&2
+			echo "      （例如刚编译出来的那份）。这台机器还没装过 Master 的话，请改选 1（安装）。" >&2
+			exit 1
+		fi
 	fi
 
 	# 版本查询要在取件之前完成，**失败即止**。这时候退回去拉"本机二进制版本"
 	# 是静默换成另一件事：用户以为更新到了最新，实际拉的是他早就在跑的旧版本，
 	# 而一路上没有任何提示。
+	echo "==> 正在查 GitHub 上的最新 Release（${RELEASE_REPO}）…"
 	if [ -n "$DRY_RUN" ]; then
 		if _ro_probe="$(resolve_latest_agent_version)"; then
 			_ro_ver="$_ro_probe"
@@ -929,8 +1045,20 @@ if [ -n "$RELEASE_ONLY" ]; then
 		;;
 	esac
 
-	_ro_local="$("$_ro_bin" version 2>/dev/null | awk '{print $NF}')"
-	echo "==> GitHub 上的最新发布版本：v$_ro_ver（本机 Master 二进制：${_ro_local:-未知}）"
+	# 本机版本只在二进制真的可执行时才问——上面已经保证过（dry-run 除外）。
+	# 这里刻意不用 `${_ro_local:+…}` 那种嵌套引号写法：POSIX sh 下
+	# `"…${v:+"…$v…"}…"` 的引号归属容易读错、也容易在不同 shell 上表现不一，
+	# 拼一个变量出来更直白。
+	_ro_local=""
+	if [ -x "$_ro_bin" ]; then
+		_ro_local="$("$_ro_bin" version 2>/dev/null | awk '{print $NF}')"
+	fi
+	_ro_binmsg="$_ro_bin（$_ro_from）"
+	if [ -n "$_ro_local" ]; then
+		_ro_binmsg="$_ro_bin（$_ro_from，版本 $_ro_local）"
+	fi
+	echo "==> 最新发布版本：v$_ro_ver"
+	echo "    取件用的二进制：$_ro_binmsg"
 
 	if [ -n "$DRY_RUN" ]; then
 		echo "    [dry-run] 将会拉取到 $DATA/dist/$_ro_ver/，来源 $(default_dist_source "$_ro_ver")"
@@ -941,13 +1069,6 @@ if [ -n "$RELEASE_ONLY" ]; then
 
 	if [ "$(id -u)" -ne 0 ]; then
 		echo "错误：更新发布文件要往 $DATA/dist/ 里写，需要 root 或 sudo。" >&2
-		exit 1
-	fi
-	# 非 dry-run 时它必须真的可用：查询靠它（如果脚本没被单独替换）与取件都靠它。
-	if [ ! -x "$_ro_bin" ]; then
-		echo "错误：找不到可执行的 Master 二进制：$_ro_bin" >&2
-		echo "      它要用来读 $CFG 并把发布文件写进 data_dir/dist/。用 --bin-dir 指定" >&2
-		echo "      已安装的 Master 在哪，或用 --bin 给一份二进制（例如刚编译出来的那份）。" >&2
 		exit 1
 	fi
 	if [ ! -f "$CFG" ]; then
@@ -968,8 +1089,8 @@ if [ -n "$RELEASE_ONLY" ]; then
 		echo "      可以改选全部平台，或直接用 probe-master dist pull 手工指定。" >&2
 		exit 1
 	fi
-	if pull_agent_release "$_ro_ver" "$DIST_PULL"; then
-		echo "==> 完成：$DATA/dist/$_ro_ver 已就绪（下同版本号的 Agent 就是它）"
+	if pull_agent_release "$_ro_ver" "$DIST_PULL" "$_ro_bin"; then
+		echo "==> 完成：$DATA/dist/$_ro_ver 已就绪（新节点装到的 Agent 就是这一版）"
 		echo "    新节点：后台「节点 → 注册码」生成注册码，按页面给的命令装即可"
 		echo "    已装节点：sudo probe-agent upgrade --check && sudo probe-agent upgrade"
 	else
@@ -3118,7 +3239,8 @@ EOF
 		# 它只回答"成了没有"；**失败不回滚**这个决定留在调用方（理由见上面 ①）——
 		# 把回滚做进共用函数里，0c 那条路径就会连"更新失败"一起把整个部署回滚掉。
 		_mp_done=""
-		if pull_agent_release "$_mp_ver" "$DIST_PULL"; then
+		# 二进制**显式传进去**：同一个函数还被 0c 调用，而 0c 那条路上没有 _mp_bin。
+		if pull_agent_release "$_mp_ver" "$DIST_PULL" "$_mp_bin"; then
 			_mp_done="1"
 		fi
 

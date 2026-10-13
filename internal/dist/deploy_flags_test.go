@@ -96,13 +96,22 @@ func TestDeployAndInstallScriptsShareTheSameFlagSet(t *testing.T) {
 	deployFlags := scriptFlags(t, "scripts/deploy-master.sh", deploy)
 	instFlags := scriptFlags(t, "install-master.sh", inst)
 
-	// 下面两个是**有意**不由安装脚本转发的，不是漏了：
+	// 下面这些是**有意**不由安装脚本转发的，不是漏了：
 	//   --bin            源码安装路径是自己编译出来的，二进制路径由它自己定
 	//   --admin-password 口令不该走命令行（会进 shell 历史）；无人值守用
 	//                    PROBE_ADMIN_PASSWORD，其余场景由部署脚本交互输入
+	//   --ask-mode       入口脚本**内部**用它去问"做什么"（拿回答案就退出），
+	//                    对用户没有意义；把它当成用户参数转发过去只会让流程
+	//                    在问完一句之后直接退出，后面的安装全不执行。
+	//   --mode           同上，是入口脚本把问到的答案**带下去**用的通道。
+	//                    install-master.sh 确实会传它（`set -- "$@" --mode 1`），
+	//                    但那是脚本算出来的，不需要用户解析或给值——而这条判据
+	//                    查的是"解析循环里有没有这个臂"，所以在这里说明。
 	allowMissing := map[string]bool{
 		"--bin":            true,
 		"--admin-password": true,
+		"--ask-mode":       true,
+		"--mode":           true,
 	}
 
 	var missing []string

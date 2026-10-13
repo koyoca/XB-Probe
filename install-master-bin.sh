@@ -22,6 +22,17 @@
 #   # 表现为莫名其妙的"需要 root"：
 #   sudo sh -c "$(curl -fsSL <URL>)" xb --version v0.1.0 --tls-mode acme --tls-domain status.example.com
 #
+# **顺序：先问「做什么」，再决定下载什么。** 第一问（安装/升级、卸载、只更新 Agent
+# 发布文件）来自 scripts/deploy-master.sh 自己的菜单——那三个选项本来就定义在部署
+# 脚本里，这里只负责把答案取回来（`--ask-mode`），然后按答案决定要不要下载那几十 MB
+# 的 probe-master：
+#   · 选 1 → 下载并校验二进制，再交给部署脚本安装；
+#   · 选 2 → 只取部署脚本执行 --uninstall，**一个字节的二进制都不下**；
+#   · 选 3 → 只取部署脚本执行 --release-only，同样不下二进制（它用节点上已装的
+#            那份 probe-master 去拉发布文件）。
+# 之前是先无条件下载二进制、下载完了才问，于是选 2/3 的人白等一次下载——而这两条路
+# 本来就只需要那 100 KB 的部署脚本。
+#
 # 交互问答：**校验通过后会问你**——TLS 方式（要不要 https）、公开站与管理端各监听
 # 哪个端口、对外访问地址、管理员账号与口令。所以不会出现"下载校验都成功、配置文件
 # 里却没有 public_origin"这种半成品；不想被问就加 --yes 并把参数显式给全。
@@ -36,8 +47,12 @@
 #   --yes                不提问，全部取给定参数/默认值
 #   --dry-run            下载并校验，但不安装、不改动系统
 #   --uninstall          卸载（连数据一起清；加 --keep-data 保留数据目录）
-#                       走这条路时**不下载二进制**，只取部署脚本执行 --uninstall，
-#                       所以不需要 root 之外的前置条件，也不会被架构检查拦住。
+#                       走这条路时**不下载二进制**，只取部署脚本执行 --uninstall。
+#   --release-only       只更新 Agent 发布文件（去 GitHub 查最新 Release，把它的
+#                       发布文件拉进 data_dir/dist/）。同样**不下载二进制**——
+#                       它用节点上已装的那份 probe-master 去取件；Master 本身
+#                       的二进制、配置与服务都不动。
+#   --keep-data          与 --uninstall 同用，保留数据目录
 #   -h, --help           显示本帮助
 #
 # 其余参数原样透传给 scripts/deploy-master.sh（--public-origin、--admin-origin、
@@ -63,7 +78,22 @@ NO_SERVICE=""
 NON_INTERACTIVE=""
 DRY_RUN=""
 UNINSTALL=""
+# 只更新 Agent 发布文件（不动 Master 的二进制、配置与服务）。
+RELEASE_ONLY=""
 KEEP_DATA=""
+
+# "做什么"的答案（1 安装/升级、2 卸载、3 只更新发布文件）。
+# 空 = 还没问出来（--yes / --dry-run / 取回的部署脚本不认识 --ask-mode），
+# 这时按老行为走：下载二进制，让部署脚本自己问。
+MODE=""
+# 上面那个答案**是不是问出来的**。这个区分很要紧：
+#   · 显式给了 --uninstall / --release-only 时，MODE 只是给"要不要下载二进制"用的，
+#     标志本身已经在 PASSTHRU 里，透传就够了；
+#   · 从菜单**问出来**的答案只活在变量里，必须想办法送下去（走 --mode），
+#     否则部署脚本会**再问一遍**同一件事——正是这个"先问"想消掉的东西。
+# 而且 --mode 只有在"那个脚本认识 --ask-mode"时才敢传（同一个文件，所以两者等价）；
+# 对老 ref 的脚本传未知参数是硬失败（exit 2）。
+MODE_ASKED=""
 
 # 透传给 deploy-master.sh 的参数：本脚本**不解析**它们，原样转发。
 # 刻意不在这里再写一份默认值（配置目录、监听地址等）：两处各写一份默认值，
@@ -83,6 +113,7 @@ install-master-bin.sh —— XB-Probe Master 免编译部署（从 Releases 取�
   --yes                 不提问
   --dry-run             只下载校验，不安装
   --uninstall           卸载（连数据一起清；加 --keep-data 保留数据目录）
+  --release-only        只更新 Agent 发布文件（不动 Master 的二进制、配置与服务）
   --keep-data           与 --uninstall 同用
   -h, --help            显示本帮助
 
@@ -94,7 +125,9 @@ install-master-bin.sh —— XB-Probe Master 免编译部署（从 Releases 取�
   dns-01 的凭据用环境变量（不进 shell 历史）：
   PROBE_ACME_DNS_PROVIDER（默认 cloudflare）、PROBE_ACME_DNS_TOKEN
 
-不加 --yes 时会交互提问（TLS 方式、监听端口、公开/管理端地址、管理员与口令）。
+不加 --yes 时会先问"做什么"（安装/升级、卸载、只更新 Agent 发布文件），
+按答案决定要不要下载二进制；选 1 之后才会问 TLS 方式、监听端口、公开/管理端
+地址、管理员与口令。
 EOF
 }
 
@@ -116,7 +149,7 @@ err() { printf '错误：%s\n' "$*" >&2; }
 # 两个办法一起用，缺一都可能不够：
 #   · 请求头 no-cache / Pragma 让 CDN 与中间代理回源校验；
 #   · URL 上带一个每次都不同的查询串——CDN 的缓存键含查询串，于是必然 miss。
-# 查询串对 raw 服务是**无害**的（它按路径取文件，忽略查询），所以不必担心取不到。
+# 查询串对 raw 服务是**无害的**（它按路径取文件，忽略查询），所以不必担心取不到。
 # 取回后再用 check_script_freshness 核对指纹并提示，见下面。
 download() {
 	_url="$1"
@@ -196,9 +229,11 @@ while [ $# -gt 0 ]; do
 		shift
 		;;
 	--dry-run) DRY_RUN="1"; shift ;;
-	# 卸载：**不进下载/校验那一段**——卸载不需要二进制，也不该因为架构不匹配
-	# （armv7 之类）先被拦下来。走到下面"卸载"那一节直接取部署脚本执行。
+	# 卸载 / 只更新发布文件：**都不进下载/校验那一段**——两者都不需要二进制，
+	# 也不该因为架构不匹配（armv7 之类）先被拦下来。走到下面"按模式分派"直接
+	# 取部署脚本执行。
 	--uninstall) UNINSTALL="1"; PASSTHRU="$PASSTHRU --uninstall"; shift ;;
+	--release-only) RELEASE_ONLY="1"; PASSTHRU="$PASSTHRU --release-only"; shift ;;
 	--keep-data) KEEP_DATA="1"; PASSTHRU="$PASSTHRU --keep-data"; shift ;;
 	-h | --help) usage; exit 0 ;;
 	--)
@@ -223,55 +258,155 @@ Linux) : ;;
 esac
 
 # ---------------------------------------------------------------------------
-# 卸载：--uninstall
+# 1) 归一化仓库名与下载地址
 # ---------------------------------------------------------------------------
 #
-# 刻意排在架构探测与 root 检查**之前**：
-#   · 卸载不下载二进制，所以"本仓库只发布 amd64/arm64"这条限制与它无关；
-#   · root 检查有它自己的一份（--dry-run 不需要 root）。
-# 删除逻辑只有一份（scripts/deploy-master.sh --uninstall），这里取回来执行。
+# 这一步排在**取脚本之前**（原先它在下载二进制那一段里）。因为现在要先用
+# "取回的部署脚本"来问"做什么"，地址就得先算出来。
+
+# 允许 --repo 写三种形式：owner/repo、https://github.com/owner/repo、
+# https://github.com/owner/repo.git —— 归一成 owner/repo。
+REPO="$(printf '%s' "$REPO_RAW" |
+	sed -e 's|^https\?://[^/]*/||' -e 's|\.git$||' -e 's|^/||' -e 's|/$||')"
+case "$REPO" in
+*/*) : ;;
+*)
+	err "--repo 应形如 owner/repo（收到 $REPO_RAW）。"
+	exit 2
+	;;
+esac
+
+# 镜像前缀只管下载：API 与 raw 仍走原始域名（镜像站通常不代理 api.github.com，
+# 拿它去问"最新版本"会得到 404，而那看起来像"仓库不存在"）。
+ASSET_BASE="https://github.com/$REPO/releases/download"
+RAW_BASE="https://raw.githubusercontent.com/$REPO"
+if [ -n "$MIRROR" ]; then
+	ASSET_BASE="${MIRROR%/}/https://github.com/$REPO/releases/download"
+fi
+
+# ---------------------------------------------------------------------------
+# 2) 取回部署脚本（先取它，因为它拥有"做什么"这一问）
+# ---------------------------------------------------------------------------
+#
+# 部署逻辑只有一份（scripts/deploy-master.sh），取回来直接执行——不把 600 行
+# 配置/服务逻辑抄第二遍（抄了就是两处要一起改）。
+#
+# 取的 ref 默认是 main，而不是二进制那个标签：**二进制按版本钉死（要可复现），
+# 脚本允许独立演进**。修一句提问、补一条诊断就不该逼所有人换版本号，所以这里
+# 默认跟 main；要严格同版用 --script-ref "$TAG"。
+# 代价是可能出现"新脚本 + 旧二进制"，而写错配置键会让 Master 启动即失败
+# （LoadMaster 是严格解析，会点名是哪个键），不是静默失效；脚本这一侧还有
+# internal/config 的 TestDeployScriptsOnlyWriteKnownConfigKeys 逐项比对。
+#
+# 这里只花 ~100 KB。那几十 MB 的二进制留到"确定要装"之后再下。
+TMP="$(mktemp -d 2>/dev/null || echo "/tmp/xb-bin.$$")"
+mkdir -p "$TMP"
+# 中断也不能把半个二进制留在 /tmp 里（下次有人误以为那是完整的）。
+#
+# `|| true` 不是可有可无的：EXIT trap 的返回值**会成为整个脚本的退出码**。
+# 清理失败（只读挂载、目录正被占用、沙箱拦下 rm）本来只是"留了个临时目录"，
+# 却会让一次**成功**的部署以 rc=1 收场——用户刚看完"完成"，紧接着就吃到
+# "脚本执行失败"，然后去查一个根本不存在的问题。清理是尽力而为的事，不该改结论。
+trap 'rm -rf "$TMP" 2>/dev/null || true' EXIT INT TERM HUP
+
+say "取部署脚本（$SCRIPT_REF）"
+DEPLOY="$TMP/deploy-master.sh"
+download "$RAW_BASE/$SCRIPT_REF/scripts/deploy-master.sh" >"$DEPLOY" || {
+	err "取不到 $RAW_BASE/$SCRIPT_REF/scripts/deploy-master.sh"
+	err "早期标签里可能还没有这个脚本（它与免编译部署一起加的）；用 --script-ref 换一个 ref。"
+	exit 1
+}
+if ! grep -q '^#!/bin/sh' "$DEPLOY"; then
+	err "取回的 deploy-master.sh 不像脚本（没有 shebang），已中止。"
+	exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# 3) 决定"做什么"
+# ---------------------------------------------------------------------------
+#
+# 菜单本身在部署脚本里（0a-3），**这里不抄第二份**：抄了就有两份"做什么"，
+# 将来加第 4 个模式时这份不会跟着变，用户会看到一个缺项的菜单，而且不报任何错。
+# 所以用 `--ask-mode` 把它问出来——那个模式只问、打印答案、退出，不碰系统。
+#
+# --ask-mode 只有新版（v0.1.2 之后）的部署脚本才认识。老 ref 上它会因"未知参数"
+# 退出 2，这里**当作没问出来**处理：退回老行为（下载二进制，让部署脚本自己问），
+# 而不是自作主张当成"安装"。宁可多下一次，也不要在没问过的时候替用户做决定。
+MODE=""
 if [ -n "$UNINSTALL" ]; then
-	if [ -z "$DRY_RUN" ] && [ "$(id -u)" -ne 0 ]; then
-		err "卸载需要 root 或 sudo（--dry-run 不需要）。"
-		exit 1
-	fi
-	# 归一化仓库名（下面正式流程里那份归一化还没跑到）。
-	REPO_UN="$(printf '%s' "$REPO_RAW" |
-		sed -e 's|^https\?://[^/]*/||' -e 's|\.git$||' -e 's|^/||' -e 's|/$||')"
-	case "$REPO_UN" in
-	*/*) : ;;
+	MODE="2"
+elif [ -n "$RELEASE_ONLY" ]; then
+	MODE="3"
+elif [ -n "$NON_INTERACTIVE" ] || [ -n "$DRY_RUN" ]; then
+	# --yes / --dry-run 都是"别问我"的意思，按老行为走（安装）。
+	MODE=""
+elif [ ! -t 0 ]; then
+	# 非交互式终端 + 又要提问 = 必然把所有问题答成默认值。与其装出一个
+	# "默认值拼起来的"部署，不如立刻停下来说清楚怎么用。
+	err "标准输入不是终端，无法交互提问。"
+	cat >&2 <<'EOF'
+两种做法：
+  · 要交互：别用管道，改用 `sudo sh -c "$(curl -fsSL <URL>)" xb`
+  · 不交互：加 --yes，并显式给出 --public-origin（口令设 PROBE_ADMIN_PASSWORD）
+EOF
+	exit 2
+else
+	# 菜单与提示走它的 stderr（直接显示给用户），答案走 stdout（只可能是 1/2/3）。
+	MODE="$(sh "$DEPLOY" --ask-mode)" || MODE=""
+	case "$MODE" in
+	1 | 2 | 3) MODE_ASKED="1" ;;
 	*)
-		err "--repo 应形如 owner/repo（收到 $REPO_RAW）。"
-		exit 2
+		warn "取回的部署脚本不认识 --ask-mode（大概用了较早的 --script-ref），改由它自己提问。"
+		MODE=""
 		;;
 	esac
-	RAW_UN="https://raw.githubusercontent.com/$REPO_UN"
-	say "取部署脚本（$SCRIPT_REF）以执行卸载"
-	TMP_UN="$(mktemp -d 2>/dev/null || echo "/tmp/xb-uninst.$$")"
-	mkdir -p "$TMP_UN"
-	trap 'rm -rf "$TMP_UN"' EXIT INT TERM HUP
-	DEPLOY_UN="$TMP_UN/deploy-master.sh"
-	download "$RAW_UN/$SCRIPT_REF/scripts/deploy-master.sh" >"$DEPLOY_UN" || {
-		err "取不到 $RAW_UN/$SCRIPT_REF/scripts/deploy-master.sh"
-		exit 1
-	}
-	if ! grep -q '^#!/bin/sh' "$DEPLOY_UN"; then
-		err "取回的 deploy-master.sh 不像脚本（没有 shebang），已中止。"
+fi
+
+# ---------------------------------------------------------------------------
+# 3a) 卸载 / 只更新发布文件：不下载任何东西
+# ---------------------------------------------------------------------------
+#
+# 这就是"先问后下载"省下来的那几十 MB。两条路都只需要已经取到手的那份脚本：
+#   · 卸载：删除逻辑只有一份（deploy-master.sh --uninstall），不自己实现一遍；
+#   · 只更新发布文件：取件用的是**节点上已装的那份 probe-master**，不是我们要
+#     下载的这份——所以这里也不需要二进制。
+if [ "$MODE" = "2" ] || [ "$MODE" = "3" ]; then
+	if [ "$MODE" = "2" ]; then
+		_early_what="卸载"
+	else
+		_early_what="更新 Agent 发布文件"
+	fi
+	# 从菜单问出来的答案只活在变量里，得**真的送下去**：不加这一句，部署脚本会
+	# 把同一件事再问一遍——用户刚答完"3"，转头又被问"1、2 还是 3"。
+	# （显式给了标志的那条路不用传：--uninstall / --release-only 本来就在 PASSTHRU 里。）
+	if [ -n "$MODE_ASKED" ]; then
+		PASSTHRU="$PASSTHRU --mode $MODE"
+	fi
+	if [ -z "$DRY_RUN" ] && [ "$(id -u)" -ne 0 ]; then
+		if [ "$MODE" = "2" ]; then
+			err "卸载需要 root 或 sudo（--dry-run 不需要）。"
+		else
+			err "更新发布文件要往 data_dir/dist 里写，需要 root 或 sudo（--dry-run 不需要）。"
+		fi
 		exit 1
 	fi
-	say "开始卸载（接下来的输出来自 scripts/deploy-master.sh）"
 	# 本脚本自己的 --dry-run 含义是"只下载校验、不安装"，所以平时**不透传**；
-	# 但卸载这条路上它必须透传——否则部署脚本会去做真正的删除（在非 root 下
-	# 表现为一句莫名其妙的"卸载需要 root 或 sudo（--dry-run 不需要）"）。
+	# 但这两条路上它必须透传——否则部署脚本会去做真正的删除/写入（在非 root 下
+	# 表现为一句莫名其妙的"需要 root 或 sudo（--dry-run 不需要）"）。
 	if [ -n "$DRY_RUN" ]; then PASSTHRU="$PASSTHRU --dry-run"; fi
+	say "开始$_early_what（接下来的输出来自 scripts/deploy-master.sh）"
 	# $PASSTHRU 不加引号是有意的：它要按空白切成多个参数。
 	# shellcheck disable=SC2086
-	if ! sh "$DEPLOY_UN" $PASSTHRU; then
-		err "卸载脚本执行失败（上面是它的输出）。"
+	if ! sh "$DEPLOY" $PASSTHRU; then
+		err "$_early_what失败（上面是它的输出）。"
 		exit 1
 	fi
 	exit 0
 fi
+
+# ---------------------------------------------------------------------------
+# 4) 安装 / 升级：这才需要二进制
+# ---------------------------------------------------------------------------
 
 # 架构探测：uname -m 的取值在不同发行版/内核上并不统一，
 # x86_64 与 amd64 是同一个东西，aarch64 与 arm64 也是。
@@ -297,6 +432,7 @@ amd64 | arm64) : ;;
 	;;
 esac
 
+# root 检查排在**下载之前**：不然非 root 跑一次要白下几十 MB 才发现装不了。
 if [ "$(id -u)" -ne 0 ] && [ -z "$NO_SERVICE" ]; then
 	cat >&2 <<EOF
 错误：需要 root（要写 /usr/local/bin 与注册 systemd 服务）。
@@ -312,42 +448,7 @@ EOF
 	exit 1
 fi
 
-# 非交互式终端 + 又要提问 = 必然把所有问题答成默认值（deploy-master.sh 会问口令）。
-# 与其装出一个"默认值拼起来的"部署，不如立刻停下来说清楚怎么用。
-if [ -z "$NON_INTERACTIVE" ] && [ -z "$DRY_RUN" ] && [ ! -t 0 ]; then
-	err "标准输入不是终端，无法交互提问。"
-	cat >&2 <<'EOF'
-两种做法：
-  · 要交互：别用管道，改用 `sudo sh -c "$(curl -fsSL <URL>)" xb`
-  · 不交互：加 --yes，并显式给出 --public-origin（口令设 PROBE_ADMIN_PASSWORD）
-EOF
-	exit 2
-fi
-
-# ---------------------------------------------------------------------------
-# 1) 归一化仓库名与版本
-# ---------------------------------------------------------------------------
-
-# 允许 --repo 写三种形式：owner/repo、https://github.com/owner/repo、
-# https://github.com/owner/repo.git —— 归一成 owner/repo。
-REPO="$(printf '%s' "$REPO_RAW" |
-	sed -e 's|^https\?://[^/]*/||' -e 's|\.git$||' -e 's|^/||' -e 's|/$||')"
-case "$REPO" in
-*/*) : ;;
-*)
-	err "--repo 应形如 owner/repo（收到 $REPO_RAW）。"
-	exit 2
-	;;
-esac
-
-# 镜像前缀只管下载：API 与 raw 仍走原始域名（镜像站通常不代理 api.github.com，
-# 拿它去问"最新版本"会得到 404，而那看起来像"仓库不存在"）。
-ASSET_BASE="https://github.com/$REPO/releases/download"
-RAW_BASE="https://raw.githubusercontent.com/$REPO"
-if [ -n "$MIRROR" ]; then
-	ASSET_BASE="${MIRROR%/}/https://github.com/$REPO/releases/download"
-fi
-
+# 版本：问一次 GitHub 的 releases/latest，再去下对应标签的产物。
 if [ -z "$VERSION" ]; then
 	say "查询最新版本（$REPO）"
 	_latest="$(download "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null |
@@ -367,15 +468,6 @@ v*) TAG="$VERSION" ;;
 *) TAG="v$VERSION" ;;
 esac
 say "目标版本 $TAG（linux/$ARCH）"
-
-# ---------------------------------------------------------------------------
-# 2) 下载 + 校验
-# ---------------------------------------------------------------------------
-
-TMP="$(mktemp -d 2>/dev/null || echo "/tmp/xb-bin.$$")"
-mkdir -p "$TMP"
-# 中断也不能把半个二进制留在 /tmp 里（下次有人误以为那是完整的）。
-trap 'rm -rf "$TMP"' EXIT INT TERM HUP
 
 BIN_NAME="probe-master_linux_${ARCH}"
 say "下载 $BIN_NAME"
@@ -426,31 +518,6 @@ if ! "$TMP/$BIN_NAME" version >/dev/null 2>&1; then
 fi
 say "二进制自检通过：$("$TMP/$BIN_NAME" version)"
 
-# ---------------------------------------------------------------------------
-# 3) 取部署脚本
-# ---------------------------------------------------------------------------
-
-# 部署逻辑只有一份（scripts/deploy-master.sh），取回来直接执行——不把 600 行
-# 配置/服务逻辑抄第二遍（抄了就是两处要一起改）。
-#
-# 取的 ref 默认是 main，而不是二进制那个标签：**二进制按版本钉死（要可复现），
-# 脚本允许独立演进**。修一句提问、补一条诊断就不该逼所有人换版本号，所以这里
-# 默认跟 main；要严格同版用 --script-ref "$TAG"。
-# 代价是可能出现"新脚本 + 旧二进制"，而写错配置键会让 Master 启动即失败
-# （LoadMaster 是严格解析，会点名是哪个键），不是静默失效；脚本这一侧还有
-# internal/config 的 TestDeployScriptsOnlyWriteKnownConfigKeys 逐项比对。
-say "取部署脚本（$SCRIPT_REF）"
-DEPLOY="$TMP/deploy-master.sh"
-download "$RAW_BASE/$SCRIPT_REF/scripts/deploy-master.sh" >"$DEPLOY" || {
-	err "取不到 $RAW_BASE/$SCRIPT_REF/scripts/deploy-master.sh"
-	err "早期标签里可能还没有这个脚本（它与免编译部署一起加的）；用 --script-ref 换一个 ref。"
-	exit 1
-}
-if ! grep -q '^#!/bin/sh' "$DEPLOY"; then
-	err "取回的 deploy-master.sh 不像脚本（没有 shebang），已中止。"
-	exit 1
-fi
-
 if [ -n "$DRY_RUN" ]; then
 	echo >&2
 	say "（dry-run）下载与校验已完成，未安装、未改动系统。"
@@ -463,8 +530,16 @@ if [ -n "$DRY_RUN" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 4) 交给 deploy-master.sh 完成落盘、服务与健康检查
+# 5) 交给 deploy-master.sh 完成落盘、服务与健康检查
 # ---------------------------------------------------------------------------
+
+# 这一问已经在本脚本里问过了（MODE=1），把答案带下去，免得用户被问第二次同一件事。
+# 只在**真的问出来过**（MODE_ASKED）的时候才传 --mode：老部署脚本对未知参数是
+# 硬失败（exit 2），而"脚本不认识 --mode"与"脚本不认识 --ask-mode"是同一件事
+# （同一个文件），所以这个条件本身就把兼容性判断做完了。
+if [ -n "$MODE_ASKED" ]; then
+	PASSTHRU="$PASSTHRU --mode $MODE"
+fi
 
 say "开始部署（接下来的输出来自 scripts/deploy-master.sh）"
 # 告诉部署脚本"用户是怎么把这一串叫起来的"：收尾的卸载提示据此还原出一条

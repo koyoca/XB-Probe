@@ -1169,7 +1169,18 @@ func TestReleaseOnlyModeUpdatesAgentReleaseWithoutTouchingMaster(t *testing.T) {
 		t.Error("菜单提示语没有跟着改成三个选项：\n" +
 			"  用户看到「请输入 1 或 2」就不会去试第 3 项，这个入口等于不存在。")
 	}
-	if !strings.Contains(body, `3 | release | RELEASE | Release | 更新 | 发布文件) RELEASE_ONLY="1" ;;`) {
+	// 第 3 项的"菜单 → 变量"映射现在落在 ask_mode_menu 里——菜单**只有那一份**
+	// （入口脚本也靠它问，见 --ask-mode），0b 只负责把答案接过去。所以判据要分两半，
+	// 而且两半都必须钉住：
+	//   · 菜单那一半丢了 → 用户根本看不到第 3 项；
+	//   · 0b 那一半丢了   → 用户选了 3，脚本照样去装 Master。
+	// 只判其中一半，另一种丢法就是假绿。
+	if !strings.Contains(body, `3 | release | RELEASE | Release | 更新 | 发布文件) echo "3" ;;`) {
+		t.Error("菜单里第 3 项没有归一到 3：\n" +
+			"  用户看得见这一项、答进去却不被认，等于这一项不存在。")
+	}
+	if !strings.Contains(body, `case "$(ask_mode_menu)" in`) ||
+		!strings.Contains(body, `3) RELEASE_ONLY="1" ;;`) {
 		t.Error("第 3 项没有映射到 RELEASE_ONLY（菜单画了但分支没接）。")
 	}
 
@@ -1197,12 +1208,25 @@ func TestReleaseOnlyModeUpdatesAgentReleaseWithoutTouchingMaster(t *testing.T) {
 
 	// 先查版本、再取件，而且**取件的成败必须被判断**。次序反了就会拿一个空
 	// 版本号去 dist pull；写成 `pull ... || true` 则把"更新失败"静默成"更新成功"。
+	//
+	// 第三个参数是**哪个二进制去取件**。这里同样不绑变量名（一致改名仍绿），
+	// 但要求它是"一个变量"而不是写死的路径——写死就等于忽略 --bin / --bin-dir。
+	// 这条守在用户那次实测故障的同一条路上：原先这个函数直接用 `$_mp_bin`，
+	// 而那个变量只在 6c 赋值，0c 走到这里就成了 `unbound variable`。
 	iResolve := strings.Index(region, "resolve_latest_agent_version")
-	iPull := strings.Index(region, `if pull_agent_release "$`+rel+`" "$DIST_PULL"; then`)
+	rePull := regexp.MustCompile(
+		`if pull_agent_release "\$` + rel + `" "\$DIST_PULL" "\$[A-Za-z_][A-Za-z0-9_]*"; then`)
+	loc := rePull.FindStringIndex(region)
+	iPull := -1
+	if loc != nil {
+		iPull = loc[0]
+	}
 	if iPull < 0 {
-		t.Error("模式分支没有把**查到的那个版本**交给共用的 pull_agent_release 并判它的成败：\n" +
-			"  自己再写一遍取件，两条路就会各修各的；交给另一个变量（或写死）则等于\n" +
-			"  查了版本却不用它；写成 `pull … || true` 则用户看到的最后一行仍然是「完成」。")
+		t.Error("模式分支没有把**查到的那个版本**和**要用的那个二进制**一起交给共用的 pull_agent_release，并判它的成败：\n" +
+			"  自己再写一遍取件，两条路就会各修各的；版本交给另一个变量（或写死）等于查了却不用它；\n" +
+			"  二进制写死路径则忽略 --bin/--bin-dir；漏掉第三个参数就是用户实测撞到的\n" +
+			"  `_mp_bin: unbound variable`——那个变量只在 6c 赋值，而这条路上 6c 不执行；\n" +
+			"  写成 `pull … || true` 则用户看到的最后一行仍然是「完成」。")
 	}
 	if iResolve >= 0 && iPull >= 0 && iResolve > iPull {
 		t.Error("先取件后查版本：\n" +
@@ -1238,11 +1262,23 @@ func TestReleaseOnlyModeUpdatesAgentReleaseWithoutTouchingMaster(t *testing.T) {
 				"  一次没人预期的改动。", forbidden)
 		}
 	}
-	// ⑧ dry-run 不写系统、不需要 root（与全局约定一致）。
-	if !strings.Contains(region, `if [ -n "$DRY_RUN" ] && [ ! -x "$_ro_bin" ]; then`) {
-		t.Error("dry-run 下缺二进制直接失败了：\n" +
-			"  dry-run 的价值正是「什么都还没装的时候先看看会发生什么」，\n" +
-			"  它一个字节都不写，不该因为环境不完整而跑不起来。")
+	// ⑧ dry-run 不写系统、不需要 root（与全局约定一致）。而"缺二进制"这件事在
+	//    dry-run 下**不能是致命的**：判据不是"某句话长什么样"，而是"DRY_RUN 的处理
+	//    出现在第一个 exit 1 之前"——先判 DRY_RUN 再决定是警告还是退出，顺序反了
+	//    就等于 dry-run 也要求环境完整。
+	iNoBin := strings.Index(region, `[ ! -x "$_ro_bin" ]`)
+	if iNoBin < 0 {
+		t.Error("模式分支没有检查取件用的二进制是否可用：\n" +
+			"  不可执行时应当给一句能照着做的提示（--bin-dir / --bin），而不是等取件时才炸。")
+	} else {
+		tail := region[iNoBin:]
+		iDry := strings.Index(tail, "DRY_RUN")
+		iExit := strings.Index(tail, "exit 1")
+		if iDry < 0 || (iExit >= 0 && iDry > iExit) {
+			t.Error("dry-run 下缺二进制直接失败了：\n" +
+				"  dry-run 的价值正是「什么都还没装的时候先看看会发生什么」，\n" +
+				"  它一个字节都不写，不该因为环境不完整而跑不起来。")
+		}
 	}
 	if !strings.Contains(region, `[ "$(id -u)" -ne 0 ]`) {
 		t.Error("模式分支没有 root 检查：要往 data_dir/dist/ 里写，非 root 会以「权限不足」收场。")
