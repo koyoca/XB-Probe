@@ -92,6 +92,8 @@ PROXY_DOMAINS=""
 NO_SERVICE=""
 FORCE_CONFIG=""
 UNINSTALL=""
+# 只更新 Agent 发布文件（不动 Master 的二进制、配置与服务）。
+RELEASE_ONLY=""
 KEEP_DATA=""
 
 # go.mod 声明的最低 Go 版本。低于它构建会直接失败，所以先在依赖检查时拦下，
@@ -112,6 +114,9 @@ install-master.sh —— XB-Probe Master 整机一键部署
   --dry-run            只打印计划
   --uninstall          卸载（连数据一起清；加 --keep-data 保留数据目录）
   --keep-data          与 --uninstall 同用
+  --release-only       只更新 Agent 发布文件（查 GitHub 最新 Release 拉进
+                       data_dir/dist/，不动 Master 的二进制/配置/服务）。
+                       同样不需要源码与 Go，与 --uninstall 互斥。
   -h, --help           显示本帮助
 
   其余参数透传给 scripts/deploy-master.sh：
@@ -172,6 +177,7 @@ while [ $# -gt 0 ]; do
 	--no-service) NO_SERVICE="1"; shift ;;
 	--force-config) FORCE_CONFIG="1"; shift ;;
 	--uninstall) UNINSTALL="1"; shift ;;
+	--release-only) RELEASE_ONLY="1"; shift ;;
 	--keep-data) KEEP_DATA="1"; shift ;;
 	-h | --help) usage; exit 0 ;;
 	*) err "未知参数：$1"; usage; exit 2 ;;
@@ -381,17 +387,22 @@ EOF
 fi
 
 # ---------------------------------------------------------------------------
-# 卸载：--uninstall（排在依赖检查与编译之前）
+# 卸载 / 只更新 Agent 发布文件（排在依赖检查与编译之前）
 # ---------------------------------------------------------------------------
+# 这两个模式都不需要源码、不需要 Go，所以必须排在
+# "装依赖 / clone / 编译"**之前**——否则"更新个 Agent 发布文件"要先装一套工具链，
+# 是本末倒置，而且一旦工具链装不上就更新不了。
 #
-# 卸载不需要源码、不需要 Go，所以必须排在"装依赖 / clone / 编译"**之前**——
-# 否则"卸个东西"要先装一套工具链，是本末倒置，而且一旦工具链装不上就卸不了。
-#
-# 删除逻辑只有一份（scripts/deploy-master.sh --uninstall），这里从仓库把它取回来
-# 执行。**刻意不自己实现一遍删除**：两份删除逻辑迟早漂移，而这里赌的是用户的系统。
-if [ -n "$UNINSTALL" ]; then
+# 两者的取件/删除逻辑都只有一份（scripts/deploy-master.sh 的 --uninstall /
+# --release-only），这里从仓库把它取回来执行。**刻意不自己实现一遍**：
+# 两份逻辑迟早漂移，而这里赌的是用户的系统。
+if [ -n "$UNINSTALL" ] || [ -n "$RELEASE_ONLY" ]; then
 	if [ -z "$DRY_RUN" ] && [ "$(id -u)" -ne 0 ]; then
-		err "卸载需要 root 或 sudo（--dry-run 不需要）。"
+		if [ -n "$UNINSTALL" ]; then
+			err "卸载需要 root 或 sudo（--dry-run 不需要）。"
+		else
+			err "更新发布文件要往 data_dir/dist 里写，需要 root 或 sudo（--dry-run 不需要）。"
+		fi
 		exit 1
 	fi
 	_base="$(raw_base "$REPO" "$REF")"
@@ -400,7 +411,19 @@ if [ -n "$UNINSTALL" ]; then
 		err "请改用：sudo sh -c \"\$(curl -fsSL https://raw.githubusercontent.com/koyoca/XB-Probe/main/uninstall-master.sh)\""
 		exit 2
 	fi
-	say "取部署脚本（$REF）以执行卸载"
+	if [ -n "$UNINSTALL" ]; then
+		_early_what="卸载"
+		set -- --uninstall
+		[ -n "$KEEP_DATA" ] && set -- "$@" --keep-data
+	else
+		_early_what="只更新 Agent 发布文件"
+		set -- --release-only
+	fi
+	[ -n "$DRY_RUN" ] && set -- "$@" --dry-run
+	[ -n "$DIR" ] && set -- "$@" --dir "$DIR"
+	[ -n "$DATA" ] && set -- "$@" --data "$DATA"
+	[ -n "$BIN_DIR" ] && set -- "$@" --bin-dir "$BIN_DIR"
+	say "取部署脚本（$REF）以执行$_early_what"
 	_tmpd="$(mktemp -d 2>/dev/null || echo "/tmp/xb-uninst.$$")"
 	mkdir -p "$_tmpd"
 	# shellcheck disable=SC2064
@@ -410,15 +433,9 @@ if [ -n "$UNINSTALL" ]; then
 		err "取不到 $_base/scripts/deploy-master.sh（网络？--ref 写错了？）"
 		exit 1
 	fi
-	set -- --uninstall
-	[ -n "$KEEP_DATA" ] && set -- "$@" --keep-data
-	[ -n "$DRY_RUN" ] && set -- "$@" --dry-run
-	[ -n "$DIR" ] && set -- "$@" --dir "$DIR"
-	[ -n "$DATA" ] && set -- "$@" --data "$DATA"
-	[ -n "$BIN_DIR" ] && set -- "$@" --bin-dir "$BIN_DIR"
-	say "开始卸载（接下来的输出来自 scripts/deploy-master.sh）"
+	say "开始$_early_what（接下来的输出来自 scripts/deploy-master.sh）"
 	if ! sh "$_tmpd/deploy-master.sh" "$@"; then
-		err "卸载脚本执行失败（上面是它的输出）。"
+		err "$_early_what失败（上面是它的输出）。"
 		exit 1
 	fi
 	exit 0

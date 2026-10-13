@@ -31,10 +31,16 @@
 # Token**），下次运行自动作为方括号里的默认值——不必为了改一个端口把前面全重答。
 # 想忽略它：PROBE_FRESH_ANSWERS=1；想换位置：PROBE_ANSWERS_FILE=<路径>。
 #
-# 第一个问题是"安装还是卸载"（没显式给 --uninstall 时）。之所以问在最前面：
+# 第一个问题是"做什么"（没显式给 --uninstall / --release-only 时）：安装或升级、
+# 卸载、只更新 Agent 发布文件。之所以问在最前面：
 # 卸载的入口不该只有"读过文档才知道怎么打"的那一条命令，而收尾提示里那句
 # `sh deploy-master.sh --uninstall` 对 `curl … | sh` 跑起来的人根本不存在——
 # 他的机器上**没有这个文件**。见文件末尾"卸载提示怎么给"那一段。
+#
+# "只更新 Agent 发布文件"是同一类问题：GitHub 上出了新的 Agent 版本时，原先要
+# 自己去 Release 页看版本号、再手敲一条 `probe-master dist pull --version 0.1.2
+# --from .../download/v0.1.2`（版本号敲错就是 404）。放进这一问之后，
+# "把新节点装到的 Agent 升到最新"＝重跑脚本 → 选 3。
 #
 # 只看不装（打印将要写入的 master.yaml，不建用户/目录、不注册服务、不建管理员）：
 #   PROBE_NO_ASK=1 sh deploy-master.sh --bin ./bin/probe-master --dry-run
@@ -184,6 +190,8 @@ ACME_DNS_TOKEN="${PROBE_ACME_DNS_TOKEN:-}"
 DRY_RUN=""
 NO_ASK=""
 UNINSTALL=""
+# 只更新 Agent 发布文件（不动 Master 的二进制、配置与服务）——问答题里的第 3 项。
+RELEASE_ONLY=""
 KEEP_DATA=""
 # 谁在终结 TLS：
 #   master  Master 自己（内置 ACME / 自签 / 你给的证书）——今天的行为
@@ -312,6 +320,13 @@ TLS：
   --uninstall               停服务并删除单元/二进制/配置/数据/系统用户
                             （默认连数据一起清；数据目录里有数据库与 master.key）
   --keep-data               与 --uninstall 同用，保留数据目录
+
+只更新 Agent 发布文件（不动 Master 的二进制、配置与服务）：
+  --release-only            去 GitHub 查**最新 Release**，把它的 Agent 发布文件
+                            拉进 data_dir/dist/<最新版本>/。
+                            版本号由脚本自己查（不必再手敲 --version），也不需要
+                            注册码；已装好的节点随后用 `probe-agent upgrade` 升级。
+                            与 --uninstall 互斥；配 --dry-run 只查版本不写盘。
 EOF
 }
 
@@ -346,11 +361,51 @@ while [ $# -gt 0 ]; do
 	--tls-terminator) TLS_TERMINATOR="${2:-}"; TLS_TERMINATOR_GIVEN="1"; shift 2 ;;
 	--proxy-domain) PROXY_DOMAINS="${2:-}"; shift 2 ;;
 	--uninstall) UNINSTALL="1"; shift ;;
+	--release-only) RELEASE_ONLY="1"; shift ;;
 	--keep-data) KEEP_DATA="1"; shift ;;
 	-h | --help) usage; exit 0 ;;
 	*) echo "未知参数：$1" >&2; usage; exit 2 ;;
 	esac
 done
+
+# ---------------------------------------------------------------------------
+# 0-0) 由默认值推导出来的路径、平台与模式互斥
+# ---------------------------------------------------------------------------
+#
+# 这几项**上移到问答之前**，是为了让 0b/0c 两个模式分支能用同一份取值：
+#   · CFG    —— "只更新发布文件"要读的配置（data_dir 从它里面来）。
+#               全文件**只在这里定义一次**：早先它写在 3/7 那一步里，于是任何
+#               更早就要用它的分支都只能自己再拼一次 "$DIR/master.yaml"，
+#               两份规则迟早漂移（改了一处、另一处还在用旧的）。
+#   · _mp_plat —— 平台名（install.sh 的命名一致），问答里要显示、拉取时要传给 --platform。
+# 位置在参数解析循环之后：--dir / --bin-dir 都已经生效，取值是最终值。
+CFG="$DIR/master.yaml"
+
+# 本机平台（与 install.sh 的命名一致：<os>_<arch>）。
+case "$(uname -s 2>/dev/null)" in
+Linux) _mp_os="linux" ;;
+Darwin) _mp_os="darwin" ;;
+FreeBSD) _mp_os="freebsd" ;;
+*) _mp_os="" ;;
+esac
+case "$(uname -m 2>/dev/null)" in
+x86_64 | amd64) _mp_arch="amd64" ;;
+aarch64 | arm64) _mp_arch="arm64" ;;
+armv7l) _mp_arch="armv7" ;;
+armv6l) _mp_arch="armv6" ;;
+i386 | i686) _mp_arch="386" ;;
+riscv64) _mp_arch="riscv64" ;;
+*) _mp_arch="" ;;
+esac
+_mp_plat="${_mp_os}_${_mp_arch}"
+
+# --uninstall 与 --release-only 是两种**互斥**的模式。同时给就是自相矛盾的
+# 要求，直接拒绝——而不是让其中一个悄悄赢：悄悄赢的那种，用户以为做了 A、
+# 实际做了 B，而且两条路都不会报错。
+if [ -n "$UNINSTALL" ] && [ -n "$RELEASE_ONLY" ]; then
+	echo "错误：--uninstall 与 --release-only 不能同时使用（一个是卸载、一个是只更新发布文件）。" >&2
+	exit 2
+fi
 
 # ---------------------------------------------------------------------------
 # 0) 交互问答：问什么、什么时候问
@@ -574,7 +629,204 @@ confirm() {
 }
 
 # ---------------------------------------------------------------------------
-# 0b) 第一个问题：安装，还是卸载
+# 0a-2) Agent 发布文件的公共零件（6c 与"只更新发布文件"共用）
+# ---------------------------------------------------------------------------
+#
+# 这一组函数是**必须共用**的，不是顺手抽出来的：
+#   · 6c（部署收尾把发布文件拉进 data_dir/dist/）与
+#   · 0c（只更新发布文件，见下面的模式分支）
+# 做的是同一件事——"把某个版本的发布文件取回来并校验落盘"。两份实现的下场是
+# 典型的"改一处＝没改"：某天给拉取加上一个新参数、或改了失败时的提示，只落在一处，
+# 另一条路静默地继续用旧行为，而两条路都自称成功。
+#
+# 三件事刻意只在这里出现一次：
+#   ① 默认发布源 URL 的拼法（`.../releases/download/v<版本>`）；
+#   ② 失败时给用户的手工补救命令；
+#   ③ "拉哪个范围"的问答措辞与默认值。
+
+# default_dist_source <版本>：默认发布源的 URL 前缀。
+#
+# 版本号要带 v 前缀（Release 标签是 v0.1.2），而目录名不带——这两者的区别
+# 就是当年"照默认 URL 去拉必然 404"的根因，所以拼法只能有一处。
+default_dist_source() {
+	echo "https://github.com/$RELEASE_REPO/releases/download/v$1"
+}
+
+# dist_pull_hint [版本]：拉取失败/跳过时的手工补救提示。
+#
+# 三条失败路径共用（跳过、版本号不是发布版本、拉取失败），省得改一处漏两处。
+dist_pull_hint() {
+	echo "    可以手动补（或在能访问 GitHub 的机器上拉好后拷进 $DATA/dist/）："
+	printf '      %s dist pull --version %s --from %s\n' \
+		"$BIN_DIR/probe-master" "${1:-<版本>}" "${DIST_SOURCE:-$(default_dist_source "${1:-<版本>}")}"
+	echo "    这个机房的网络到不了 GitHub 时，也可以把「设置 → 安装与下载」里的"
+	echo "    install.dist_base 指向你自己的镜像，再从那台镜像上取发布文件。"
+}
+
+# ask_dist_pull_scope [默认值]：问"拉哪些平台的发布文件"，结果写进 DIST_PULL。
+#
+# 6c（部署收尾）与 0c（只更新发布文件）问的是同一个问题：措辞、选项、默认值、
+# 以及"上次选过什么"的记忆都只能有一份——两份措辞的下场是改一处漏一处。
+#
+# 默认值留空时取记忆里的选择（.answers 的 DIST_PULL）。记忆只当**默认值**：
+# 拉取是幂等的，重新问一次不花钱；而"上次选过 local"的人不该被悄悄升级成
+# "这次拉全部 80MB"。
+#
+# "先跳过"这一项两条路都保留：在部署流程里它是"先装完、稍后自己补"，
+# 在只更新发布文件时它就是"算了，什么都不做"。同一个词、同一个含义。
+ask_dist_pull_scope() {
+	_ds_def="${1:-}"
+	if [ -z "$_ds_def" ]; then
+		_ds_def="1"
+		case "$(ans_get DIST_PULL)" in
+		local) _ds_def="2" ;;
+		skip) _ds_def="3" ;;
+		esac
+	fi
+	if [ -n "$ASK" ]; then
+		printf '  1) 全部平台   拉 Release 里全部 Agent 产物（推荐：节点可能是别的架构）\n' >&2
+		printf '  2) 只拉本机   只拉 %s，省流量\n' "${_mp_plat:-本机}" >&2
+		printf '  3) 先跳过     之后自己跑（不跑的话一键安装脚本会 404）\n' >&2
+	fi
+	ask "选择发布文件拉取范围（1/2/3）" "$_ds_def"
+	case "$ASK_REPLY" in
+	2 | local | LOCAL | Local | 本机) DIST_PULL="local" ;;
+	3 | skip | SKIP | Skip | none | 跳过) DIST_PULL="skip" ;;
+	*) DIST_PULL="all" ;;
+	esac
+	ans_put DIST_PULL "$DIST_PULL"
+}
+
+# pull_agent_release <版本> <范围 all|local>：把发布文件取回来并确认真的落了盘。
+#
+# 返回 0 表示"磁盘上确实有了"；非 0 表示失败（**由调用方决定怎么处理**，
+# 不在这里 exit——部署流程里这一步失败不该把整个部署拖倒，见 6c 的 ①）。
+#
+# 判据落在磁盘上（`-s .../SHA256SUMS` + 产物计数），不落在 HTTP 状态码上：
+# /dist/ 受 install.mode 门控，刚部署完一台新 Master 时它返回 404 是**预期行为**，
+# 拿它当判据会把每次正常部署都报成失败。见 6c 的 ②。
+pull_agent_release() {
+	_pa_ver="$1"
+	_pa_scope="$2"
+	# 版本号是本函数唯一的参数来源；空值绝不能带进 dist pull —— 那会拼出
+	# `--version ""`，而下游按目录名去创建 data_dir/dist//，症状是"拉了个空版本"。
+	if [ -z "$_pa_ver" ]; then
+		echo "错误：没有可用的发布版本号，不拉取。" >&2
+		return 1
+	fi
+	if [ -z "$DIST_SOURCE" ]; then
+		DIST_SOURCE="$(default_dist_source "$_pa_ver")"
+	fi
+	echo "    来源：$DIST_SOURCE"
+
+	_pa_rc=""
+	if [ "$_pa_scope" = "local" ]; then
+		echo "    范围：只拉 $_mp_plat"
+		"$_mp_bin" dist pull --config "$CFG" --version "$_pa_ver" \
+			--platform "$_mp_plat" --from "$DIST_SOURCE" || _pa_rc=$?
+	else
+		echo "    范围：全部平台"
+		"$_mp_bin" dist pull --config "$CFG" --version "$_pa_ver" --all \
+			--from "$DIST_SOURCE" || _pa_rc=$?
+	fi
+	_pa_rc="${_pa_rc:-0}"
+
+	# 判据：文件真的在、且非空。
+	if [ "$_pa_rc" != "0" ] || [ ! -s "$DATA/dist/$_pa_ver/SHA256SUMS" ]; then
+		return 1
+	fi
+	_pa_n="$(ls -1 "$DATA/dist/$_pa_ver" 2>/dev/null | grep -c '^probe-agent_' || true)"
+	if [ "${_pa_n:-0}" -le 0 ]; then
+		return 1
+	fi
+
+	# 发布文件是新装的（root 建的），数据目录的主人是 probe。按文件权限
+	# 0644/目录 0755 本来也读得到，但"数据目录里的东西属于 probe"是
+	# 一条更简单的规则——将来有人把 data_dir 挪到别处时不会踩坑。
+	if id -u probe >/dev/null 2>&1; then
+		chown -R probe:probe "$DATA/dist" 2>/dev/null || \
+			chown -R probe "$DATA/dist" 2>/dev/null || true
+	fi
+	_pa_done="$DATA/dist/$_pa_ver"
+	printf '    已入库 %s 个 Agent 产物 + SHA256SUMS → %s\n' "$_pa_n" "$_pa_done"
+	return 0
+}
+
+# resolve_latest_agent_version：查 GitHub 上的最新 Release，输出归一化后的版本号。
+#
+# 为什么这条查询在**脚本里**而不是二进制里（`dist latest` 之类）：
+# 部署脚本来自 `main`（每次取最新），而节点上装着的 probe-master 来自某个
+# **Release 标签**——两者版本天生不同步（这条差异踩过好几次，见文件里
+# binary_supports_config_key 的说明）。把查询放进二进制，等于要求"先把
+# Master 升级到带这个子命令的版本才能用它"，而这个功能恰恰是用在"Master
+# 已经在跑、只想更新 Agent 发布文件"的场合。放在脚本里则**任何版本都能用**，
+# 因为下游的 `dist pull --version/--from` 契约是稳定的、早就存在的。
+#
+# 两个来源，任一个能用就行（GitHub API 有 60 次/小时的匿名限额，机房出口 IP
+# 常常是被共享的，所以必须有一条不限额的兜底）：
+#   ① api.github.com/repos/<repo>/releases/latest  → tag_name
+#   ② github.com/<repo>/releases/latest 的 302 Location → .../releases/tag/v0.1.2
+#
+# ⚠ 返回值必须过**形态闸**（纯数字点分）。这条不是防御性编程：解析失败时
+# 拿到的往往是**别的文字**——比如旧二进制的 usage 行、HTML 错误页、JSON 里的
+# 一整段。不校验就会把那段文字当版本号，拼出一个 `.../releases/download/v<那段文字>`
+# 的 URL，然后以"发布文件拉取失败"的面目出现，根因被埋掉。同理，这也挡住了
+# 形如 `../../x` 的 tag 变成 data_dir 下的路径。
+resolve_latest_agent_version() {
+	_rl_api="https://api.github.com/repos/$RELEASE_REPO/releases/latest"
+	_rl_web="https://github.com/$RELEASE_REPO/releases/latest"
+	_rl_fetch="$(command -v curl 2>/dev/null || true)"
+	_rl_wget="$(command -v wget 2>/dev/null || true)"
+	_rl_tag=""
+
+	if [ -n "$_rl_fetch" ]; then
+		# `|| true` 不能省：脚本开头是 `set -eu`，而"赋值 + 命令替换"里的命令
+		# 返回非 0 会让整个脚本立刻退出——偏偏这里最常见的正是**正常的失败**
+		# （GitHub 不可达、API 限流 403）。被测的失败必须能被自己的代码处理。
+		_rl_tag="$("$_rl_fetch" -fsSL --max-time 20 \
+			-H 'Accept: application/vnd.github+json' \
+			-H 'User-Agent: probe-deploy' "$_rl_api" 2>/dev/null |
+			sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1 || true)"
+	elif [ -n "$_rl_wget" ]; then
+		_rl_tag="$("$_rl_wget" -qO- --timeout=20 \
+			--header='Accept: application/vnd.github+json' "$_rl_api" 2>/dev/null |
+			sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1 || true)"
+	fi
+
+	# 兜底：不限额的重定向来源。`-o /dev/null -w '%{redirect_url}'` 不跟跳转，
+	# 直接给出 Location，省掉解析 HTML 这件事。
+	if [ -z "$_rl_tag" ] && [ -n "$_rl_fetch" ]; then
+		_rl_loc="$("$_rl_fetch" -fsS -o /dev/null -w '%{redirect_url}' --max-time 20 "$_rl_web" 2>/dev/null || true)"
+		case "$_rl_loc" in
+		*/releases/tag/*) _rl_tag="${_rl_loc##*/releases/tag/}" ;;
+		esac
+	fi
+
+	if [ -z "$_rl_tag" ]; then
+		echo "查不到最新发布版本（GitHub 不可达？仓库 $RELEASE_REPO 还没有 Release？）。" >&2
+		return 1
+	fi
+
+	# 归一化：Release 标签带 v 前缀，发布文件的目录名不带。
+	_rl_ver="${_rl_tag#v}"
+	_rl_ver="${_rl_ver#V}"
+	# 形态闸：纯数字点分。判据写在**取到的那个值**上，而不是"有没有拿到东西"。
+	case "$_rl_ver" in
+	'' | *[!0-9.]* | .* | *. | *..*)
+		echo "最新发布标签是「$_rl_tag」，它不是一个「纯数字点分」的版本号，不敢拿它去拼下载路径。" >&2
+		echo "  （这条闸同时也是在挡形如 v../../x 的标签变成 data_dir 下的路径。）" >&2
+		echo "  用自定义标签（nightly 之类）时请显式指定版本：" >&2
+		printf '    %s dist pull --config %s --version <版本> \\\n' "$BIN_DIR/probe-master" "$CFG" >&2
+		printf '      --from https://github.com/%s/releases/download/v<版本>\n' "$RELEASE_REPO" >&2
+		return 1
+		;;
+	esac
+	echo "$_rl_ver"
+	return 0
+}
+
+# ---------------------------------------------------------------------------
+# 0b) 第一个问题：安装/升级、卸载，还是只更新 Agent 发布文件
 # ---------------------------------------------------------------------------
 #
 # 这一问是用户提的：跑完一次安装，脚本最后打印"卸载：sh deploy-master.sh --uninstall"，
@@ -588,24 +840,144 @@ confirm() {
 #
 # 只问不设默认（回车取 1=安装）：卸载是破坏性操作，不该被"一路回车"选中。
 # 已经给了 --uninstall 就不再问——显式参数优先于面试。
-if [ -z "$UNINSTALL" ] && [ -n "$ASK" ]; then
+#
+# 第 3 项（只更新发布文件）是用户加的：Master 装着某个版本、GitHub 上已经有更新的
+# Agent 发布版时，更新它原本要人肉敲一条带具体版本号的 dist pull 命令
+# （`--version 0.1.2 --from .../download/v0.1.2`）——版本号得自己去 Release 页看，
+# 敲错就是 404。放进这一问之后，"更新 Agent"变成"重跑脚本 → 选 3"，版本号由脚本查。
+#
+# 它是**只读发布目录之外什么都不碰**的模式：不重装二进制、不重写配置、不重启服务，
+# 所以放在卸载位之后、TLS 问答之前，选它就直接做完退出（见 0c）。
+if [ -z "$UNINSTALL" ] && [ -z "$RELEASE_ONLY" ] && [ -n "$ASK" ]; then
 	cat >&2 <<'EOF'
 
-这个脚本可以做两件事：
+这个脚本可以做三件事：
 
   1) 安装 / 升级 Master（默认）
   2) 卸载 Master（停服务 → 删单元、二进制、配置、数据、系统用户）
+  3) 只更新 Agent 发布文件（拉 GitHub 上最新的 Release 到 data_dir/dist/，
+     不动 Master 的二进制、配置与服务）
 
 EOF
-	read_line _mode "请输入 1 或 2 [1]: " || _mode=""
+	read_line _mode "请输入 1、2 或 3 [1]: " || _mode=""
 	case "$_mode" in
 	2 | uninstall | UNINSTALL | Uninstall | 卸载) UNINSTALL="1" ;;
+	3 | release | RELEASE | Release | 更新 | 发布文件) RELEASE_ONLY="1" ;;
 	*) : ;;
 	esac
 	if [ -n "$UNINSTALL" ]; then
 		printf '已选择卸载。默认**连数据一起删**（数据目录里有数据库与 master.key）。\n' >&2
 		printf '想保留数据请在下一个问题里回答 n，或改用 --keep-data。\n' >&2
 	fi
+fi
+
+# ---------------------------------------------------------------------------
+# 0c) 只更新 Agent 发布文件（--release-only；问答题里的第 3 项）
+# ---------------------------------------------------------------------------
+#
+# 它做的事只有三件：查最新版本 → 校验形态 → 拉发布文件（复用 0a-2 的那套零件）。
+#
+# 刻意**不做**的事，每一条都是"顺手做了会造成伤害"：
+#   · 不换二进制、不写 master.yaml、不动单元、不重启服务——用户要的是"更新
+#     新节点装到的 Agent 版本"，把 Master 一起换了属于另一件事；
+#   · 不问 TLS / 监听端口 / 管理员口令：与这件事毫无关系，问了只会让人以为在重装；
+#   · 不建目录、不建用户（那些由 3/7 步负责），这里只往已有目录里写文件。
+#
+# 放在卸载块**之前**：两者都是"只做一件事就退出"的模式，紧挨着 0b 更好读。
+# 同时给 --uninstall 与 --release-only 的组合已在 0-0 段拒绝，不会走到这里。
+if [ -n "$RELEASE_ONLY" ]; then
+	echo "==> 只更新 Agent 发布文件（Master 的二进制、配置与服务都不动）"
+
+	# 用哪个二进制去取件，优先级：--bin（调用方刚编译/刚下载的那份）> 已安装的那份。
+	# 允许 --bin 是有意的：安装入口（install-master.sh）编译出来的二进制一定不比
+	# 节点上装着的旧，用它就不必"先升级 Master 才能更新 Agent 发布文件"。
+	if [ -n "$BIN_SRC" ]; then
+		_ro_bin="$BIN_SRC"
+	else
+		_ro_bin="$BIN_DIR/probe-master"
+	fi
+
+	# dry-run 不需要那个二进制（它一个字节都不写），所以缺了只报警告：
+	# dry-run 的价值正是"什么都还没装的时候先看看会发生什么"。
+	if [ -n "$DRY_RUN" ] && [ ! -x "$_ro_bin" ]; then
+		echo "    [dry-run] 注意：$_ro_bin 不可执行，正式执行到这一步会失败。" >&2
+		echo "              （用 --bin-dir 指定已安装的 Master 在哪，或用 --bin 给一份二进制）" >&2
+	fi
+
+	# 版本查询要在取件之前完成，**失败即止**。这时候退回去拉"本机二进制版本"
+	# 是静默换成另一件事：用户以为更新到了最新，实际拉的是他早就在跑的旧版本，
+	# 而一路上没有任何提示。
+	if [ -n "$DRY_RUN" ]; then
+		if _ro_probe="$(resolve_latest_agent_version)"; then
+			_ro_ver="$_ro_probe"
+		else
+			echo "    [dry-run] 版本查询失败（原因见上）；正式执行时这里会中止。" >&2
+			echo "==> dry-run：未改动任何东西。"
+			exit 1
+		fi
+	else
+		_ro_ver="$(resolve_latest_agent_version)" || exit 1
+	fi
+
+	# 形态闸再过一遍。resolve_* 内部已经校验过，这里要的是"不管它将来怎么改，
+	# 带进 dist pull 的一定是纯数字点分"——判据押在**要用的那个值**上，
+	# 而不是押在"查询函数有没有做过校验"这件事上。
+	case "$_ro_ver" in
+	'' | *[!0-9.]* | .* | *. | *..*)
+		echo "错误：查到的版本号「$_ro_ver」不是纯数字点分，拒绝使用。" >&2
+		exit 1
+		;;
+	esac
+
+	_ro_local="$("$_ro_bin" version 2>/dev/null | awk '{print $NF}')"
+	echo "==> GitHub 上的最新发布版本：v$_ro_ver（本机 Master 二进制：${_ro_local:-未知}）"
+
+	if [ -n "$DRY_RUN" ]; then
+		echo "    [dry-run] 将会拉取到 $DATA/dist/$_ro_ver/，来源 $(default_dist_source "$_ro_ver")"
+		echo "    [dry-run] 正式执行时还会问一次「拉全部平台还是只拉本机」，再校验落盘（dry-run 不问）。"
+		echo "==> dry-run：未改动任何东西。"
+		exit 0
+	fi
+
+	if [ "$(id -u)" -ne 0 ]; then
+		echo "错误：更新发布文件要往 $DATA/dist/ 里写，需要 root 或 sudo。" >&2
+		exit 1
+	fi
+	# 非 dry-run 时它必须真的可用：查询靠它（如果脚本没被单独替换）与取件都靠它。
+	if [ ! -x "$_ro_bin" ]; then
+		echo "错误：找不到可执行的 Master 二进制：$_ro_bin" >&2
+		echo "      它要用来读 $CFG 并把发布文件写进 data_dir/dist/。用 --bin-dir 指定" >&2
+		echo "      已安装的 Master 在哪，或用 --bin 给一份二进制（例如刚编译出来的那份）。" >&2
+		exit 1
+	fi
+	if [ ! -f "$CFG" ]; then
+		echo "错误：读不到 $CFG —— 这台机器上还没有部署过 Master？" >&2
+		echo "      首次部署请选 1（安装 / 升级）。" >&2
+		exit 1
+	fi
+
+	# 默认值刻意写死 "1" 而不是沿用记忆：这个模式存在的意义就是"拉最新"，
+	# 上次选过"跳过"的人不该因为一次历史选择而在这里什么都不做。
+	ask_dist_pull_scope "1"
+	if [ "$DIST_PULL" = "skip" ]; then
+		echo "已跳过：没有拉取任何文件（Master 与发布目录都没变）。"
+		exit 0
+	fi
+	if [ "$DIST_PULL" = "local" ] && [ -z "$_mp_plat" ]; then
+		echo "错误：认不出本机平台（uname 结果不在已知表里），不能只拉本机。" >&2
+		echo "      可以改选全部平台，或直接用 probe-master dist pull 手工指定。" >&2
+		exit 1
+	fi
+	if pull_agent_release "$_ro_ver" "$DIST_PULL"; then
+		echo "==> 完成：$DATA/dist/$_ro_ver 已就绪（下同版本号的 Agent 就是它）"
+		echo "    新节点：后台「节点 → 注册码」生成注册码，按页面给的命令装即可"
+		echo "    已装节点：sudo probe-agent upgrade --check && sudo probe-agent upgrade"
+	else
+		echo "错误：发布文件没有入库（$DATA/dist/$_ro_ver 里没有可用的 SHA256SUMS）。" >&2
+		dist_pull_hint "$_ro_ver"
+		exit 1
+	fi
+	exit 0
 fi
 
 # ---------------------------------------------------------------------------
@@ -1495,7 +1867,9 @@ fi
 
 # 配置路径与渲染函数放在这里（而不是"3/7"那一步里面）：--dry-run 要在改动系统
 # **之前**就把将要写入的内容打出来。
-CFG="$DIR/master.yaml"
+#
+# CFG 自身的定义已经上移到文件前部的"0-0"段（问答与"只更新发布文件"都要用它，
+# 只能有一份来源）。这里保留这段说明，是因为"为什么这么早"这个理由仍然成立。
 
 # binary_supports_config_key <键名>：二进制认不认识某个配置键。
 #
@@ -2694,32 +3068,8 @@ echo "==> 6c/7 发布文件入库（/dist/ 里放的是 Agent 二进制，新节
 _mp_bin="$BIN_DIR/probe-master"
 _mp_ver="$("$_mp_bin" version 2>/dev/null | awk '{print $NF}')"
 
-# 手动兜底提示：三条失败/跳过路径共用，省得改一处漏两处。
-dist_pull_hint() {
-	echo "    可以手动补（或在能访问 GitHub 的机器上拉好后拷进 $DATA/dist/）："
-	printf '      %s dist pull --version %s --from %s\n' \
-		"$BIN_DIR/probe-master" "${_mp_ver:-<版本>}" "${DIST_SOURCE:-<发布源 URL>}"
-	echo "    这个机房的网络到不了 GitHub 时，也可以把「设置 → 安装与下载」里的"
-	echo "    install.dist_base 指向你自己的镜像，再从那台镜像上取发布文件。"
-}
-
-# 本机平台（与 install.sh 的命名一致：<os>_<arch>）。
-case "$(uname -s 2>/dev/null)" in
-Linux) _mp_os="linux" ;;
-Darwin) _mp_os="darwin" ;;
-FreeBSD) _mp_os="freebsd" ;;
-*) _mp_os="" ;;
-esac
-case "$(uname -m 2>/dev/null)" in
-x86_64 | amd64) _mp_arch="amd64" ;;
-aarch64 | arm64) _mp_arch="arm64" ;;
-armv7l) _mp_arch="armv7" ;;
-armv6l) _mp_arch="armv6" ;;
-i386 | i686) _mp_arch="386" ;;
-riscv64) _mp_arch="riscv64" ;;
-*) _mp_arch="" ;;
-esac
-_mp_plat="${_mp_os}_${_mp_arch}"
+# 本机平台 `_mp_plat` 不在这里算：问答里要显示它、拉取时要传给 --platform，
+# 两处必须同一个值 → 定义在文件前部的"0-0"段（一份来源）。
 
 # 只有"纯数字点分"才可能对上 Release 标签。
 case "${_mp_ver:-}" in
@@ -2730,28 +3080,20 @@ esac
 if [ -n "$NO_DIST_PULL" ] || [ "$DIST_PULL" = "skip" ]; then
 	echo "    已跳过（--no-dist-pull / --dist-pull skip）。"
 	echo "    ⚠ 没有发布文件时，一键安装脚本会在下载 probe-agent 那一步 404。"
+	# 版本留空 → 提示里用 <版本> 占位。这一支里本来就没有"将要拉取的版本"。
 	dist_pull_hint
-	_mp_pull_rc="0"
 	_mp_done=""
 elif [ -z "$_mp_releasable" ]; then
 	echo "    当前二进制版本是「${_mp_ver:-未知}」，不是发布版本号，跳过自动拉取。"
 	echo "    ⚠ 没有发布文件时，一键安装脚本会在下载 probe-agent 那一步 404。"
+	# 同理：这一支里 $_mp_ver 是 dev 之类，把它填进命令示例只会误导。
 	dist_pull_hint
-	_mp_pull_rc="0"
 	_mp_done=""
 else
-	if [ -z "$DIST_SOURCE" ]; then
-		DIST_SOURCE="https://github.com/$RELEASE_REPO/releases/download/v$_mp_ver"
-	fi
+	# 范围问答、默认值（含"上次选过什么"的记忆）与那句措辞都在 ask_dist_pull_scope
+	# 里——0c（只更新发布文件）走的是同一个函数。两份措辞的下场是"改一处＝没改"：
+	# 给范围加一个选项、或改了默认值，只落在一条路上，另一条静默地继续旧行为。
 	if [ -z "$DIST_PULL_GIVEN" ]; then
-		# 记忆里的选择只当默认值：拉取是幂等的，重新问一次不花钱，但"上次选过
-		# local"的人不该被悄悄升级成"这次拉全部 80MB"。
-		_dp_mem="$(ans_get DIST_PULL)"
-		case "$_dp_mem" in
-		local) _dp_def="2" ;;
-		skip) _dp_def="3" ;;
-		*) _dp_def="1" ;;
-		esac
 		if [ -n "$ASK" ]; then
 			cat >&2 <<'EOF'
 
@@ -2760,62 +3102,27 @@ Agent 二进制从哪来：Master 的 /dist/ 就是新节点的**自举来源**�
 下载 probe-agent 时只会得到 404（/install.sh 本身是内嵌的，所以那一步正常）。
 EOF
 		fi
-		if [ -n "$ASK" ]; then
-			printf '  1) 全部平台   拉 Release 里全部 Agent 产物（推荐：节点可能是别的架构）\n' >&2
-			printf '  2) 只拉本机   只拉 %s，省流量\n' "${_mp_plat:-本机}" >&2
-			printf '  3) 先跳过     之后自己跑（不跑的话一键安装脚本会 404）\n' >&2
-		fi
-		ask "选择发布文件拉取范围（1/2/3）" "$_dp_def"
-		case "$ASK_REPLY" in
-		1 | all | ALL | All) DIST_PULL="all" ;;
-		2 | local | LOCAL | Local) DIST_PULL="local" ;;
-		3 | skip | SKIP | Skip | none) DIST_PULL="skip" ;;
-		*) DIST_PULL="$ASK_REPLY" ;;
-		esac
-		ans_put DIST_PULL "$DIST_PULL"
+		ask_dist_pull_scope
 	fi
 
 	if [ "$DIST_PULL" = "skip" ]; then
 		echo "    已跳过。⚠ 没有发布文件时，一键安装脚本会在下载 probe-agent 那一步 404。"
-		dist_pull_hint
-		_mp_pull_rc="0"
+		dist_pull_hint "$_mp_ver"
 		_mp_done=""
 	elif [ "$DIST_PULL" = "local" ] && [ -z "$_mp_plat" ]; then
 		echo "    认不出本机平台（uname 结果不在已知表里），跳过自动拉取。"
-		dist_pull_hint
-		_mp_pull_rc="0"
+		dist_pull_hint "$_mp_ver"
 		_mp_done=""
 	else
-		echo "    来源：$DIST_SOURCE"
-		if [ "$DIST_PULL" = "local" ]; then
-			echo "    范围：只拉 $_mp_plat"
-			"$_mp_bin" dist pull --config "$CFG" --version "$_mp_ver" \
-				--platform "$_mp_plat" --from "$DIST_SOURCE" || _mp_pull_rc=$?
-		else
-			echo "    范围：全部平台"
-			"$_mp_bin" dist pull --config "$CFG" --version "$_mp_ver" --all \
-				--from "$DIST_SOURCE" || _mp_pull_rc=$?
-		fi
-		_mp_pull_rc="${_mp_pull_rc:-0}"
-
-		# 判据：文件真的在、且非空（理由见上面的 ②）。
+		# 取件、落盘判据、属主交接都在 pull_agent_release 里，与 0c 共用。
+		# 它只回答"成了没有"；**失败不回滚**这个决定留在调用方（理由见上面 ①）——
+		# 把回滚做进共用函数里，0c 那条路径就会连"更新失败"一起把整个部署回滚掉。
 		_mp_done=""
-		if [ "$_mp_pull_rc" = "0" ] && [ -s "$DATA/dist/$_mp_ver/SHA256SUMS" ]; then
-			_mp_n="$(ls -1 "$DATA/dist/$_mp_ver" 2>/dev/null | grep -c '^probe-agent_' || true)"
-			if [ "${_mp_n:-0}" -gt 0 ]; then
-				_mp_done="1"
-				printf '    已入库 %s 个 Agent 产物 + SHA256SUMS → %s\n' "$_mp_n" "$DATA/dist/$_mp_ver"
-			fi
+		if pull_agent_release "$_mp_ver" "$DIST_PULL"; then
+			_mp_done="1"
 		fi
 
 		if [ -n "$_mp_done" ]; then
-			# 发布文件是新装的（root 建的），数据目录的主人是 probe。按文件权限
-			# 0644/目录 0755 本来也读得到，但"数据目录里的东西属于 probe"是
-			# 一条更简单的规则——将来有人把 data_dir 挪到别处时不会踩坑。
-			if id -u probe >/dev/null 2>&1; then
-				chown -R probe:probe "$DATA/dist" 2>/dev/null || \
-					chown -R probe "$DATA/dist" 2>/dev/null || true
-			fi
 			# 真请求一次。能被 install.mode 挡住，那就把"为什么现在打不开、
 			# 什么时候能打开"直接说清楚——而不是留一句"稍后自查"。
 			_mp_port="$(split_port "$PUBLIC_LISTEN")"
@@ -2858,9 +3165,9 @@ EOF
 				;;
 			esac
 		else
-			echo "    ⚠ 发布文件拉取失败（rc=$_mp_pull_rc）。Master 本身不受影响，"
+			echo "    ⚠ 发布文件拉取失败。Master 本身不受影响，"
 			echo "      但新节点装机时会在下载 probe-agent 那一步 404。"
-			dist_pull_hint
+			dist_pull_hint "$_mp_ver"
 		fi
 	fi
 fi

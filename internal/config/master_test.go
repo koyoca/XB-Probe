@@ -427,7 +427,17 @@ func TestDeployScriptsOnlyWriteKnownConfigKeys(t *testing.T) {
 
 	// 例：`\t\techo "public_listen: \"...\""` / `  [void]$lines.Add("tls:")`
 	// 以及单引号形式的 `echo 'tls:'`。字符串里带缩进的（`"  mode: "`）不匹配。
-	keyRe := regexp.MustCompile(`(?:echo\s+|lines\.Add\()['"]([a-z_]+):`)
+	//
+	// 冒号后面那个 `(?:[\s'"])` 不能省：**URL 的 scheme 长得和一个键一模一样**
+	// （`echo "https://github.com/..."` 里 `https:` 会被当成键 "https"）。
+	// 判据收在"冒号后面是什么"上，既排掉 URL，又恰好是 YAML 的规则本身——
+	// 真正的映射键后面必须是空白或直接结束（`key: value` / `key:`），
+	// 写成 `key:value` 在 YAML 里根本不是映射，所以这里不会漏掉任何真键。
+	//
+	// 为什么写成"消费一个字符"而不是前瞻 `(?=[\s'"])`：Go 的 regexp 是 RE2，
+	// **不支持前瞻**（`error parsing regexp: unsupported Perl syntax: (?=`）。
+	// 多消费的那个字符不影响判据——我们只取第一组。
+	keyRe := regexp.MustCompile(`(?:echo\s+|lines\.Add\()['"]([a-z_]+):(?:[\s'"])`)
 
 	for _, rel := range []string{
 		"../../scripts/deploy-master.sh",

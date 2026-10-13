@@ -3,6 +3,7 @@ package dist
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -942,43 +943,156 @@ func TestMasterTerminatorChecksForCaddyPortConflict(t *testing.T) {
 //
 // 这条钉三件事：①部署流程必须自己拉发布文件；②拉失败不许回滚整个部署；
 // ③判据落在磁盘上（/dist/ 受 install.mode 门控，刚部署完必然是关的）。
+// shRegion 切出脚本里 startMark → endMark 之间的那一段。
+//
+// **必须切区间**：本文件里别处也有 `rollback`、也有 `dist` 字样，全文搜索会让
+// 别的路径替这一段作证（"判据只认那一处实现"）。
+func shRegion(t *testing.T, rel, body, startMark, endMark string) string {
+	t.Helper()
+	i := strings.Index(body, startMark)
+	if i < 0 {
+		t.Fatalf("%s 里找不到起止标记 %q —— 判据已与脚本写法脱节", rel, startMark)
+	}
+	rest := body[i:]
+	j := strings.Index(rest, endMark)
+	if j < 0 {
+		t.Fatalf("%s 里找不到结束标记 %q —— 判据已与脚本写法脱节", rel, endMark)
+	}
+	return rest[:j]
+}
+
+// shFuncBody 切出一个 shell 函数的函数体（`名字() {` → 下一个行首的 `}`）。
+//
+// 为什么不直接对全文 `Contains`：**"文件里有这个函数"不等于"它被调用了"**，
+// 反过来"全文出现过 dist pull"也可能来自注释、或来自**另一条路径**的同名实现。
+// 判据要么钉函数体内部，要么钉调用点，不能钉"文件里有没有这个词"。
+func shFuncBody(t *testing.T, rel, body, sig string) string {
+	t.Helper()
+	return shRegion(t, rel, body, sig+"() {", "\n}\n")
+}
+
+// shCalls 判断一段 shell 里**调用了**某个函数，而不是"某个注释里提到过它"。
+//
+// 为什么不能用 strings.Contains：脚本的注释里经常就写着函数名（"…都在
+// ask_dist_pull_scope 里"），而那行注释离调用点只隔几行。单凭 Contains 判定，
+// **把调用整行删掉**这种最该被抓到的回归会照样全绿 —— 又一次"文件里有这个
+// 函数"不等于"它被调用了"，只不过这次的替身是注释而不是另一条路径。
+//
+// 判据落在"行首（允许缩进）就是函数名、后面跟空白或行尾"这个形态上。
+func shCalls(region, name string) bool {
+	return regexp.MustCompile(`(?m)^[ \t]*` + regexp.QuoteMeta(name) + `(\s|$)`).MatchString(region)
+}
+
+// logicalLines 把续行拼成逻辑行。
+//
+// 两类要在意：
+//
+//	· 显式续行 —— 行尾的 `\`；
+//	· **天然的续行** —— 行尾的管道 `|`（`||` 也以 `|` 结尾，一并覆盖）与 `&&`。
+//	  只认 `\` 的话，`… 2>/dev/null |` 这行之后的 `sed … || true)"` 会被当成
+//	  另一条独立的逻辑行，于是一处**没带** `|| true` 的调用被它"洗白"。
+//
+// 为什么要手工拼：Go 的 regexp 是 RE2，`.*(?:\\\n.*)*` 这种写法会**静默地只吃第一行**，
+// 于是"跨行的这一条命令"看起来永远只有前半截。判据要按"一条命令"来数，就得先拼。
+func logicalLines(s string) []string {
+	var out []string
+	cur := ""
+	for _, ln := range strings.Split(s, "\n") {
+		t := strings.TrimRight(ln, " \t")
+		if strings.HasSuffix(t, "\\") || strings.HasSuffix(t, "|") || strings.HasSuffix(t, "&&") {
+			cur += t + " "
+			continue
+		}
+		out = append(out, cur+ln)
+		cur = ""
+	}
+	if cur != "" {
+		out = append(out, cur)
+	}
+	return out
+}
+
 func TestDeployPullsReleaseFilesForNodeBootstrap(t *testing.T) {
 	body := readRepoFile(t, "../../scripts/deploy-master.sh")
 
-	// 先把"6c) 发布文件入库"这一段切出来。**必须切区间**：本文件里别处也有
-	// `rollback`、也有 `dist` 字样，全文搜索会让别的路径替这一段作证。
-	const startMark = "6c/7 发布文件入库"
-	start := strings.Index(body, startMark)
-	if start < 0 {
-		t.Fatal("部署脚本里没有「发布文件入库」这一步：\n" +
-			"  没有它，一键部署出来的 Master 开箱就没有装机通道——\n" +
-			"  `/install.sh | sh` 会在下载 probe-agent 那一步 404，\n" +
-			"  而 /install.sh 本身是内嵌的，所以那一步看起来完全正常。")
-	}
-	end := strings.Index(body[start:], `echo "==> 7/7 完成"`)
-	if end < 0 {
-		t.Fatal("找不到发布文件入库这一段的结束位置：结构变了，判据要跟着改" +
-			"（别把 end 放宽成整份文件——那样 rollback 的断言会被别处满足）。")
-	}
-	region := body[start : start+end]
+	// 取件只有一份实现：pull_agent_release 的函数体。6c（部署收尾）与 0c
+	// （只更新发布文件）都调它——两份实现的下场是"改一处＝没改"。
+	pull := shFuncBody(t, "scripts/deploy-master.sh", body, "pull_agent_release")
+	src := shFuncBody(t, "scripts/deploy-master.sh", body, "default_dist_source")
 
 	// ① 真的调用 dist pull，而且是**两种范围**都覆盖（--all / --platform）。
-	if !strings.Contains(region, `dist pull --config "$CFG" --version "$_mp_ver"`) {
-		t.Error("这一段没有真的调用 probe-master dist pull：\n" +
-			"  只打印一句「请自己跑 dist pull」等于没修——用户按收尾清单装第一个 Agent 时照样 404。")
+	//
+	// 版本号必须来自**函数自己的第一个参数**。判据取"赋值自 $1 的那个标识符"
+	// 而不是写成 `--version "$_pa_ver"` 这样的字面量：变量名只是拼写，一致地
+	// 改名不该变红；而"函数里改用别的变量当版本号"（等于忽略传入的版本）必须变红。
+	verArg := regexp.MustCompile(`([A-Za-z_][A-Za-z0-9_]*)="\$1"`).FindStringSubmatch(pull)
+	if verArg == nil {
+		t.Fatal("取件函数没有把版本号（第一个参数）收进来：判据与实现已经脱节。")
 	}
-	if !strings.Contains(region, "--platform \"$_mp_plat\"") {
+	ver := verArg[1]
+	if !strings.Contains(pull, `dist pull --config "$CFG" --version "$`+ver+`"`) {
+		t.Errorf("取件函数没有用**它自己的版本参数**去调用 probe-master dist pull（应为 --version \"$%s\"）：\n"+
+			"  只打印一句「请自己跑 dist pull」等于没修——用户按收尾清单装第一个 Agent 时照样 404；\n"+
+			"  改用别的变量当版本号，等于忽略了调用方传进来的版本。", ver)
+	}
+	if !strings.Contains(pull, "--platform \"$_mp_plat\"") {
 		t.Error("没有「只拉本机平台」这一支：\n" +
 			"  全部平台是十几份二进制，机房带宽有限时需要能只拉本机架构。")
 	}
-	if !strings.Contains(region, "--all") {
+	if !strings.Contains(pull, "--all") {
 		t.Error("没有「拉全部平台」这一支。")
 	}
-	// ② 默认来源必须跟着**二进制版本**走（0.1.1 → v0.1.1 的 Release 标签）。
-	if !strings.Contains(region, "https://github.com/$RELEASE_REPO/releases/download/v$_mp_ver") {
-		t.Error("默认发布源没有从二进制版本推导：\n" +
+	// 取件实现只能有一处：pull_agent_release 里恰好两个分支（全部 / 只本机）。
+	if n := strings.Count(pull, "dist pull --config"); n != 2 {
+		t.Errorf("取件函数里 `dist pull --config` 出现了 %d 次（应为 2：--all 与 --platform 各一次）", n)
+	}
+	// 函数体之外还出现这个命令时，它只能是**打印给用户看的**（比如失败提示里
+	// 那条可复制的补救命令），不能是被执行的第二份实现。
+	//
+	// 这里刻意不用"全文计数 == 2"：全文 Contains 会把注释与提示文案当成实现
+	// （这一条正是被它误伤过——形态闸的提示里就有一条真命令示例）。
+	outside := strings.Replace(body, pull, "", 1)
+	for i, line := range strings.Split(outside, "\n") {
+		if !strings.Contains(line, "dist pull --config") {
+			continue
+		}
+		if !strings.Contains(line, "printf") && !strings.Contains(line, "echo") {
+			t.Errorf("`dist pull --config` 在取件函数之外**被执行**了（第 %d 行）：\n"+
+				"  %s\n"+
+				"  多出来的那一处就是第二份取件实现——两条路迟早漂移，而症状在用户那端。", i+1, line)
+		}
+	}
+
+	// ② 默认发布源必须跟着**版本**走（0.1.1 → v0.1.1 的 Release 标签），
+	//    而且这份拼法全文件只有一处：两处就会漂移（改了一处的 v 前缀、
+	//    另一条路没改 → 404）。
+	if !strings.Contains(src, `https://github.com/$RELEASE_REPO/releases/download/v$1`) {
+		t.Error("默认发布源不是从版本号推导的：\n" +
 			"  写死一个版本号会在升级后静默拉到旧产物；不写 v 前缀则 tag 对不上直接 404。")
 	}
+	if n := strings.Count(body, "releases/download/v$"); n != 1 {
+		t.Errorf("发布源 URL 的拼法在脚本里出现了 %d 次（应恰好 1 次，且只在 default_dist_source 里）：\n"+
+			"  每个调用点各拼一次 = 迟早有一条路拼错，而它的症状是那个机房的 404。", n)
+	}
+
+	// ⑤ 判据落在磁盘上（/dist/ 受 install.mode 门控，刚部署完必然是关的，
+	//    拿 HTTP 404 当失败会把每次正常部署都报成失败）。
+	if !strings.Contains(pull, `-s "$DATA/dist/$`+ver+`/SHA256SUMS"`) {
+		t.Error("没有检查发布文件是否真的落盘：\n" +
+			"  /dist/ 在 install.mode=on_demand 且没有未使用注册码时**本来就该**返回 404，\n" +
+			"  拿它当成功判据会误报；判据要落在磁盘上的文件。")
+	}
+	// 空版本号绝不能带进 dist pull：那会拼出 `--version ""`，下游按目录名
+	// 创建 data_dir/dist//，症状是"拉了个空版本"却一路 rc=0。
+	if !strings.Contains(pull, `if [ -z "$`+ver+`" ]; then`) {
+		t.Error("空版本号没有被拦下：\n" +
+			"  `--version \"\"` 下游会当成合法参数，把文件写进 data_dir/dist/ 本身。")
+	}
+
+	// ---- 6c：部署流程里的策略层（切区间，见上面的说明）----
+	region := shRegion(t, "scripts/deploy-master.sh", body,
+		"6c/7 发布文件入库", `echo "==> 7/7 完成"`)
+
 	// ③ 版本号不是发布版本时（本地自编译的 dev）必须跳过，而不是硬去 GitHub 撞 404。
 	if !strings.Contains(region, `*[!0-9.]*`) {
 		t.Error("没有「版本号不是纯数字点分就跳过」的判断：\n" +
@@ -991,17 +1105,19 @@ func TestDeployPullsReleaseFilesForNodeBootstrap(t *testing.T) {
 			"  GitHub 在部分机房不可达是常态，为一个下载失败回滚整个部署会把\n" +
 			"  「装好了但装机通道暂时不通」变成「什么都没装成」。这里只该警告 + 给补救命令。")
 	}
-	// ⑤ 判据落在磁盘上（/dist/ 受 install.mode 门控，刚部署完必然是关的，
-	//    拿 HTTP 404 当失败会把每次正常部署都报成失败）。
-	if !strings.Contains(region, `-s "$DATA/dist/$_mp_ver/SHA256SUMS"`) {
-		t.Error("没有检查发布文件是否真的落盘：\n" +
-			"  /dist/ 在 install.mode=on_demand 且没有未使用注册码时**本来就该**返回 404，\n" +
-			"  拿它当成功判据会误报；判据要落在磁盘上的文件。")
-	}
 	// ⑥ 那个"未开放"的 404 要能识别并说清楚（而不是当成自检失败）。
 	if !strings.Contains(region, "分发入口当前未开放") {
 		t.Error("没有区分「/dist/ 未开放」与「真的坏了」：\n" +
 			"  前者是 on_demand 的正常行为（生成注册码后立刻开放），后者才是故障。")
+	}
+	// ⑦ 这一段必须**调用**共用零件，而不是自己再写一遍取件。
+	if !regexp.MustCompile(`pull_agent_release "\$[A-Za-z_][A-Za-z0-9_]*" "\$DIST_PULL"`).MatchString(region) {
+		t.Error("6c 没有调用共用的 pull_agent_release：\n" +
+			"  自己再写一遍取件，就等着和「只更新发布文件」那条路各修各的。")
+	}
+	if !shCalls(region, "ask_dist_pull_scope") {
+		t.Error("6c 的范围问答没有走共用的 ask_dist_pull_scope：\n" +
+			"  两份措辞/两份默认值 = 改一处漏一处。")
 	}
 
 	// ⑦ 安装入口（源码安装）必须把这三个参数转发给部署脚本。
@@ -1023,5 +1139,176 @@ func TestDeployPullsReleaseFilesForNodeBootstrap(t *testing.T) {
 	if strings.Contains(body, "--pubkey /path/minisign.pub") {
 		t.Error("收尾清单里还写着让用户手工执行 dist pull 那一版命令：\n" +
 			"  这一步已经在部署流程里做掉了（见 6c），清单要改成「补拉」的说明。")
+	}
+}
+
+// TestReleaseOnlyModeUpdatesAgentReleaseWithoutTouchingMaster 守"只更新 Agent 发布文件"
+// 这个模式（问答题第 3 项 / --release-only）。
+//
+// 用户的原话是："每次更新 Agent 版本就要重新执行一条带具体版本号的 dist pull 命令，
+// 那直接写进一键部署脚本里，在脚本开头添加第三个选项，拉取最新版本的 Agent。"
+//
+// 于是这个模式必须满足三件事，缺一件这个功能就等于没做：
+//
+//	① 版本号由脚本自己查（GitHub 最新 Release），不需要人再去看 Release 页；
+//	② 查不到就是**查不到**——不许悄悄退回"本机二进制版本"，那会让用户以为
+//	   更新到了最新、实际拉的是他早就在跑的旧版本，而且全程没有提示；
+//	③ 它只动发布目录，不碰 Master 的二进制/配置/服务（否则"更新 Agent"
+//	   变成了"顺手把 Master 也换了一遍"）。
+func TestReleaseOnlyModeUpdatesAgentReleaseWithoutTouchingMaster(t *testing.T) {
+	body := readRepoFile(t, "../../scripts/deploy-master.sh")
+
+	// ---- ① 开头那一问里真的有第三项 ----
+	if !strings.Contains(body, "3) 只更新 Agent 发布文件") {
+		t.Error("开头那一问里没有第三项「只更新 Agent 发布文件」：\n" +
+			"  这一项就是用户要的入口——没有它，更新 Agent 版本仍然要靠人肉敲版本号。")
+	}
+	// 菜单加了项、提示语没跟着改，是这类改动最典型的半成品：用户盯着
+	// 「请输入 1 或 2」根本不会去试 3。
+	if !strings.Contains(body, `read_line _mode "请输入 1、2 或 3 [1]: "`) {
+		t.Error("菜单提示语没有跟着改成三个选项：\n" +
+			"  用户看到「请输入 1 或 2」就不会去试第 3 项，这个入口等于不存在。")
+	}
+	if !strings.Contains(body, `3 | release | RELEASE | Release | 更新 | 发布文件) RELEASE_ONLY="1" ;;`) {
+		t.Error("第 3 项没有映射到 RELEASE_ONLY（菜单画了但分支没接）。")
+	}
+
+	// ---- ② 模式分支：切区间，别处的 resolve/pull 不许替它作证 ----
+	region := shRegion(t, "scripts/deploy-master.sh", body,
+		"# 0c) 只更新 Agent 发布文件", "# 卸载：--uninstall")
+
+	if !strings.Contains(region, `if [ -n "$RELEASE_ONLY" ]; then`) {
+		t.Fatal("找不到 0c 的模式分支：判据与脚本结构脱节了。")
+	}
+
+	// 查询结果落到哪个变量上：下面几条断言全部绑在**这个标识符**上，
+	// 而不是绑在某个具体拼写上——一致改名仍然绿，而"查到 A、拿 B 去取件"
+	// 或者"查完不判成败就继续"必须变红。
+	relArg := regexp.MustCompile(`([A-Za-z_][A-Za-z0-9_]*)="\$\(resolve_latest_agent_version\)" \|\| exit 1`).FindStringSubmatch(region)
+	if relArg == nil {
+		t.Error("版本查询失败没有直接中止：\n" +
+			"  查不到最新版本时必须报错退出（`查版本 || exit 1`）；悄悄退回「本机二进制版本」\n" +
+			"  会让用户以为更新到了最新，而实际拉的是他早就在跑的旧版本——全程没有任何提示。")
+	}
+	rel := "\u0000"
+	if relArg != nil {
+		rel = relArg[1]
+	}
+
+	// 先查版本、再取件，而且**取件的成败必须被判断**。次序反了就会拿一个空
+	// 版本号去 dist pull；写成 `pull ... || true` 则把"更新失败"静默成"更新成功"。
+	iResolve := strings.Index(region, "resolve_latest_agent_version")
+	iPull := strings.Index(region, `if pull_agent_release "$`+rel+`" "$DIST_PULL"; then`)
+	if iPull < 0 {
+		t.Error("模式分支没有把**查到的那个版本**交给共用的 pull_agent_release 并判它的成败：\n" +
+			"  自己再写一遍取件，两条路就会各修各的；交给另一个变量（或写死）则等于\n" +
+			"  查了版本却不用它；写成 `pull … || true` 则用户看到的最后一行仍然是「完成」。")
+	}
+	if iResolve >= 0 && iPull >= 0 && iResolve > iPull {
+		t.Error("先取件后查版本：\n" +
+			"  顺序反了就会拿一个还没算出来的版本号去拉——空值或不相关的值都会一路跑下去。")
+	}
+	// ④ 带进 dist pull 的那个值必须是"纯数字点分"。查询函数内部已经校验过一次，
+	//    这里要的是**判据押在要用的那个值上**：不管查询函数将来怎么改，拼进下载
+	//    路径的一定得是这个形态。
+	if !strings.Contains(region, `case "$`+rel+`" in`) || !strings.Contains(region, `*[!0-9.]*`) {
+		t.Error("模式分支没有对**要用的那个版本号**再做一次「纯数字点分」形态校验：\n" +
+			"  查询失败时拿到的往往是别的文字（HTML 错误页、旧二进制的 usage 行），\n" +
+			"  拼进 .../releases/download/v<那段文字> 之后，症状是「发布文件拉取失败」，根因被埋掉。")
+	}
+	// ⑤ 与部署流程共用同一套零件，而且**是调用**（注释里也写着这个名字，
+	//    单凭 Contains 判定的话，把调用删掉仍然绿）。
+	if !shCalls(region, "ask_dist_pull_scope") {
+		t.Error("模式分支没有走共用的范围问答（措辞/默认值会出现第二份）。")
+	}
+	// ⑥ 默认值必须**显式写死**，不能沿用 .answers 里的记忆：这个模式存在的意义
+	//    就是"拉最新"，上次选过"先跳过"的人不该因为一次历史选择在这里什么都不做，
+	//    而他一路上看到的最后一行是"完成"。
+	if !strings.Contains(region, `ask_dist_pull_scope "1"`) {
+		t.Error("模式分支的范围问答没有把默认值写死成「全部平台」：\n" +
+			"  沿用记忆时，上次选了「先跳过」的人重跑这个模式会什么都不做，\n" +
+			"  而他看到的最后一行是「完成」——「更新 Agent 版本」就此静默失败。")
+	}
+	// ⑦ 只动发布目录：不许出现换二进制 / 写配置 / 重启服务这些动作。
+	for _, forbidden := range []string{"render_config", "systemctl restart", "install -m 0755"} {
+		if strings.Contains(region, forbidden) {
+			t.Errorf("模式分支里出现了 %q：\n"+
+				"  这个模式只该往 data_dir/dist/ 里写文件。「顺手」把二进制换了、\n"+
+				"  配置重写了或服务重启了，用户要的「只是更新 Agent 发布文件」就变成了\n"+
+				"  一次没人预期的改动。", forbidden)
+		}
+	}
+	// ⑧ dry-run 不写系统、不需要 root（与全局约定一致）。
+	if !strings.Contains(region, `if [ -n "$DRY_RUN" ] && [ ! -x "$_ro_bin" ]; then`) {
+		t.Error("dry-run 下缺二进制直接失败了：\n" +
+			"  dry-run 的价值正是「什么都还没装的时候先看看会发生什么」，\n" +
+			"  它一个字节都不写，不该因为环境不完整而跑不起来。")
+	}
+	if !strings.Contains(region, `[ "$(id -u)" -ne 0 ]`) {
+		t.Error("模式分支没有 root 检查：要往 data_dir/dist/ 里写，非 root 会以「权限不足」收场。")
+	}
+
+	// ---- ⑨ 互斥：两个模式同时给必须被拒绝，而不是让其中一个悄悄赢 ----
+	if !strings.Contains(body, `if [ -n "$UNINSTALL" ] && [ -n "$RELEASE_ONLY" ]; then`) {
+		t.Error("--uninstall 与 --release-only 同时给没有被拒绝：\n" +
+			"  悄悄让其中一个赢，用户以为做了 A、实际做了 B，而两条路都不报错。")
+	}
+
+	// ---- ⑩ 查询函数本身：两个来源 + 形态闸 + set -eu 下的失败处理 ----
+	lookup := shFuncBody(t, "scripts/deploy-master.sh", body, "resolve_latest_agent_version")
+	if !strings.Contains(lookup, "https://api.github.com/repos/$RELEASE_REPO/releases/latest") {
+		t.Error("查询没有走 GitHub API：这是最直接、最精确的一个来源。")
+	}
+	if !strings.Contains(lookup, "releases/tag/") {
+		t.Error("查询没有重定向兜底：\n" +
+			"  GitHub API 的匿名限额是 60 次/小时，机房出口 IP 常常被整段共享，\n" +
+			"  限流时必须有第二条不限额的路，否则这个功能会在某些机房里随机失灵。")
+	}
+	// set -eu 下的失败处理：**数"真的去网络的调用"与"带 `|| true` 的调用"并比对相等**。
+	//
+	// 这里原本写的是 `Count(lookup, "|| true)") >= 3` —— 那个阈值是没用的：
+	// 函数里实测有 5 处（`command -v` 那两处也凑数），于是**删掉任意一处的
+	// `|| true` 仍然绿**（不是推理，是变异 M14 当场抓出来的）。判据必须落在
+	// "每一个网络调用都带护栏"，而不是"总个数比某个数多"。
+	netCalls, guarded := 0, 0
+	for _, ln := range logicalLines(lookup) {
+		// 只数"作为命令替换去执行的"那些；`[ -n "$_rl_fetch" ]` 这类判断不算，
+		// `_rl_fetch="$(command -v …)"` 也不含 `"$_rl_fetch"` 这个形态，自然被排除。
+		if !strings.Contains(ln, "$(") {
+			continue
+		}
+		if !strings.Contains(ln, `"$_rl_fetch"`) && !strings.Contains(ln, `"$_rl_wget"`) {
+			continue
+		}
+		netCalls++
+		if strings.Contains(ln, "|| true") {
+			guarded++
+		}
+	}
+	if netCalls < 3 || guarded != netCalls {
+		t.Errorf("查询函数里「真的去网络的调用」有 %d 处，其中带 `|| true` 的只有 %d 处：\n"+
+			"  脚本开头是 set -eu，「赋值 + 命令替换」里的命令返回非 0 会让整个脚本\n"+
+			"  立刻退出——偏偏这里最常见的正是**正常的失败**（GitHub 不可达、API 限流 403）。\n"+
+			"  被测的失败必须能被自己的代码处理；少一处就会让「查不到最新版本」\n"+
+			"  变成「脚本直接崩了」，而调用方那句 `|| exit 1` 连执行的机会都没有。", netCalls, guarded)
+	}
+	if !strings.Contains(lookup, `*[!0-9.]*`) {
+		t.Error("查询函数里没有「纯数字点分」的形态闸：\n" +
+			"  返回给调用方的必须已经是一个能直接拼进 URL 的版本号。")
+	}
+
+	// ---- ⑪ 源码安装入口：解析 + 转发 + 不需要 Go/源码 ----
+	inst := readRepoFile(t, "../../install-master.sh")
+	if !strings.Contains(inst, `--release-only) RELEASE_ONLY="1"; shift ;;`) {
+		t.Error("install-master.sh 没有解析 --release-only（参数集护栏也会红）。")
+	}
+	if !strings.Contains(inst, "set -- --release-only") {
+		t.Error("install-master.sh 解析了 --release-only 却没有转给部署脚本：\n" +
+			"  参数被读走之后什么也不做，是最难发现的一种失效。")
+	}
+	if !strings.Contains(inst, `if [ -n "$UNINSTALL" ] || [ -n "$RELEASE_ONLY" ]; then`) {
+		t.Error("install-master.sh 的 --release-only 没有走「排在依赖检查与编译之前」那条早退路径：\n" +
+			"  它不需要源码、不需要 Go。走正常路径就等于「更新个发布文件先装一套工具链」，\n" +
+			"  而且工具链装不上就更新不了。")
 	}
 }
