@@ -1,0 +1,245 @@
+# Server Probe —— 持续集成（对应文档 S12 / 13.4）
+#
+# 设计取舍，先读这段再改：
+#
+# 1. **依赖不随仓库提交，每个 job 显式 `go mod download`。** 本仓库**不含** vendor/
+#    （`go mod vendor` 实测 197 MB，见 docs/03 §3.2 与 .gitignore 末尾），
+#    因此也**不能**设 `GOFLAGS=-mod=vendor`——那会直接 `go: inconsistent vendoring`
+#    失败。走默认的 `-mod=readonly`：依赖缺失时立刻报错，而不是偷偷改 go.mod。
+#    开启 setup-go 的模块缓存是安全的：cache key 由 go.sum 决定，go.sum 一变即失效，
+#    不存在"命中缓存却用了旧依赖"的窗口。
+#    （历史：曾因自带 vendor/ 而关掉缓存，为的是避开"-mod=vendor 却命中模块缓存"
+#    那种"看起来成功但没编译 vendor 里那份"的假象。现在没有 vendor 了，这条顾虑消失。）
+# 2. **五个 job 分开，不要合并成一个长脚本。** 目的是让失败信号彼此独立：
+#    lint 失败不该掩盖"某个平台编译不过"；跨平台编译失败不该掩盖测试失败。
+#
+# 3. **跨平台编译矩阵与 Makefile 的 PLATFORMS 必须同步**（当前各 13 个，见下）。
+#    还有第三处真相：scripts/ci-cross.sh 里 armv7/armv6 → GOARCH=arm + GOARM=7/6
+#    的映射。任何一处漂移都会造成"本地能发、CI 说不行"的割裂——
+#    这类问题曾真实发生过（armv7 不是合法 GOARCH）。
+#
+# 4. **smoke-test 只在 ubuntu-latest 跑。** 脚本本身在 Windows/Git Bash 下
+#    也能跑（会跳过"优雅退出"一项，因为 MSYS 的 kill 无法向原生 PE 投递
+#    POSIX 信号），但 CI 上多一个平台就多一份 flaky，收益不及成本。
+
+name: CI
+
+# 触发器。`on` 加引号是有意为之：YAML 1.1 会把裸 `on` 解析成布尔 true，
+# GitHub 自己的加载器能正确处理（全世界的工作流都这么写），但本地用
+# python/yq 之类的解析器做校验时会得到一个布尔键，反而查不出真问题。
+"on":
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+# 同一分支的新推送取消上一次未完成的运行（省额度，也让 PR 上的状态更可信）。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # 显式关掉 cgo：本项目的产物一律 CGO_ENABLED=0 静态编译（见 Makefile 头注释）。
+  CGO_ENABLED: "0"
+  # 刻意**不设** GOFLAGS=-mod=vendor：本仓库不带 vendor/（见文件头第 1 条）。
+  # 只有 gofmt 的排除项需要在命令行上单独处理，见 lint job。
+
+jobs:
+  # -------------------------------------------------------------------------
+  # 1) 静态检查：格式、vet、依赖漏洞
+  # -------------------------------------------------------------------------
+  lint:
+    name: 格式 / vet / 漏洞扫描
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # 把"取依赖"独立成一步：网络/代理/校验和的问题要在这里就带着清晰的错误失败，
+      # 而不是散落在后面 gofmt / vet / test 各自的输出里。
+      - name: go mod download
+        run: go mod download
+
+      # gofmt 必须**零差异**：格式漂移会让 diff 噪音淹没真实改动。
+      #
+      # 只显式列 `./cmd ./internal`，不写 `./...`：这样即便本机执行过 go mod vendor、
+      # 工作区里多出一个 vendor/，也不会把第三方代码扫进来——那儿有若干文件在
+      # `gofmt -s` 下并非规范格式（实测 uuid/go-isatty/go-strftime/bigfft 等十余个），
+      # 上游怎么发的就怎么用，我们不重排它们的格式。
+      - name: gofmt
+        run: |
+          out="$(gofmt -l -s ./cmd ./internal)"
+          if [ -n "${out}" ]; then
+            echo "以下文件未通过 gofmt -s，请本地执行 make fmt："
+            echo "${out}"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      # govulncheck 是 S12 的硬要求。它需要联网拉漏洞库，因此单独一步，
+      # 且失败即失败（不 continue-on-error）——带着已知漏洞发布没有意义。
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          "$(go env GOPATH)/bin/govulncheck" ./...
+
+  # -------------------------------------------------------------------------
+  # 2) 测试：普通测试 + 竞态检测
+  # -------------------------------------------------------------------------
+  test:
+    name: 测试 / 竞态检测
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # 把"取依赖"独立成一步：网络/代理/校验和的问题要在这里就带着清晰的错误失败，
+      # 而不是散落在后面 gofmt / vet / test 各自的输出里。
+      - name: go mod download
+        run: go mod download
+
+      - name: go test
+        run: go test ./...
+
+      # 竞态检测需要 cgo 与 C 编译器：ubuntu-latest 自带 gcc，
+      # 因此这里把 CGO_ENABLED 覆盖回 1（仅限本步骤）。
+      #
+      # 这一步抓的是真问题：调度器/注册表/Agent 采集器都是多协程共享状态，
+      # 曾经就有"锁外读 d.cfg / d.probe"这类数据竞争只在 -race 下才现形。
+      - name: go test -race
+        env:
+          CGO_ENABLED: "1"
+        run: go test -race ./...
+
+  # -------------------------------------------------------------------------
+  # 3) 端到端冒烟：起真实 Master，跑公开/后台 API 与静态资源断言
+  # -------------------------------------------------------------------------
+  smoke:
+    name: 冒烟测试（端到端）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # 把"取依赖"独立成一步：网络/代理/校验和的问题要在这里就带着清晰的错误失败，
+      # 而不是散落在后面 gofmt / vet / test 各自的输出里。
+      - name: go mod download
+        run: go mod download
+
+      - name: 安装 curl
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq curl
+
+      # 脚本在临时目录里自建实例（端口 18180/18181），跑完自动清理；
+      # 不碰仓库里的 data/，也不需要 root。
+      - name: scripts/smoke-test.sh
+        run: bash scripts/smoke-test.sh
+
+  # -------------------------------------------------------------------------
+  # 4) 跨平台编译：发布矩阵里每一个组合都必须能编出来
+  # -------------------------------------------------------------------------
+  cross:
+    name: 跨平台编译（${{ matrix.platform }}）
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false # 一个平台挂了，其余平台的结果照样要看
+      matrix:
+        # 与 Makefile 的 PLATFORMS 完全一致（13 个）。
+        # 第 2 段是"产物名里的架构标签"，不一定是 GOARCH：armv7/armv6
+        # 必须用 GOARCH=arm + GOARM=7/6，armv7 不是合法 GOARCH。
+        platform:
+          - linux/amd64
+          - linux/arm64
+          - linux/armv7
+          - linux/armv6
+          - linux/386
+          - linux/riscv64
+          - windows/amd64
+          - windows/386
+          - windows/arm64
+          - freebsd/amd64
+          - freebsd/arm64
+          - freebsd/386
+          - freebsd/arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # 把"取依赖"独立成一步：网络/代理/校验和的问题要在这里就带着清晰的错误失败，
+      # 而不是散落在后面 gofmt / vet / test 各自的输出里。
+      - name: go mod download
+        run: go mod download
+
+      # Master 也要在宿主平台编一次并通过测试，否则"Agent 全平台能编、
+      # Master 编不过"这种最尴尬的发布事故不会被拦住。
+      - name: 构建 Master（宿主）
+        run: go build -trimpath -ldflags "-s -w" -o /tmp/probe-master ./cmd/probe-master
+
+      - name: 交叉编译 Agent
+        run: bash scripts/ci-cross.sh "${{ matrix.platform }}"
+
+  # -------------------------------------------------------------------------
+  # 5) 发布产物汇总：全平台编译 + SHA256SUMS
+  #    （仅在 main 分支推送时执行，避免 PR 上反复跑 13 次编译）
+  # -------------------------------------------------------------------------
+  release-dry-run:
+    name: 发布矩阵完整性（含 SHA256SUMS）
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # 把"取依赖"独立成一步：网络/代理/校验和的问题要在这里就带着清晰的错误失败，
+      # 而不是散落在后面 gofmt / vet / test 各自的输出里。
+      - name: go mod download
+        run: go mod download
+
+      # make dist 会依次编译 13 个平台并生成 SHA256SUMS。
+      # 它同时是"Makefile 的 PLATFORMS 与 CI 矩阵是否漂移"的交叉验证。
+      - name: make dist
+        run: make dist VERSION=0.0.0-ci
+
+      - name: 校验 SHA256SUMS 条目数
+        run: |
+          cd dist/0.0.0-ci
+          n=$(wc -l < SHA256SUMS)
+          echo "SHA256SUMS 条目数：${n}"
+          # 13 个平台 → 13 行。少一行说明有平台悄悄跳过了编译。
+          if [ "${n}" -ne 13 ]; then
+            echo "期望 13 个产物，实际 ${n} 个"
+            exit 1
+          fi
+          sha256sum -c SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: probe-agent-ci
+          path: |
+            dist/0.0.0-ci/probe-agent_*
+            dist/0.0.0-ci/SHA256SUMS
+          if-no-files-found: error

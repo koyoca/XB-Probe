@@ -23,6 +23,15 @@ param(
     [string]$DistBase = "",
     [string]$AdminUser = "ops",
     [string]$AdminPassword = $env:PROBE_ADMIN_PASSWORD,
+    # TLS：none（默认，交给前置反代）| files（自有证书）| selfsigned（自签）| acme（自动申请）
+    [string]$TlsMode = "none",
+    [string]$TlsCert = "",
+    [string]$TlsKey = "",
+    [string]$TlsDomain = "",   # 域名，逗号分隔；acme 的 domains / selfsigned 的 SAN
+    [string]$TlsIp = "",       # IP，逗号分隔；acme 的 RFC 8738 证书 / selfsigned 的 SAN
+    [string]$AcmeEmail = "",
+    [string]$AcmeCa = "letsencrypt",
+    [string]$AcmeChallenge = "http-01",
     [switch]$NoStartupTask,
     [switch]$ForceConfig
 )
@@ -49,6 +58,60 @@ if (-not $Bin -and -not (Test-Path $target)) {
     exit 2
 }
 
+# ---------------------------------------------------------------------------
+# 0.5) TLS 参数校验
+#
+# 配置文件是**严格解析**的（LoadMaster 用 KnownFields），键名写错会启动即失败；
+# 但"值合法、语义不成立"（例如 acme 却没给任何域名/IP）解析得过，要等申请证书
+# 才暴露。所以每种模式的前置条件都在这里前置拦下。
+# ---------------------------------------------------------------------------
+if (@("none", "files", "selfsigned", "acme") -notcontains $TlsMode) {
+    Write-Host "错误：-TlsMode 只能是 none / files / selfsigned / acme（收到 $TlsMode）。" -ForegroundColor Red
+    exit 2
+}
+if ($TlsMode -eq "none" -and ($TlsCert -or $TlsKey -or $TlsDomain -or $TlsIp -or $AcmeEmail)) {
+    Write-Host "错误：给了证书相关参数却 -TlsMode none。要么把模式写对，要么去掉这些参数——" -ForegroundColor Red
+    Write-Host "      否则证书不会生效，而命令行看起来像「配了 TLS」。" -ForegroundColor Red
+    exit 2
+}
+if ($TlsMode -eq "files") {
+    if (-not $TlsCert -or -not $TlsKey) {
+        Write-Host "错误：mode=files 必须同时给 -TlsCert 与 -TlsKey。" -ForegroundColor Red
+        exit 2
+    }
+    foreach ($f in @($TlsCert, $TlsKey)) {
+        if (-not (Test-Path $f)) { Write-Host "错误：找不到证书文件 $f。" -ForegroundColor Red; exit 2 }
+    }
+}
+if ($TlsMode -eq "acme") {
+    if (-not $TlsDomain -and -not $TlsIp) {
+        Write-Host "错误：mode=acme 至少要给一个 -TlsDomain 或 -TlsIp。" -ForegroundColor Red
+        exit 2
+    }
+    if (@("http-01", "tls-alpn-01") -notcontains $AcmeChallenge) {
+        Write-Host "错误：-AcmeChallenge 只能是 http-01 或 tls-alpn-01。" -ForegroundColor Red
+        exit 2
+    }
+}
+# 装了证书却只给 http:// 的对外地址，是最难发现的一种"部署成功"：
+# 服务在听 443，访客拿到的是明文，install.master_url 还会把 Agent 指向 http://。
+if ($PublicOrigin) {
+    if ($TlsMode -eq "none" -and $PublicOrigin.StartsWith("https://")) {
+        Write-Warn2 "TLS 方式 none 但公开地址是 https://：若 TLS 由前置反代终结，请把反代网段填进 trusted_proxies，否则 Cookie/HSTS 会按明文处理。"
+    } elseif ($TlsMode -ne "none" -and $PublicOrigin.StartsWith("http://")) {
+        Write-Host "错误：-TlsMode $TlsMode 与 -PublicOrigin $PublicOrigin 不一致。" -ForegroundColor Red
+        Write-Host "      配了证书就应当对外宣告 https://（端口不是 443 时写成 https://host:端口）。" -ForegroundColor Red
+        exit 2
+    }
+}
+
+# 逗号清单 → YAML 行内序列：`"a", "b"`。只认逗号，与 .sh 侧一致。
+function ConvertTo-YamlList {
+    param([string]$Raw)
+    $parts = @($Raw -split "," | Where-Object { $_.Trim() } | ForEach-Object { '"' + $_.Trim() + '"' })
+    return ($parts -join ", ")
+}
+
 # 1) 目录（数据目录收紧 ACL：里面有 master.key 与数据库）
 Write-Step "1/6 创建目录"
 New-Item -ItemType Directory -Force -Path $Dir | Out-Null
@@ -73,7 +136,13 @@ if ($Bin) {
         Write-Host "错误：找不到 $Bin" -ForegroundColor Red
         exit 2
     }
-    Copy-Item -Force $Bin $target
+    # 源与目标同一个文件时 Copy-Item 会抛"不能覆盖自身"——加个判断，
+    # 否则升级路径上会得到一个与真实原因毫无关系的报错。
+    if ((Resolve-Path $Bin).Path -ne (Resolve-Path $target -ErrorAction SilentlyContinue).Path) {
+        Copy-Item -Force $Bin $target
+    } else {
+        Write-Host "    源与目标相同（$Bin），跳过拷贝"
+    }
 }
 & $target version
 
@@ -98,7 +167,37 @@ if ((Test-Path $cfg) -and -not $ForceConfig) {
     # MasterConfig 无 install 键，且 YAML 解析非严格——写了不报错却永不生效。
     # 唯一入口是后台「设置 → 安装与下载」。master_url 未设置时回落到 public_origin。
     [void]$lines.Add("tls:")
-    [void]$lines.Add('  mode: "none"')
+    switch ($TlsMode) {
+        "none" {
+            [void]$lines.Add('  mode: "none"               # 由前置 Caddy/Nginx 终结 TLS，或本机/内网调试')
+        }
+        "files" {
+            [void]$lines.Add('  mode: "files"              # 自定义证书；文件变更会热加载，无需重启')
+            [void]$lines.Add("  cert_file: ""$TlsCert""")
+            [void]$lines.Add("  key_file:  ""$TlsKey""")
+        }
+        "selfsigned" {
+            [void]$lines.Add('  mode: "selfsigned"         # 自签：SAN 覆盖下面的域名与 IP（IP 证书的唯一可用形态）')
+            [void]$lines.Add('  selfsigned:')
+            $all = @()
+            if ($TlsDomain) { $all += $TlsDomain }
+            if ($TlsIp) { $all += $TlsIp }
+            if ($all.Count -gt 0) {
+                [void]$lines.Add("    hosts: [$(ConvertTo-YamlList ($all -join ','))]")
+            } else {
+                [void]$lines.Add('    hosts: []                 # 留空 = localhost / 127.0.0.1 / ::1')
+            }
+        }
+        "acme" {
+            [void]$lines.Add('  mode: "acme"               # 内置 ACME v2 客户端，自动申请与续期')
+            [void]$lines.Add('  acme:')
+            if ($AcmeEmail) { [void]$lines.Add("    email: ""$AcmeEmail""") }
+            [void]$lines.Add("    ca: ""$AcmeCa""")
+            [void]$lines.Add("    challenge: ""$AcmeChallenge""")
+            if ($TlsDomain) { [void]$lines.Add("    domains: [$(ConvertTo-YamlList $TlsDomain)]") }
+            if ($TlsIp) { [void]$lines.Add("    ips: [$(ConvertTo-YamlList $TlsIp)]") }
+        }
+    }
     [void]$lines.Add('log_level: "info"')
     # 统一写 LF：YAML 解析器对 CRLF 宽容，但配置文件里混着两种换行迟早出怪事。
     $utf8 = New-Object System.Text.UTF8Encoding($false)
@@ -151,11 +250,24 @@ $healthAddr = $PublicListen
 if ($healthAddr -like "0.0.0.0:*") { $healthAddr = "127.0.0.1:" + $healthAddr.Substring(8) }
 elseif ($healthAddr -like "[::]:*") { $healthAddr = "127.0.0.1:" + $healthAddr.Substring(5) }
 elseif ($healthAddr -eq ":::") { $healthAddr = "127.0.0.1" }
+
+# 配了 TLS 就必须用 https 探：明文探一个 TLS 端口永远失败，会白等 20 秒。
+# selfsigned / acme 还要跳过证书链校验——这里问的是"进程在不在听"，
+# 不是"证书链可不可信"（自签本就不可信；acme 的首张证书是后台按需申请的）。
+# 注意：-SkipCertificateCheck 是 PS 6+，这里要兼容 5.1，所以用回调。
+$scheme = "http"
+if ($TlsMode -ne "none") { $scheme = "https" }
+$bypassCert = $false
+if ($TlsMode -eq "selfsigned" -or $TlsMode -eq "acme") {
+    $bypassCert = $true
+    $oldCallback = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
+    [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+}
 $ok = $false
 for ($i = 0; $i -lt 20; $i++) {
     Start-Sleep -Seconds 1
     try {
-        $r = Invoke-WebRequest -Uri "http://$healthAddr/api/public/v1/site" -UseBasicParsing -TimeoutSec 3
+        $r = Invoke-WebRequest -Uri "${scheme}://$healthAddr/api/public/v1/site" -UseBasicParsing -TimeoutSec 3
         if ($r.StatusCode -eq 200) {
             $ok = $true
             break
@@ -163,6 +275,9 @@ for ($i = 0; $i -lt 20; $i++) {
     } catch {
         # 还没起来，继续等
     }
+}
+if ($bypassCert) {
+    [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $oldCallback
 }
 if ($ok) {
     Write-Host "    公开 API 已就绪" -ForegroundColor Green

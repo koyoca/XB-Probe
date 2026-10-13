@@ -17,17 +17,30 @@
 # 常用可选参数：
 #   --dir <目录>          配置目录（默认 /etc/probe-master）
 #   --data <目录>         数据目录（默认 /var/lib/probe-master）
+#   --bin-dir <目录>      二进制安装目录（默认 /usr/local/bin；只读根文件系统用 /opt/probe-master）
 #   --public-listen <地址> 公开站监听（默认 0.0.0.0:8080）
 #   --admin-listen  <地址> 管理端监听（默认 127.0.0.1:8081）
 #   --dist-base <URL>     发布文件镜像前缀（不放行则由 Master 自己提供 /dist/）
 #   --no-service          只安装不注册服务（容器里用）
 #   --force-config        覆盖已有配置文件
+#
+# TLS（默认 none；四种方式详见 configs/master.yaml.example 的 tls 段）：
+#   --tls-mode <none|files|selfsigned|acme>
+#   --tls-cert <证书> --tls-key <私钥>      mode=files：自定义证书（热加载）
+#   --tls-domain <域名[,域名]>              mode=acme/selfsigned：域名（SAN）
+#   --tls-ip <IP[,IP]>                      mode=acme/selfsigned：IP（RFC 8738 / SAN）
+#   --acme-email <邮箱> --acme-ca <CA>       mode=acme：账户邮箱与 CA（默认 letsencrypt）
+#   --acme-challenge <http-01|tls-alpn-01>   mode=acme：默认 http-01（需要 80 端口可达）
+#
+# 配了 --tls-mode 却与 --public-origin 的协议不一致（例如 mode=acme 却给 http://）
+# 会被拒绝：证书装上了，访客却仍在明文上，是最难被察觉的一种"部署成功"。
 
 set -eu
 
 BIN_SRC=""
 DIR="${PROBE_DIR:-/etc/probe-master}"
 DATA="${PROBE_DATA:-/var/lib/probe-master}"
+BIN_DIR="${PROBE_BIN_DIR:-/usr/local/bin}"
 PUBLIC_LISTEN="${PROBE_PUBLIC_LISTEN:-0.0.0.0:8080}"
 ADMIN_LISTEN="${PROBE_ADMIN_LISTEN:-127.0.0.1:8081}"
 PUBLIC_ORIGIN="${PROBE_PUBLIC_ORIGIN:-}"
@@ -37,6 +50,26 @@ ADMIN_USER="${PROBE_ADMIN_USER:-ops}"
 ADMIN_PASSWORD="${PROBE_ADMIN_PASSWORD:-}"
 NO_SERVICE=""
 FORCE_CONFIG=""
+TLS_MODE="${PROBE_TLS_MODE:-none}"
+TLS_CERT="${PROBE_TLS_CERT:-}"
+TLS_KEY="${PROBE_TLS_KEY:-}"
+TLS_DOMAINS="${PROBE_TLS_DOMAINS:-}"
+TLS_IPS="${PROBE_TLS_IPS:-}"
+ACME_EMAIL="${PROBE_ACME_EMAIL:-}"
+ACME_CA="${PROBE_ACME_CA:-letsencrypt}"
+ACME_CHALLENGE="${PROBE_ACME_CHALLENGE:-http-01}"
+
+# yaml_list 把 "a, b,c" 渲染成 YAML 行内序列 `"a", "b", "c"`。
+# 用 tr 把逗号换成空格再交给 for 做字段切分——这里刻意**只认逗号**：
+# 域名/IP 清单里本来就不该出现空格，容忍空格会把 "a b" 这样一个输入
+# 悄悄拆成两个条目（配置文件能写、后台设置页存不进去的同类问题）。
+yaml_list() {
+	_out=""
+	for _x in $(printf '%s' "${1:-}" | tr ',' ' '); do
+		if [ -z "$_out" ]; then _out="\"$_x\""; else _out="$_out, \"$_x\""; fi
+	done
+	printf '%s' "$_out"
+}
 
 usage() {
 	cat <<'EOF'
@@ -54,12 +87,22 @@ deploy-master.sh —— Master 一键部署
 可选：
   --dir <目录>              配置目录（默认 /etc/probe-master）
   --data <目录>             数据目录（默认 /var/lib/probe-master）
+  --bin-dir <目录>          二进制安装目录（默认 /usr/local/bin）
   --public-listen <地址>     默认 0.0.0.0:8080
   --admin-listen <地址>      默认 127.0.0.1:8081
   --dist-base <URL>         发布文件镜像前缀
   --no-service              不注册 systemd（容器场景）
   --force-config            覆盖已有配置
   -h, --help                显示本帮助
+
+TLS：
+  --tls-mode <none|files|selfsigned|acme>   默认 none
+  --tls-cert <文件> --tls-key <文件>          mode=files
+  --tls-domain <域名[,域名]>                  mode=acme/selfsigned
+  --tls-ip <IP[,IP]>                          mode=acme/selfsigned
+  --acme-email <邮箱>                         mode=acme（可选）
+  --acme-ca <CA>                             默认 letsencrypt
+  --acme-challenge <http-01|tls-alpn-01>     默认 http-01
 EOF
 }
 
@@ -68,6 +111,7 @@ while [ $# -gt 0 ]; do
 	--bin) BIN_SRC="${2:-}"; shift 2 ;;
 	--dir) DIR="${2:-}"; shift 2 ;;
 	--data) DATA="${2:-}"; shift 2 ;;
+	--bin-dir) BIN_DIR="${2:-}"; shift 2 ;;
 	--public-listen) PUBLIC_LISTEN="${2:-}"; shift 2 ;;
 	--admin-listen) ADMIN_LISTEN="${2:-}"; shift 2 ;;
 	--public-origin) PUBLIC_ORIGIN="${2:-}"; shift 2 ;;
@@ -77,10 +121,75 @@ while [ $# -gt 0 ]; do
 	--admin-password) ADMIN_PASSWORD="${2:-}"; shift 2 ;;
 	--no-service) NO_SERVICE="1"; shift ;;
 	--force-config) FORCE_CONFIG="1"; shift ;;
+	--tls-mode) TLS_MODE="${2:-}"; shift 2 ;;
+	--tls-cert) TLS_CERT="${2:-}"; shift 2 ;;
+	--tls-key) TLS_KEY="${2:-}"; shift 2 ;;
+	--tls-domain) TLS_DOMAINS="${2:-}"; shift 2 ;;
+	--tls-ip) TLS_IPS="${2:-}"; shift 2 ;;
+	--acme-email) ACME_EMAIL="${2:-}"; shift 2 ;;
+	--acme-ca) ACME_CA="${2:-}"; shift 2 ;;
+	--acme-challenge) ACME_CHALLENGE="${2:-}"; shift 2 ;;
 	-h | --help) usage; exit 0 ;;
 	*) echo "未知参数：$1" >&2; usage; exit 2 ;;
 	esac
 done
+
+# ---- TLS 参数校验：宁可在这里失败，也不要写出一个"看起来配好了"的配置文件 ----
+#
+# 配置文件是**严格解析**的（LoadMaster 用 KnownFields），写错键名会让 Master
+# 启动即失败；但"值合法、语义不成立"（比如 acme 却没给任何域名/IP）解析得过，
+# 却要等到启动后申请证书才暴露。所以这里把每种模式的前置条件前置校验。
+case "$TLS_MODE" in
+none | files | selfsigned | acme) : ;;
+*)
+	echo "错误：--tls-mode 只能是 none / files / selfsigned / acme（收到 $TLS_MODE）。" >&2
+	exit 2
+	;;
+esac
+
+if [ -n "$TLS_DOMAINS$TLS_IPS$ACME_EMAIL$TLS_CERT$TLS_KEY" ] && [ "$TLS_MODE" = "none" ]; then
+	echo "错误：给了证书相关参数却 --tls-mode none。要么把模式写对，要么去掉这些参数——" >&2
+	echo "      否则证书不会生效，而命令行看起来像「配了 TLS」。" >&2
+	exit 2
+fi
+
+if [ "$TLS_MODE" = "files" ]; then
+	[ -n "$TLS_CERT" ] && [ -n "$TLS_KEY" ] || {
+		echo "错误：mode=files 必须同时给 --tls-cert 与 --tls-key。" >&2
+		exit 2
+	}
+	for f in "$TLS_CERT" "$TLS_KEY"; do
+		[ -f "$f" ] || { echo "错误：找不到证书文件 $f。" >&2; exit 2; }
+	done
+fi
+
+if [ "$TLS_MODE" = "acme" ]; then
+	if [ -z "$TLS_DOMAINS$TLS_IPS" ]; then
+		echo "错误：mode=acme 至少要给一个 --tls-domain 或 --tls-ip（否则没有可申请的标识符）。" >&2
+		exit 2
+	fi
+	case "$ACME_CHALLENGE" in
+	http-01 | tls-alpn-01) : ;;
+	*) echo "错误：--acme-challenge 只能是 http-01 或 tls-alpn-01。" >&2; exit 2 ;;
+	esac
+fi
+
+# TLS 与 public_origin 的协议必须自洽。
+# 反过来（装了证书却只给 http:// 的对外地址）是最难发现的一种"部署成功"：
+# 服务在听 443、访客拿到的是明文，install.master_url 还会把 Agent 指向 http://。
+if [ -n "$PUBLIC_ORIGIN" ]; then
+	case "$TLS_MODE:$PUBLIC_ORIGIN" in
+	none:https://*)
+		echo "警告：--tls-mode none 但 --public-origin 是 https://。若 TLS 由前置反代终结，" >&2
+		echo "      请把反代网段填进 trusted_proxies，否则 Cookie / HSTS 判定会走明文分支。" >&2
+		;;
+	files:http://* | selfsigned:http://* | acme:http://*)
+		echo "错误：--tls-mode $TLS_MODE 与 --public-origin $PUBLIC_ORIGIN 不一致。" >&2
+		echo "      配了证书就应当对外宣告 https://（端口不是 443 时写成 https://host:端口）。" >&2
+		exit 2
+		;;
+	esac
+fi
 
 if [ "$(id -u)" -ne 0 ] && [ -z "$NO_SERVICE" ]; then
 	echo "错误：请用 root 或 sudo 执行（容器场景可加 --no-service 并以 --dir/--data 指定可写目录）。" >&2
@@ -97,8 +206,8 @@ case "$HEALTH_ADDR" in
 ":::") HEALTH_ADDR="127.0.0.1" ;;
 esac
 
-if [ -z "$BIN_SRC" ] && [ ! -x /usr/local/bin/probe-master ]; then
-	echo "错误：既没有 --bin，系统里也没有已安装的 /usr/local/bin/probe-master。" >&2
+if [ -z "$BIN_SRC" ] && [ ! -x "$BIN_DIR/probe-master" ]; then
+	echo "错误：既没有 --bin，$BIN_DIR 里也没有已安装的 probe-master。" >&2
 	exit 2
 fi
 if [ -n "$BIN_SRC" ] && [ ! -f "$BIN_SRC" ]; then
@@ -129,13 +238,19 @@ fi
 
 echo "==> 2/7 安装二进制"
 if [ -n "$BIN_SRC" ]; then
-	mkdir -p /usr/local/bin
-	if command -v install >/dev/null 2>&1; then
-		install -m 0755 "$BIN_SRC" /usr/local/bin/probe-master
+	# 只读根文件系统（部分 LXC 模板、distroless）上 /usr/local/bin 不可写，
+	# 用 --bin-dir 指到可写目录即可——systemd 单元里的 ExecStart 会跟着走。
+	mkdir -p "$BIN_DIR" || { echo "错误：无法创建 $BIN_DIR（只读根文件系统？用 --bin-dir 指到可写目录）。" >&2; exit 2; }
+	if [ "$BIN_SRC" = "$BIN_DIR/probe-master" ]; then
+		# 源与目标同一个文件：install/cp 都会报 "are the same file" 并以非 0 退出，
+		# 在 set -e 下直接把整个部署打断，而错误信息完全看不出发生了什么。
+		echo "    源与目标相同（$BIN_SRC），跳过拷贝"
+	elif command -v install >/dev/null 2>&1; then
+		install -m 0755 "$BIN_SRC" "$BIN_DIR/probe-master"
 	else
-		cp -f "$BIN_SRC" /usr/local/bin/probe-master && chmod 0755 /usr/local/bin/probe-master
+		cp -f "$BIN_SRC" "$BIN_DIR/probe-master" && chmod 0755 "$BIN_DIR/probe-master"
 	fi
-	/usr/local/bin/probe-master version || true
+	"$BIN_DIR/probe-master" version || true
 fi
 
 CFG="$DIR/master.yaml"
@@ -163,8 +278,42 @@ else
 		# 它们的唯一入口是后台「设置 → 安装与下载」。
 		# master_url 未设置时会回落到 public_origin（见 cmd/probe-master/main.go
 		# 的 MasterURL 闭包），所以给了 --public-origin 就不必再单独设它。
-		echo 'tls:'
-		echo '  mode: "none"               # none/files/selfsigned/acme；见 configs/master.yaml.example'
+		case "$TLS_MODE" in
+		none)
+			echo 'tls:'
+			echo '  mode: "none"               # 由前置 Caddy/Nginx 终结 TLS，或本机/内网调试'
+			;;
+		files)
+			echo 'tls:'
+			echo '  mode: "files"              # 自定义证书；文件变更会热加载，无需重启'
+			echo "  cert_file: \"$TLS_CERT\""
+			echo "  key_file:  \"$TLS_KEY\""
+			;;
+		selfsigned)
+			echo 'tls:'
+			echo '  mode: "selfsigned"         # 自签：SAN 覆盖下面的域名与 IP（IP 证书的唯一可用形态）'
+			echo '  selfsigned:'
+			# 空 hosts 时写 hosts: []，让"留空则默认 localhost/127.0.0.1/::1"这条语义
+			# 在配置文件里**看得见**，而不是靠人去读代码。
+			if [ -n "$TLS_DOMAINS$TLS_IPS" ]; then
+				echo "    hosts: [$(yaml_list "${TLS_DOMAINS}${TLS_IPS:+,$TLS_IPS}")]"
+			else
+				echo '    hosts: []                 # 留空 = localhost / 127.0.0.1 / ::1'
+			fi
+			;;
+		acme)
+			echo 'tls:'
+			echo '  mode: "acme"               # 内置 ACME v2 客户端，自动申请与续期'
+			echo '  acme:'
+			# 一律用 if 而不是 `[ ... ] && echo`：后者在 set -e 下能否中断取决于
+			# 它在管道/列表里的位置，是一个很容易改坏的隐式约定。
+			if [ -n "$ACME_EMAIL" ]; then echo "    email: \"$ACME_EMAIL\""; fi
+			echo "    ca: \"$ACME_CA\""
+			echo "    challenge: \"$ACME_CHALLENGE\""
+			if [ -n "$TLS_DOMAINS" ]; then echo "    domains: [$(yaml_list "$TLS_DOMAINS")]"; fi
+			if [ -n "$TLS_IPS" ]; then echo "    ips: [$(yaml_list "$TLS_IPS")]"; fi
+			;;
+		esac
 		echo "log_level: \"info\""
 	} >"$CFG"
 	chmod 0640 "$CFG"
@@ -184,7 +333,7 @@ if [ -z "$ADMIN_PASSWORD" ]; then
 	exit 2
 fi
 # init-admin 在管理员已存在时会报错退出，这属于预期（幂等升级），故不 set -e 中断。
-/usr/local/bin/probe-master init-admin -config "$CFG" \
+"$BIN_DIR/probe-master" init-admin -config "$CFG" \
 	-username "$ADMIN_USER" -password "$ADMIN_PASSWORD" 2>&1 | sed 's/^/    /' || \
 	echo "    （管理员已存在，跳过；改口令用 probe-master reset-admin）"
 # master.key 与备份必须分开存放：丢了它，已配置的告警渠道凭证就解不开了。
@@ -217,7 +366,7 @@ else
 fi
 
 if [ -n "$NO_SERVICE" ]; then
-	echo "==> 5~7 跳过（--no-service）。前台运行：/usr/local/bin/probe-master -config $CFG"
+	echo "==> 5~7 跳过（--no-service）。前台运行：$BIN_DIR/probe-master -config $CFG"
 	exit 0
 fi
 
@@ -232,7 +381,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/probe-master -config $CFG
+ExecStart=$BIN_DIR/probe-master -config $CFG
 Restart=always
 RestartSec=3
 User=probe
@@ -257,18 +406,30 @@ EOF
 	echo "    已启用并启动"
 else
 	echo "警告：没有 systemd（Alpine/OpenRC 或容器），请自行用进程管理器托管：" >&2
-	echo "      /usr/local/bin/probe-master -config $CFG" >&2
+	echo "      $BIN_DIR/probe-master -config $CFG" >&2
 	exit 0
 fi
 
 echo "==> 6/7 健康检查"
 # 公开站 /site 是免鉴权的，用它确认进程真的在听；最多等 20 秒。
+#
+# 配了 TLS 就必须用 https 探：明文探一个 TLS 端口永远失败，会白等 20 秒再打印
+# 一段让人以为服务没起来的状态。
+# selfsigned 用 -k 是**有意**的：这里问的是"进程在不在听"，不是"证书链可不可信"，
+# 两者混在一起会让自签部署次次看起来像失败。acme 同理——首张证书是后台按需申请的，
+# 此刻要么还没有证书、要么刚签发，证书链验证失败并不代表服务没起来。
+case "$TLS_MODE" in
+none) SCHEME="http"; CURL_EXTRA="" ;;
+files) SCHEME="https"; CURL_EXTRA="" ;;
+selfsigned | acme) SCHEME="https"; CURL_EXTRA="-k" ;;
+esac
 i=0
 while [ $i -lt 20 ]; do
 	if command -v curl >/dev/null 2>&1; then
-		if curl -fsS "http://${HEALTH_ADDR}/api/public/v1/site" >/dev/null 2>&1; then break; fi
+		if curl -fsS $CURL_EXTRA "${SCHEME}://${HEALTH_ADDR}/api/public/v1/site" >/dev/null 2>&1; then break; fi
 	elif command -v wget >/dev/null 2>&1; then
-		if wget -q -O- "http://${HEALTH_ADDR}/api/public/v1/site" >/dev/null 2>&1; then break; fi
+		# wget 在自签/未签发证书下必须 --no-check-certificate，否则同样白等 20 秒。
+		if wget -q --no-check-certificate -O- "${SCHEME}://${HEALTH_ADDR}/api/public/v1/site" >/dev/null 2>&1; then break; fi
 	else
 		break
 	fi
@@ -295,7 +456,7 @@ if [ -n "$DIST_BASE" ]; then
 EOF
 fi
 cat <<EOF
-  1) 登录管理端 ${ADMIN_ORIGIN:-http://$ADMIN_LISTEN}/admin/ 并**启用 TOTP、保存恢复码**
+  1) 登录管理端 ${ADMIN_ORIGIN:-${SCHEME}://$ADMIN_LISTEN}/admin/ 并**启用 TOTP、保存恢复码**
   2) 在「设置 → 安装与下载」核对这三项（配置文件里写它们无效）：
        · Master 公网地址 install.master_url —— 留空则回落到 public_origin
        · 二进制下载源 install.dist_base  —— 留空则由本进程提供 /dist/
@@ -309,9 +470,43 @@ cat <<EOF
        · 同站（一个域名）：两个路径都在同一域名下
        · 分离（两个域名）：必须同时填两份域名清单，否则保存会被拒绝
      它是**运行时设置，改完即时生效、不用重启**（见 docs/04 §2.5）。
-     分离靠的是 Host 而不是监听地址，因此"一个端口 + 两个域名（反代）"也能分离；
+     分离靠的是 Host 而不是监听地址，因此「一个端口 + 两个域名（反代）」也能分离；
      反之**明文 HTTP 直连 IP** 的部署填不出域名清单，别选「分离」——会把后台锁在外面。
-  6) 配 TLS（推荐 acme；或前置反代 + trusted_proxies），见 configs/master.yaml.example
-  7) 配外部心跳 heartbeat_url，并确认能收到失联通知
-  8) 自己再跑一次：bash scripts/restore-drill.sh（确认备份在这台机器上真能恢复）
+  6) 配外部心跳 heartbeat_url，并确认能收到失联通知
+  7) 自己再跑一次：bash scripts/restore-drill.sh（确认备份在这台机器上真能恢复）
 EOF
+
+# TLS 的收尾提示按模式给。写死一句"去配 TLS"是没用的：真正会卡住人的
+# 是每种模式各自的前置条件（80 端口、证书路径、私钥指纹）。
+case "$TLS_MODE" in
+none)
+	cat >&2 <<'EOF'
+ℹ 当前 tls.mode=none：对外**必须**由前置 Caddy/Nginx 终结 TLS，否则会话是明文的。
+  反代方案里别忘了把反代网段填进 master.yaml 的 trusted_proxies，
+  否则 X-Forwarded-Proto 不被采信、Cookie 会走明文降级分支。详见 docs/04 §2.4。
+EOF
+	;;
+files)
+	cat >&2 <<EOF
+ℹ tls.mode=files：证书读 $TLS_CERT / $TLS_KEY，文件变更会热加载。
+  续期由你自己负责（certbot 等），续期时**务必复用私钥**——
+  换私钥会改变 SPKI 指纹，所有固定了指纹的 Agent 会同时失联。
+EOF
+	;;
+selfsigned)
+	cat >&2 <<EOF
+ℹ tls.mode=selfsigned：浏览器会报「证书不受信任」，这是自签的预期行为。
+  装 Agent 时需要把指纹钉进去（install.sh 的 --spki-sha256），
+  指纹可在后台的「TLS 状态」页或 probe-master 的日志里看到。
+EOF
+	;;
+acme)
+	cat >&2 <<EOF
+ℹ tls.mode=acme：**首张证书要在后台按需申请**（不阻塞启动）。
+  · challenge=$ACME_CHALLENGE
+  · http-01 需要 80 端口可达；80 被反代占用且反代会转发 /.well-known/ 时，
+    请在配置文件里把 acme.http_addr 设为 off
+  · 申请前先确认域名已解析到本机，且 install.master_url 用的是 https
+EOF
+	;;
+esac

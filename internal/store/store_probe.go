@@ -15,7 +15,7 @@ import (
 // 失去意义。实际使用中这条规则更常被用成"填错了想改一下"，强制新建会让历史
 // 曲线在新 id 下凭空断掉。因此这里放开为**可原地修改**，代价是历史曲线的
 // 语义连续性需要管理员自己留意（后台编辑弹窗里有明确提示）。
-// 这是对 A4 的有意偏离，已在 README 的"与设计的差异"一节记录。
+// 这是对 A4 的有意偏离，已在 `docs/01-执行摘要.md` 记录。
 
 // ListProbeTargets 列出全局目标（nodeID=0）或某节点专属目标，并附上全局目标。
 func (r *Repo) ListProbeTargets(nodeID int64) ([]*model.ProbeTarget, error) {
