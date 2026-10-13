@@ -35,11 +35,16 @@
 #   --no-service         只装不注册服务（容器里用；不需要 root）
 #   --yes                不提问，全部取给定参数/默认值
 #   --dry-run            下载并校验，但不安装、不改动系统
+#   --uninstall          卸载（连数据一起清；加 --keep-data 保留数据目录）
+#                       走这条路时**不下载二进制**，只取部署脚本执行 --uninstall，
+#                       所以不需要 root 之外的前置条件，也不会被架构检查拦住。
 #   -h, --help           显示本帮助
 #
 # 其余参数原样透传给 scripts/deploy-master.sh（--public-origin、--admin-origin、
 # --admin-user、--public-listen、--admin-listen、--dir、--data、--bin-dir、
 # --dist-base、--force-config，以及全部 --tls-* 与 --acme-* 参数）。
+# dns-01 的 DNS 凭据走环境变量（不进 shell 历史）：
+#   PROBE_ACME_DNS_PROVIDER（默认 cloudflare）、PROBE_ACME_DNS_TOKEN。
 #
 # 为什么部署脚本取自 --script-ref（默认 main）而不是二进制的那个标签：二进制按版本
 # 钉死（要可复现），脚本允许独立演进——修一句提问、补一条诊断，不该逼所有人换版本号
@@ -57,6 +62,8 @@ SCRIPT_REF="${XB_SCRIPT_REF:-main}"
 NO_SERVICE=""
 NON_INTERACTIVE=""
 DRY_RUN=""
+UNINSTALL=""
+KEEP_DATA=""
 
 # 透传给 deploy-master.sh 的参数：本脚本**不解析**它们，原样转发。
 # 刻意不在这里再写一份默认值（配置目录、监听地址等）：两处各写一份默认值，
@@ -75,12 +82,17 @@ install-master-bin.sh —— XB-Probe Master 免编译部署（从 Releases 取�
   --no-service          只装不注册服务（不需要 root）
   --yes                 不提问
   --dry-run             只下载校验，不安装
+  --uninstall           卸载（连数据一起清；加 --keep-data 保留数据目录）
+  --keep-data           与 --uninstall 同用
   -h, --help            显示本帮助
 
   其余参数透传给 scripts/deploy-master.sh：
   --public-origin/--admin-origin/--admin-user/--public-listen/--admin-listen/
   --dir/--data/--bin-dir/--dist-base/--force-config/
   --tls-mode/--tls-cert/--tls-key/--tls-domain/--tls-ip/--acme-email/--acme-ca/--acme-challenge
+
+  dns-01 的凭据用环境变量（不进 shell 历史）：
+  PROBE_ACME_DNS_PROVIDER（默认 cloudflare）、PROBE_ACME_DNS_TOKEN
 
 不加 --yes 时会交互提问（TLS 方式、监听端口、公开/管理端地址、管理员与口令）。
 EOF
@@ -158,6 +170,10 @@ while [ $# -gt 0 ]; do
 		shift
 		;;
 	--dry-run) DRY_RUN="1"; shift ;;
+	# 卸载：**不进下载/校验那一段**——卸载不需要二进制，也不该因为架构不匹配
+	# （armv7 之类）先被拦下来。走到下面"卸载"那一节直接取部署脚本执行。
+	--uninstall) UNINSTALL="1"; PASSTHRU="$PASSTHRU --uninstall"; shift ;;
+	--keep-data) KEEP_DATA="1"; PASSTHRU="$PASSTHRU --keep-data"; shift ;;
 	-h | --help) usage; exit 0 ;;
 	--)
 		shift
@@ -179,6 +195,57 @@ Linux) : ;;
 	exit 2
 	;;
 esac
+
+# ---------------------------------------------------------------------------
+# 卸载：--uninstall
+# ---------------------------------------------------------------------------
+#
+# 刻意排在架构探测与 root 检查**之前**：
+#   · 卸载不下载二进制，所以"本仓库只发布 amd64/arm64"这条限制与它无关；
+#   · root 检查有它自己的一份（--dry-run 不需要 root）。
+# 删除逻辑只有一份（scripts/deploy-master.sh --uninstall），这里取回来执行。
+if [ -n "$UNINSTALL" ]; then
+	if [ -z "$DRY_RUN" ] && [ "$(id -u)" -ne 0 ]; then
+		err "卸载需要 root 或 sudo（--dry-run 不需要）。"
+		exit 1
+	fi
+	# 归一化仓库名（下面正式流程里那份归一化还没跑到）。
+	REPO_UN="$(printf '%s' "$REPO_RAW" |
+		sed -e 's|^https\?://[^/]*/||' -e 's|\.git$||' -e 's|^/||' -e 's|/$||')"
+	case "$REPO_UN" in
+	*/*) : ;;
+	*)
+		err "--repo 应形如 owner/repo（收到 $REPO_RAW）。"
+		exit 2
+		;;
+	esac
+	RAW_UN="https://raw.githubusercontent.com/$REPO_UN"
+	say "取部署脚本（$SCRIPT_REF）以执行卸载"
+	TMP_UN="$(mktemp -d 2>/dev/null || echo "/tmp/xb-uninst.$$")"
+	mkdir -p "$TMP_UN"
+	trap 'rm -rf "$TMP_UN"' EXIT INT TERM HUP
+	DEPLOY_UN="$TMP_UN/deploy-master.sh"
+	download "$RAW_UN/$SCRIPT_REF/scripts/deploy-master.sh" >"$DEPLOY_UN" || {
+		err "取不到 $RAW_UN/$SCRIPT_REF/scripts/deploy-master.sh"
+		exit 1
+	}
+	if ! grep -q '^#!/bin/sh' "$DEPLOY_UN"; then
+		err "取回的 deploy-master.sh 不像脚本（没有 shebang），已中止。"
+		exit 1
+	fi
+	say "开始卸载（接下来的输出来自 scripts/deploy-master.sh）"
+	# 本脚本自己的 --dry-run 含义是"只下载校验、不安装"，所以平时**不透传**；
+	# 但卸载这条路上它必须透传——否则部署脚本会去做真正的删除（在非 root 下
+	# 表现为一句莫名其妙的"卸载需要 root 或 sudo（--dry-run 不需要）"）。
+	if [ -n "$DRY_RUN" ]; then PASSTHRU="$PASSTHRU --dry-run"; fi
+	# $PASSTHRU 不加引号是有意的：它要按空白切成多个参数。
+	# shellcheck disable=SC2086
+	if ! sh "$DEPLOY_UN" $PASSTHRU; then
+		err "卸载脚本执行失败（上面是它的输出）。"
+		exit 1
+	fi
+	exit 0
+fi
 
 # 架构探测：uname -m 的取值在不同发行版/内核上并不统一，
 # x86_64 与 amd64 是同一个东西，aarch64 与 arm64 也是。

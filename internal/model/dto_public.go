@@ -36,6 +36,17 @@ type PublicSite struct {
 	// "30m" / "1h" / "6h" / "24h"。前端用它生成"延迟 / 丢包 · 近 X"的标题，
 	// 并按窗口换算悬浮提示里的"每个点约多久"。空值视作 "24h"（旧快照兼容）。
 	LatWindow string `json:"lat_window,omitempty"`
+
+	// AdminURL 是公开看板顶栏那个「管理后台」按钮应当跳转的地址。
+	//
+	// 为什么需要它：公开站与后台很可能**不在同一个源**上（不同端口、不同域名，
+	// 或者一个端口两个域名由反代分流）。写死的相对路径 `/admin/` 在分离部署下
+	// 会跳到公开站自己的路径下，得到 404 或 421 —— 用户看到的现象是
+	// "点登录按钮打不开后台"，而站内一切看起来都正常。
+	//
+	// 为空表示"就是同站"，前端保留默认的 `/admin/`（升级前的行为）。
+	// 它是一个 URL 而不是 host：这里只下发"该去哪儿"，不含任何内部信息。
+	AdminURL string `json:"admin_url,omitempty"`
 }
 
 // PublicOverview 对应 GET /api/public/v1/overview。

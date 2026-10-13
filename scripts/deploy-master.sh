@@ -49,12 +49,51 @@
 #   --tls-domain <域名[,域名]>              mode=acme/selfsigned：域名（SAN）
 #   --tls-ip <IP[,IP]>                      mode=acme/selfsigned：IP（RFC 8738 / SAN）
 #   --acme-email <邮箱> --acme-ca <CA>       mode=acme：账户邮箱与 CA（默认 letsencrypt）
-#   --acme-challenge <http-01|tls-alpn-01>   mode=acme：默认 http-01（需要 80 端口可达）
+#   --acme-challenge <http-01|tls-alpn-01|dns-01>
+#                                            mode=acme：默认 http-01（需要 80 端口可达）
+#   dns-01 的凭据不走命令行（会进 shell 历史）：
+#     PROBE_ACME_DNS_PROVIDER（默认 cloudflare）
+#     PROBE_ACME_DNS_TOKEN（Cloudflare API Token，需 Zone:DNS:Edit + Zone:Zone:Read）
+#   交互执行时这两项会被提示输入，Token 不回显。
+#
+# 交互输入的退格/方向键：本脚本会尽量把自己换到 bash 下运行（`read -e` 走 readline）。
+# 换不了（没有 bash，或脚本不是以文件形式存在）时退回内核 tty 的行编辑，那种情况下
+# 若终端发的退格码与 tty 的 erase 字符不一致，退格会被当成字面字符打出来。
+#
+# 卸载（默认连数据一起清；数据目录里有数据库与 master.key）：
+#   sh deploy-master.sh --uninstall            # 停服务 → 删单元/二进制/配置/数据/系统用户
+#   sh deploy-master.sh --uninstall --keep-data
 #
 # 配了 --tls-mode 却与 --public-origin 的协议不一致（例如 mode=acme 却给 http://）
 # 会被拒绝：证书装上了，访客却仍在明文上，是最难被察觉的一种"部署成功"。
 
 set -eu
+
+# ---------------------------------------------------------------------------
+# 交互输入的可编辑性：尽量在 bash 下运行本脚本
+# ---------------------------------------------------------------------------
+#
+# 现象：在 Ubuntu 上 `sudo sh deploy-master.sh`，输入时按退格**不删字符**，
+# 而是插入一个 "^H"，方向键同样没用，只能 Ctrl+C 重来。
+#
+# 原因不在本脚本，而在"谁负责行编辑"：
+#   · dash（Ubuntu 的 /bin/sh）把行编辑完全交给内核 tty 的 erase 字符。很多
+#     终端/SSH 客户端发的退格是 ^H(0x08)，而 tty 那侧配的常是 ^?(0x7f)，
+#     于是内核不认为它是"删除"，只当成一个可打印字符插进缓冲区；
+#   · bash 的 `read -e` 自己跑 readline，把 ^H 与 ^? **都**绑成 backward-delete-char，
+#     无论终端怎么配都能正常删除，方向键/Home/End 也随之可用。
+#
+# 所以能换 bash 就换。两个前置条件缺一不可：
+#   · $0 是一个真实文件——`sh -c "$(curl …)"` 那种用法没有文件，只能保持原样；
+#   · bash 可用。
+# PROBE_REEXEC 防的是"万一 bash 起来后 BASH_VERSION 仍为空"时的无限自我调用。
+if [ -z "${PROBE_REEXEC:-}" ] && [ -z "${BASH_VERSION:-}" ] && command -v bash >/dev/null 2>&1; then
+	if [ -f "$0" ]; then
+		PROBE_REEXEC=1
+		export PROBE_REEXEC
+		exec bash "$0" "$@"
+	fi
+fi
 
 BIN_SRC=""
 DIR="${PROBE_DIR:-/etc/probe-master}"
@@ -77,8 +116,15 @@ TLS_IPS="${PROBE_TLS_IPS:-}"
 ACME_EMAIL="${PROBE_ACME_EMAIL:-}"
 ACME_CA="${PROBE_ACME_CA:-letsencrypt}"
 ACME_CHALLENGE="${PROBE_ACME_CHALLENGE:-http-01}"
+# dns-01 专用的两项。它们**刻意只走环境变量与交互输入，不做命令行参数**：
+# 一个能改你 DNS 的 API Token 进了 shell 历史，等于把它写在 .bash_history 里。
+# （与 --admin-password 同一个理由，见文件头的说明。）
+ACME_DNS_PROVIDER="${PROBE_ACME_DNS_PROVIDER:-}"
+ACME_DNS_TOKEN="${PROBE_ACME_DNS_TOKEN:-}"
 DRY_RUN=""
 NO_ASK=""
+UNINSTALL=""
+KEEP_DATA=""
 
 # "用户是否显式给过"这几个标记，用来区分"没给"和"给了一个恰好等于默认值的值"。
 # 缺了它们，像 TLS_MODE / PUBLIC_LISTEN 这种自带默认值的项就永远分不清
@@ -87,10 +133,12 @@ PUBLIC_LISTEN_GIVEN=""
 ADMIN_LISTEN_GIVEN=""
 TLS_MODE_GIVEN=""
 ADMIN_USER_GIVEN=""
+ACME_CHALLENGE_GIVEN=""
 if [ -n "${PROBE_PUBLIC_LISTEN:-}" ]; then PUBLIC_LISTEN_GIVEN="1"; fi
 if [ -n "${PROBE_ADMIN_LISTEN:-}" ]; then ADMIN_LISTEN_GIVEN="1"; fi
 if [ -n "${PROBE_TLS_MODE:-}" ]; then TLS_MODE_GIVEN="1"; fi
 if [ -n "${PROBE_ADMIN_USER:-}" ]; then ADMIN_USER_GIVEN="1"; fi
+if [ -n "${PROBE_ACME_CHALLENGE:-}" ]; then ACME_CHALLENGE_GIVEN="1"; fi
 
 # yaml_list 把 "a, b,c" 渲染成 YAML 行内序列 `"a", "b", "c"`。
 # 用 tr 把逗号换成空格再交给 for 做字段切分——这里刻意**只认逗号**：
@@ -140,7 +188,16 @@ TLS：
   --tls-ip <IP[,IP]>                          mode=acme/selfsigned
   --acme-email <邮箱>                         mode=acme（可选）
   --acme-ca <CA>                             默认 letsencrypt
-  --acme-challenge <http-01|tls-alpn-01>     默认 http-01
+  --acme-challenge <http-01|tls-alpn-01|dns-01>
+                                             默认 http-01
+  dns-01 的凭据用环境变量（不进 shell 历史）：
+    PROBE_ACME_DNS_PROVIDER   默认 cloudflare
+    PROBE_ACME_DNS_TOKEN      Cloudflare API Token
+
+卸载：
+  --uninstall               停服务并删除单元/二进制/配置/数据/系统用户
+                            （默认连数据一起清；数据目录里有数据库与 master.key）
+  --keep-data               与 --uninstall 同用，保留数据目录
 EOF
 }
 
@@ -168,7 +225,9 @@ while [ $# -gt 0 ]; do
 	--tls-ip) TLS_IPS="${2:-}"; shift 2 ;;
 	--acme-email) ACME_EMAIL="${2:-}"; shift 2 ;;
 	--acme-ca) ACME_CA="${2:-}"; shift 2 ;;
-	--acme-challenge) ACME_CHALLENGE="${2:-}"; shift 2 ;;
+	--acme-challenge) ACME_CHALLENGE="${2:-}"; ACME_CHALLENGE_GIVEN="1"; shift 2 ;;
+	--uninstall) UNINSTALL="1"; shift ;;
+	--keep-data) KEEP_DATA="1"; shift ;;
 	-h | --help) usage; exit 0 ;;
 	*) echo "未知参数：$1" >&2; usage; exit 2 ;;
 	esac
@@ -190,14 +249,39 @@ if [ -z "$NO_ASK" ]; then
 	if [ -t 0 ] || [ -n "${PROBE_ASK_FORCE:-}" ]; then ASK="1"; fi
 fi
 
+# read_line <变量名>：读一行。
+#
+# bash 下用 `read -e`（走 readline）：退格、方向键、Home/End 都正常，且 ^H 与 ^?
+# 两种退格码都被绑为 backward-delete-char——这正是"按退格却打出 ^H"的根治办法。
+# 其它 shell 退回普通 read（由内核 tty 决定，行为不如前者，但不比现在更差）。
+# 脚本开头会尽量把自己换到 bash 下运行，所以这里通常走得到 -e 分支。
+read_line() {
+	if [ -n "${BASH_VERSION:-}" ]; then
+		IFS= read -e -r "$1"
+	else
+		IFS= read -r "$1"
+	fi
+}
+
 # ask <提示> <默认值>：结果放进 ASK_REPLY；提示走 stderr，避免 `> 日志` 时交互看不见。
 # 不问时直接把默认值交回去——"问"与"不问"对后面的逻辑是同一件事。
 ask() {
 	if [ -z "$ASK" ]; then ASK_REPLY="${2:-}"; return 0; fi
 	if [ -n "${2:-}" ]; then printf '%s [%s]: ' "$1" "$2" >&2
 	else printf '%s: ' "$1" >&2; fi
-	IFS= read -r ASK_REPLY || ASK_REPLY=""
+	read_line ASK_REPLY || ASK_REPLY=""
 	if [ -z "$ASK_REPLY" ]; then ASK_REPLY="${2:-}"; fi
+}
+
+# ask_secret <提示>：不回显地读一行（API Token 这类）。
+# 刻意**不用** read -e：readline 会重新打开回显，把刚敲的 Token 打到屏幕上。
+ask_secret() {
+	if [ -z "$ASK" ]; then ASK_REPLY=""; return 0; fi
+	printf '%s（不回显）: ' "$1" >&2
+	stty -echo 2>/dev/null || true
+	IFS= read -r ASK_REPLY || ASK_REPLY=""
+	stty echo 2>/dev/null || true
+	printf '\n' >&2
 }
 
 # ask_required <提示>：不允许空答案（ACME 的域名、files 的证书路径这类）。
@@ -218,12 +302,175 @@ ask_required() {
 confirm() {
 	if [ -z "$ASK" ]; then return 0; fi
 	printf '%s [Y/n]: ' "$1" >&2
-	IFS= read -r _ca || _ca=""
+	read_line _ca || _ca=""
 	case "$_ca" in
 	n | N | no | NO | No) return 1 ;;
 	*) return 0 ;;
 	esac
 }
+
+# ---------------------------------------------------------------------------
+# 卸载：--uninstall
+# ---------------------------------------------------------------------------
+#
+# 位置刻意在 TLS 问答**之前**：卸载不该再问"你要哪种证书"。
+#
+# "卸载干净"包含六件事，少任何一件都会留下需要人手收拾的尾巴：
+# 服务单元、二进制、配置目录（master.yaml + master.key）、数据目录（数据库 +
+# 主题 + 发布件 + 证书）、系统用户与组、以及其它 init 系统的残留。
+#
+# 默认**连数据一起删**（这才是"干净"），但要过两道闸：
+#   ① 只肯删"看起来是自己建的"路径（路径里必须含 probe）——`--data /var/lib`
+#      这种手滑不该变成一场灾难；
+#   ② 交互执行时还要再确认一次（默认 No）。
+# 想留数据加 --keep-data。
+if [ -n "$UNINSTALL" ]; then
+	if [ -z "$DRY_RUN" ] && [ "$(id -u)" -ne 0 ]; then
+		echo "错误：卸载需要 root 或 sudo（--dry-run 不需要）。" >&2
+		exit 1
+	fi
+
+	# uninstall_path_ok：这条路径能不能被我们删。
+	#
+	# 判据是"这个路径像不像本脚本创建的"，而不是"用户确认过"：`--data` 是可传参的，
+	# 一个手滑的 `--data /var/lib` 会把整个目录清空。三项都要满足：
+	#   ① 绝对路径；② 含 probe（"本脚本建的"唯一可用证据）；③ 至少两级。
+	#
+	# ③ 不是多余的：`/probe` 恰好被 ② 放过（`/*probe*` 里两个 `*` 都能匹配空），
+	# 而它同样是"根目录下顺手建的一个名字"，删掉不可逆。三项任意一项判不出来就拒绝，
+	# 把 rm -rf 留给用户自己决定。
+	uninstall_path_ok() {
+		case "$1" in
+		"" | "/" | "/etc" | "/usr" | "/var" | "/opt" | "/home" | "/root" | "/srv" | "/tmp") return 1 ;;
+		esac
+		case "$1" in
+		/*probe*) : ;;
+		*) return 1 ;;
+		esac
+		case "${1#/}" in
+		*/*) return 0 ;;
+		esac
+		return 1
+	}
+
+	for _p in "$DIR" "$DATA"; do
+		if ! uninstall_path_ok "$_p"; then
+			echo "错误：拒绝删除 $_p —— 它不像本脚本创建的目录（路径中应含 probe）。" >&2
+			echo "      确认要删请手工执行：rm -rf '$_p'" >&2
+			exit 2
+		fi
+	done
+
+	if [ -z "$KEEP_DATA" ] && [ -z "$DRY_RUN" ] && [ -n "$ASK" ]; then
+		printf '这会删除数据目录 %s（含数据库与 master.key），不可恢复。继续？ [y/N]: ' "$DATA" >&2
+		read_line _uc || _uc=""
+		case "$_uc" in
+		y | Y | yes | YES | Yes) : ;;
+		*)
+			echo "已取消，未改动系统。" >&2
+			exit 0
+			;;
+		esac
+	fi
+
+	# rm_path <路径> <说明>：删除并把结果**回显出来**。
+	# 逐项回显是刻意的：卸载最常出的问题不是删错，而是"以为删了、实际因为
+	# 只读挂载或权限没删掉"，而这件事对用户完全不可见。
+	rm_path() {
+		_p="$1"
+		_what="$2"
+		if [ -n "$DRY_RUN" ]; then
+			if [ -e "$_p" ]; then echo "    [dry-run] 将删除 $_p（$_what）"
+			else echo "    $_p 不存在（$_what）"; fi
+			return 0
+		fi
+		if [ ! -e "$_p" ]; then
+			echo "    $_p 不存在（$_what）"
+			return 0
+		fi
+		rm -rf "$_p" 2>/dev/null || true
+		if [ -e "$_p" ]; then
+			echo "    ⚠ 残留：$_p（$_what）—— 请手工处理（只读挂载？权限？）"
+		else
+			echo "    已删除 $_p（$_what）"
+		fi
+	}
+
+	echo "==> 卸载 Server Probe Master"
+	if [ -n "$DRY_RUN" ]; then
+		echo "    （dry-run：只列出将要做的事，不删除任何东西）"
+	fi
+
+	echo "==> 1/6 停止并注销服务"
+	UNIT_PATH=/etc/systemd/system/probe-master.service
+	if [ -n "$DRY_RUN" ]; then
+		echo "    [dry-run] systemctl disable --now probe-master；删除 $UNIT_PATH"
+	elif command -v systemctl >/dev/null 2>&1; then
+		systemctl disable --now probe-master >/dev/null 2>&1 || true
+		if [ -f "$UNIT_PATH" ]; then
+			rm -f "$UNIT_PATH" 2>/dev/null || true
+			systemctl daemon-reload >/dev/null 2>&1 || true
+			systemctl reset-failed probe-master >/dev/null 2>&1 || true
+			if [ -f "$UNIT_PATH" ]; then echo "    ⚠ 残留：$UNIT_PATH"
+			else echo "    已停止并删除 $UNIT_PATH"; fi
+		else
+			echo "    $UNIT_PATH 不存在（未注册过 systemd 服务）"
+		fi
+	else
+		echo "    没有 systemctl：跳过（若用 OpenRC，见下一步）"
+	fi
+
+	echo "==> 2/6 其它 init 系统残留"
+	for _f in /etc/init.d/probe-master /etc/supervisor/conf.d/probe-master.conf; do
+		if [ -e "$_f" ]; then
+			rm_path "$_f" "其它进程管理器的单元"
+			if command -v rc-update >/dev/null 2>&1; then
+				rc-update del probe-master >/dev/null 2>&1 || true
+			fi
+		else
+			echo "    $_f 不存在"
+		fi
+	done
+
+	echo "==> 3/6 删除二进制"
+	rm_path "$BIN_DIR/probe-master" "Master 可执行文件"
+
+	echo "==> 4/6 删除配置目录"
+	rm_path "$DIR" "配置（master.yaml、master.key）"
+
+	echo "==> 5/6 删除数据目录"
+	if [ -n "$KEEP_DATA" ]; then
+		echo "    保留（--keep-data）：$DATA"
+	else
+		rm_path "$DATA" "数据（数据库、主题、发布件、证书）"
+	fi
+
+	echo "==> 6/6 删除系统用户"
+	if [ -n "$DRY_RUN" ]; then
+		echo "    [dry-run] userdel probe；groupdel probe"
+	elif id -u probe >/dev/null 2>&1; then
+		# 用户还被占用时 userdel 会失败（同名进程在跑、或别处仍以 probe 运行）。
+		# 不 set -e 中断：剩下的清理项更该跑完，失败原因单独报出来。
+		userdel probe >/dev/null 2>&1 || true
+		groupdel probe >/dev/null 2>&1 || true
+		if id -u probe >/dev/null 2>&1; then
+			echo "    ⚠ 用户 probe 仍在（可能仍有进程以它运行，或被别的服务使用）"
+		else
+			echo "    已删除用户与组 probe"
+		fi
+	else
+		echo "    用户 probe 不存在"
+	fi
+
+	echo
+	if [ -n "$DRY_RUN" ]; then
+		echo "==> dry-run 结束：以上操作均未执行。去掉 --dry-run 即真正卸载。"
+	else
+		echo "==> 卸载完成。"
+		echo "    未删除的只有系统包（本脚本从未安装过它们）与你自己放进来的文件。"
+	fi
+	exit 0
+fi
 
 # detect_public_ip：只用于"给一个像样的默认值"，拿不到就返回空，不算错误。
 # 先问外部服务：NAT 后面的机器，本地路由里的源地址是私网地址，没有参考价值。
@@ -271,6 +518,18 @@ origin_default() {
 	if [ "$1" = "http" ] && [ "$3" = "80" ]; then printf '%s://%s' "$1" "$_oh"; return 0; fi
 	if [ "$1" = "https" ] && [ "$3" = "443" ]; then printf '%s://%s' "$1" "$_oh"; return 0; fi
 	printf '%s://%s:%s' "$1" "$_oh" "$3"
+}
+
+# admin_url_from <对外地址>：补成后台入口地址，幂等。
+# 直接拼 "$ORIGIN/admin/" 会在地址本身带尾斜杠时得到 "...//admin/"——
+# 多数浏览器能容忍，但它会出现在用户复制粘贴的那一行里，值得顺手做对。
+admin_url_from() {
+	_o="${1%/}"
+	case "$_o" in
+	*/admin) printf '%s/' "$_o" ;;
+	*/admin/) printf '%s' "$_o" ;;
+	*) printf '%s/admin/' "$_o" ;;
+	esac
 }
 
 # admin_user_ok：用户名只允许字母、数字与 . _ @ -
@@ -323,6 +582,35 @@ if [ "$TLS_MODE" = "acme" ]; then
 	if [ -z "$ACME_EMAIL" ]; then
 		ask "邮箱（可选，CA 用它发到期提醒）" ""
 		ACME_EMAIL="$ASK_REPLY"
+	fi
+	if [ -z "$ACME_CHALLENGE_GIVEN" ] && [ -n "$ASK" ]; then
+		cat >&2 <<'EOF'
+
+证书的校验方式（三个前提条件不同，选错了会在申请时才失败）：
+  1) http-01      本机在 80 端口应答（默认；最省事，需要 80 可达且没被别的服务占着）
+  2) tls-alpn-01  本机在 443 端口用 ALPN 应答（80 被占用、且 443 由本进程直接监听时选它）
+  3) dns-01       在 DNS 服务商处写一条 TXT 记录（支持通配符 *.example.com；需要 API Token）
+EOF
+		ask "选择校验方式（1/2/3）" "1"
+		case "$ASK_REPLY" in
+		1 | http-01) ACME_CHALLENGE="http-01" ;;
+		2 | tls-alpn-01) ACME_CHALLENGE="tls-alpn-01" ;;
+		3 | dns-01) ACME_CHALLENGE="dns-01" ;;
+		*) ACME_CHALLENGE="$ASK_REPLY" ;;
+		esac
+	fi
+	# dns-01 需要 DNS 服务商凭据。只问、不校验——合法性交给下面的校验段一处判，
+	# 免得"能不能放过"这件事在脚本里有两个各说各话的版本。
+	if [ "$ACME_CHALLENGE" = "dns-01" ]; then
+		if [ -z "$ACME_DNS_PROVIDER" ]; then ACME_DNS_PROVIDER="cloudflare"; fi
+		if [ -z "$ACME_DNS_TOKEN" ] && [ -n "$ASK" ]; then
+			cat >&2 <<'EOF'
+  · 建议在 Cloudflare 单独建一个 Token：权限只给 Zone:DNS:Edit 与 Zone:Zone:Read，
+    且只覆盖要签发的那个域名（不要用账户级 Global API Key）。
+EOF
+			ask_secret "Cloudflare API Token"
+			ACME_DNS_TOKEN="$ASK_REPLY"
+		fi
 	fi
 fi
 
@@ -427,7 +715,9 @@ if [ -n "$ASK" ]; then
 	printf '  %s：%s\n' "管理端监听" "$ADMIN_LISTEN" >&2
 	printf '  %s：%s\n' "公开地址" "${PUBLIC_ORIGIN:-（留空：按请求 Host 回填）}" >&2
 	printf '  %s：%s\n' "管理地址" "${ADMIN_ORIGIN:-（与公开站同一个域名）}" >&2
-	printf '  %s：%s\n' "TLS" "$TLS_MODE" >&2
+	_tls_note="$TLS_MODE"
+	if [ "$TLS_MODE" = "acme" ]; then _tls_note="$TLS_MODE（challenge=$ACME_CHALLENGE）"; fi
+	printf '  %s：%s\n' "TLS" "$_tls_note" >&2
 	printf '  %s：%s\n' "管理员" "$ADMIN_USER（口令随后输入）" >&2
 	printf '  %s：%s\n' "配置目录" "$DIR" >&2
 	printf '  %s：%s\n' "数据目录" "$DATA" >&2
@@ -478,9 +768,23 @@ if [ "$TLS_MODE" = "acme" ]; then
 		exit 2
 	fi
 	case "$ACME_CHALLENGE" in
-	http-01 | tls-alpn-01) : ;;
-	*) echo "错误：--acme-challenge 只能是 http-01 或 tls-alpn-01。" >&2; exit 2 ;;
+	http-01 | tls-alpn-01 | dns-01) : ;;
+	*) echo "错误：--acme-challenge 只能是 http-01 / tls-alpn-01 / dns-01。" >&2; exit 2 ;;
 	esac
+	# dns-01 的两条专属前置条件。都放在这里报错，而不是等申请证书时才失败——
+	# 那时的错误信息离原因很远（"写入 dns-01 挑战记录失败"），排起来要绕一大圈。
+	if [ "$ACME_CHALLENGE" = "dns-01" ]; then
+		if [ -z "$TLS_DOMAINS" ]; then
+			echo "错误：challenge=dns-01 只支持域名（DNS 里没有 IP 的挑战记录可写），" >&2
+			echo "      请用 --tls-domain 给出域名，或改用 http-01/tls-alpn-01。" >&2
+			exit 2
+		fi
+		if [ -z "$ACME_DNS_TOKEN" ]; then
+			echo "错误：challenge=dns-01 必须提供 DNS API Token。" >&2
+			echo "      交互执行时会被提示输入；无人值守请设 PROBE_ACME_DNS_TOKEN。" >&2
+			exit 2
+		fi
+	fi
 fi
 
 # TLS 与 public_origin 的协议必须自洽。
@@ -561,6 +865,12 @@ render_config() {
 		if [ -n "$ACME_EMAIL" ]; then echo "    email: \"$ACME_EMAIL\""; fi
 		echo "    ca: \"$ACME_CA\""
 		echo "    challenge: \"$ACME_CHALLENGE\""
+		if [ "$ACME_CHALLENGE" = "dns-01" ]; then
+			echo "    dns_provider: \"$ACME_DNS_PROVIDER\""
+			# Token 落在 master.yaml（0640 root:probe），与 master.key 同级。
+			# 权限够用，但别把这份文件复制进备份目录或贴进工单。
+			echo "    dns_api_token: \"$ACME_DNS_TOKEN\""
+		fi
 		if [ -n "$TLS_DOMAINS" ]; then echo "    domains: [$(yaml_list "$TLS_DOMAINS")]"; fi
 		if [ -n "$TLS_IPS" ]; then echo "    ips: [$(yaml_list "$TLS_IPS")]"; fi
 		;;
@@ -701,7 +1011,21 @@ else
 fi
 
 if [ -n "$NO_SERVICE" ]; then
-	echo "==> 5~7 跳过（--no-service）。前台运行：$BIN_DIR/probe-master -config $CFG"
+	echo "==> 5~7 跳过（--no-service）"
+	case "$TLS_MODE" in
+	none) _ns_scheme="http" ;;
+	*) _ns_scheme="https" ;;
+	esac
+	echo "    前台运行：$BIN_DIR/probe-master -config $CFG"
+	echo
+	if [ -n "$ADMIN_ORIGIN" ]; then
+		_ns_admin="$(admin_url_from "$ADMIN_ORIGIN")"
+	else
+		_ns_admin="$_ns_scheme://$ADMIN_LISTEN/admin/"
+	fi
+	echo "  公开看板    ${PUBLIC_ORIGIN:-$_ns_scheme://$PUBLIC_LISTEN}"
+	echo "  管理后台    $_ns_admin"
+	echo
 	exit 0
 fi
 
@@ -773,7 +1097,38 @@ while [ $i -lt 20 ]; do
 done
 systemctl --no-pager status probe-master | sed -n '1,8p' || true
 
-echo "==> 7/7 完成。接下来要做的事"
+echo "==> 证书状态"
+# 为什么这一步必须在部署脚本里做：ACME 的首张证书是**后台按需申请**的（刻意如此——
+# 一个 DNS 或网络问题不该让整个 Master 起不来）。于是"服务已经启动"与"证书已经就绪"
+# 之间有一段**没有任何反馈**的空窗：脚本打完最后一段提示就退出，浏览器却还是打不开，
+# 用户唯一能做的就是猜。这一步把那段空窗变成一份有过程、有结果、有原因的报告。
+#
+# 等多久由 PROBE_TLS_WAIT 控制（默认 120 秒）。申请正常时几秒就返回；
+# 等不到也只是"还没结果"，不会把已经装好的部署判成失败。
+if [ "$TLS_MODE" = "none" ]; then
+	echo "    跳过（tls.mode=none）：证书由前置 Caddy/Nginx 负责"
+else
+	_cert_wait=0
+	if [ "$TLS_MODE" = "acme" ]; then _cert_wait="${PROBE_TLS_WAIT:-120}"; fi
+	if [ "$_cert_wait" -gt 0 ] 2>/dev/null; then
+		echo "    等待证书就绪（最多 ${_cert_wait} 秒；等不到也不影响使用，Master 每 2 分钟自动重试）"
+	fi
+	_cert_rc=0
+	"$BIN_DIR/probe-master" tls status -config "$CFG" -wait "$_cert_wait" || _cert_rc=$?
+	case "$_cert_rc" in
+	0) : ;;
+	2)
+		echo "    （证书还没就绪：申请仍在进行中。随时可再查：）"
+		echo "      $BIN_DIR/probe-master tls status -config $CFG -wait 120"
+		;;
+	*)
+		echo "    （证书申请失败。上面列出的排查项每条都能直接复制执行；改完配置后）"
+		echo "      systemctl restart probe-master 会立即重试。"
+		;;
+	esac
+fi
+
+echo "==> 7/7 完成"
 if [ -z "$PUBLIC_ORIGIN" ]; then
 	cat >&2 <<'EOF'
 ⚠ 没有给 --public-origin，配置文件里就没有 public_origin，install.master_url
@@ -790,8 +1145,53 @@ if [ -n "$DIST_BASE" ]; then
       $DIST_BASE
 EOF
 fi
+
+# ---- 收尾总结：把"地址到底是什么"直接摆出来 ----
+#
+# 这一屏是刻意加的。此前脚本打完一大段"接下来要做的事"就结束了，用户拿到的
+# 是一串命令行片段而不是"我的看板在哪儿、后台在哪儿"——于是最常见的下一步
+# 是回头 SSH 进来翻 master.yaml。地址本来就是脚本自己算出来的，没有理由不印。
+# 监听地址里的 0.0.0.0 / [::] 是"监听所有网卡"的写法，不是可点击的目的地址。
+ADMIN_ADDR="$ADMIN_LISTEN"
+case "$ADMIN_ADDR" in
+0.0.0.0:*) ADMIN_ADDR="127.0.0.1:${ADMIN_ADDR#0.0.0.0:}" ;;
+"[::]:"*) ADMIN_ADDR="127.0.0.1:${ADMIN_ADDR#\[::\]:}" ;;
+":::") ADMIN_ADDR="127.0.0.1" ;;
+esac
+PUBLIC_URL="${PUBLIC_ORIGIN:-$SCHEME://$HEALTH_ADDR}"
+if [ -n "$ADMIN_ORIGIN" ]; then
+	ADMIN_URL="$(admin_url_from "$ADMIN_ORIGIN")"
+	ADMIN_NOTE=""
+elif [ -n "$PUBLIC_ORIGIN" ]; then
+	ADMIN_URL="$SCHEME://$ADMIN_ADDR/admin/"
+	ADMIN_NOTE="（也可经 $PUBLIC_ORIGIN/admin/ 访问，前提是反代把 /admin/ 转到了 $ADMIN_LISTEN）"
+else
+	ADMIN_URL="$SCHEME://$ADMIN_ADDR/admin/"
+	ADMIN_NOTE=""
+fi
+
+echo
+echo "============================================================"
+echo " 部署完成"
+echo "============================================================"
+printf '  公开看板    %s\n' "$PUBLIC_URL"
+printf '  管理后台    %s\n' "$ADMIN_URL"
+if [ -n "$ADMIN_NOTE" ]; then printf '              %s\n' "$ADMIN_NOTE"; fi
+case "$TLS_MODE" in
+none) printf '  传输安全    %s\n' "明文（证书由前置 Caddy/Nginx 负责）" ;;
+files) printf '  传输安全    %s\n' "https（证书来自 $TLS_CERT）" ;;
+selfsigned) printf '  传输安全    %s\n' "https 自签（浏览器会提示不受信任，属预期）" ;;
+acme) printf '  传输安全    %s\n' "https（ACME，challenge=$ACME_CHALLENGE）" ;;
+esac
+if [ -n "$ADMIN_ORIGIN" ]; then
+	printf '  站点形态    %s\n' "同站 / 分离由「设置 → 站点形态」决定（公开 $PUBLIC_URL，后台 $ADMIN_ORIGIN）"
+fi
+echo "============================================================"
+echo
+
 cat <<EOF
-  1) 登录管理端 ${ADMIN_ORIGIN:-${SCHEME}://$ADMIN_LISTEN}/admin/ 并**启用 TOTP、保存恢复码**
+  接下来：
+  1) 登录管理端 $ADMIN_URL 并**启用 TOTP、保存恢复码**
   2) 在「设置 → 安装与下载」核对这三项（配置文件里写它们无效）：
        · Master 公网地址 install.master_url —— 留空则回落到 public_origin
        · 二进制下载源 install.dist_base  —— 留空则由本进程提供 /dist/
@@ -807,8 +1207,10 @@ cat <<EOF
      它是**运行时设置，改完即时生效、不用重启**。
      分离靠的是 Host 而不是监听地址，因此「一个端口 + 两个域名（反代）」也能分离；
      反之**明文 HTTP 直连 IP** 的部署填不出域名清单，别选「分离」——会把后台锁在外面。
+     公开看板顶栏的「管理后台」按钮会跟着这个设置走，不必手改。
   6) 配外部心跳 heartbeat_url，并确认能收到失联通知
   7) 自己走一遍备份恢复演练，确认备份在这台机器上真能恢复
+  卸载：sh deploy-master.sh --uninstall（--keep-data 保留数据）
 EOF
 
 # TLS 的收尾提示按模式给。写死一句"去配 TLS"是没用的：真正会卡住人的

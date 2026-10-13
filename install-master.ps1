@@ -16,6 +16,21 @@
 #   powershell -ExecutionPolicy Bypass -File install-master.ps1 -Yes `
 #       -PublicOrigin https://status.example.com -TlsMode acme -TlsDomain status.example.com
 #   口令仍由 deploy-master.ps1 交互输入；无人值守时设环境变量 PROBE_ADMIN_PASSWORD。
+#
+# 卸载（默认连数据一起清；数据目录里有数据库与 master.key）：
+#   powershell -ExecutionPolicy Bypass -File install-master.ps1 -Uninstall
+#   powershell -ExecutionPolicy Bypass -File install-master.ps1 -Uninstall -KeepData
+#   powershell -ExecutionPolicy Bypass -File install-master.ps1 -Uninstall -DryRun
+#
+# 卸载**不碰源码与 Go**：它从仓库取回 scripts\deploy-master.ps1 执行 -Uninstall，
+# 所以不需要先装一套工具链，也不会因为 -Src 不在而失败。
+#
+# 问答分两处，不是漏了：TLS 方式、对外地址、管理员账号在这里问（排在装依赖与编译
+# 之前，答案错了就不必动系统）；**监听端口**由 scripts\deploy-master.ps1 在落盘前问。
+# 端口的默认值只有部署脚本那一份来源，跟着它问才不会出现"提示写 8080、实际听 8081"。
+#
+# dns-01 的 DNS 凭据：用环境变量 PROBE_ACME_DNS_PROVIDER / PROBE_ACME_DNS_TOKEN，
+# 或由 scripts\deploy-master.ps1 交互提示（Token 不回显）。
 
 param(
     [string]$Repo = $(if ($env:XB_REPO) { $env:XB_REPO } else { "https://github.com/koyoca/XB-Probe.git" }),
@@ -26,6 +41,8 @@ param(
     [switch]$NoDeps,
     [switch]$Yes,
     [switch]$DryRun,
+    [switch]$Uninstall,
+    [switch]$KeepData,
 
     # 以下原样透传给 scripts\deploy-master.ps1
     [string]$Dir = "",
@@ -55,6 +72,7 @@ $MinGo = "1.26"
 
 function Write-Step { param([string]$Msg) Write-Host "==> $Msg" -ForegroundColor Cyan }
 function Write-Warn2 { param([string]$Msg) Write-Host "警告：$Msg" -ForegroundColor Yellow }
+function Write-Err2 { param([string]$Msg) Write-Host "错误：$Msg" -ForegroundColor Red }
 
 function Test-Admin {
     $id = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -126,10 +144,99 @@ function Install-Go {
 }
 
 # ---------------------------------------------------------------------------
+# 卸载：-Uninstall（排在装依赖与编译之前）
+# ---------------------------------------------------------------------------
+#
+# 卸载不需要源码、不需要 Go，所以必须排在"装依赖 / clone / 编译"**之前**——否则
+# "卸个东西"要先装一套工具链，是本末倒置，而且一旦工具链装不上就卸不了。
+#
+# 删除逻辑只有一份（scripts\deploy-master.ps1 -Uninstall），这里从仓库把它取回来
+# 执行。**刻意不自己实现一遍删除**：两份删除逻辑迟早漂移，而这里赌的是用户的系统。
+if ($Uninstall) {
+    # 卸载要注销计划任务、删 ProgramData 下的目录，仍然需要管理员；
+    # 只有"只看不删"的 -DryRun 例外。
+    if (-not $DryRun -and -not (Test-Admin)) {
+        Write-Err2 "卸载需要管理员权限（-DryRun 不需要）。"
+        Write-Host "      请用「以管理员身份运行」的 PowerShell 重跑。" -ForegroundColor Red
+        exit 1
+    }
+
+    # Get-RawBase：把 GitHub 仓库地址换算成 raw 内容前缀（不带尾斜杠）。推导不出来
+    # 就返回空——调用方据此"报错并给替代命令"，而不是瞎猜一个地址去下载一个可能不是
+    # 我们要的脚本。**下载并执行一个来源不明的脚本**是这条链路上最危险的一步，
+    # 宁可失败也不猜。
+    function Get-RawBase {
+        param([string]$RepoUrl, [string]$GitRef)
+        if ($RepoUrl -notmatch "^https://github\.com/") { return "" }
+        $r = $RepoUrl -replace "^https://github\.com/", ""
+        $r = $r -replace "\.git$", ""
+        if ($r -notmatch "^[^/]+/[^/]+$") { return "" }
+        return "https://raw.githubusercontent.com/$r/$GitRef"
+    }
+
+    $rawBase = Get-RawBase $Repo $Ref
+    if (-not $rawBase) {
+        Write-Err2 "-Repo 不是 GitHub 地址（$Repo），推导不出脚本下载地址。"
+        Write-Host "      请改用：" -ForegroundColor Red
+        Write-Host '      $u = "https://raw.githubusercontent.com/koyoca/XB-Probe/main/uninstall-master.ps1"' -ForegroundColor Red
+        Write-Host '      irm $u -OutFile "$env:TEMP\uninstall-master.ps1"' -ForegroundColor Red
+        Write-Host '      powershell -ExecutionPolicy Bypass -File "$env:TEMP\uninstall-master.ps1"' -ForegroundColor Red
+        exit 2
+    }
+
+    $rawUrl = "$rawBase/scripts/deploy-master.ps1"
+    Write-Step "取部署脚本（$Ref）以执行卸载"
+    $tmpd = Join-Path $env:TEMP ("xb-uninst-" + [Guid]::NewGuid().ToString("N").Substring(0, 8))
+    New-Item -ItemType Directory -Force -Path $tmpd | Out-Null
+    $deploy = Join-Path $tmpd "deploy-master.ps1"
+    $got = $false
+    try {
+        Invoke-WebRequest -Uri $rawUrl -OutFile $deploy -UseBasicParsing -TimeoutSec 120
+        $got = $true
+    } catch {
+        Write-Warn2 "$rawUrl 取不到（$($_.Exception.Message)）"
+    }
+    if (-not $got -or -not (Test-Path $deploy) -or (Get-Item $deploy).Length -eq 0) {
+        Write-Err2 "取不到 $rawUrl（网络？-Ref 写错了？）"
+        exit 1
+    }
+
+    # 取回来的**必须**是部署脚本：连 -Uninstall 这个开关都没有就说明拿错了文件，
+    # 与其拿去执行（未知参数会让它直接报错，甚至做别的事），不如现在就说清楚。
+    if ((Get-Content -LiteralPath $deploy -Raw) -notmatch "Uninstall") {
+        Write-Err2 "$rawUrl 看起来不是部署脚本（没有 -Uninstall 开关）。"
+        exit 1
+    }
+
+    # 非交互（-Yes）也要传下去，否则子脚本还会再问一遍"继续？[y/N]"。
+    # 用环境变量而不是命令行开关：取回来的部署脚本可能来自用户指定的旧 ref，
+    # 而旧版本对未知参数是硬失败，环境变量则新旧都能收。
+    if ($Yes) { $env:PROBE_NO_ASK = "1" }
+
+    $dargs = @("-Uninstall")
+    if ($KeepData) { $dargs += "-KeepData" }
+    if ($DryRun) { $dargs += "-DryRun" }
+    if ($Dir) { $dargs += @("-Dir", $Dir) }
+    if ($Data) { $dargs += @("-Data", $Data) }
+
+    Write-Step "开始卸载（接下来的输出来自 scripts\deploy-master.ps1）"
+    & powershell -ExecutionPolicy Bypass -File $deploy @dargs
+    $uninstRc = $LASTEXITCODE
+    Remove-Item $tmpd -Recurse -Force -ErrorAction SilentlyContinue
+    if ($uninstRc -ne 0) {
+        Write-Err2 "卸载脚本执行失败（上面是它的输出）。"
+        exit 1
+    }
+    exit 0
+}
+
+# ---------------------------------------------------------------------------
 # 0) 前提
 # ---------------------------------------------------------------------------
 
-if (-not (Test-Admin) -and -not $NoStartupTask) {
+# -DryRun 一个字节都不写，所以也不需要管理员——否则"先看看它会做什么"这件
+# 唯一不需要信任就能做的事，反而成了最麻烦的一件。
+if (-not (Test-Admin) -and -not $NoStartupTask -and -not $DryRun) {
     Write-Host "错误：请用「以管理员身份运行」的 PowerShell 执行。" -ForegroundColor Red
     Write-Host "      （只编译不注册服务时，可以加 -NoStartupTask 后以普通用户运行）" -ForegroundColor Red
     exit 1

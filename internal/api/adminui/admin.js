@@ -3380,6 +3380,12 @@
       '管理后台允许使用的主机名[:端口]。作用同上一项，但它是**安全开关**：' +
       '配好之后，拿公开域名访问 /admin/ 或 /api/admin/v1/* 会被 421 拦掉。' +
       '选「分离」形态时该项必须非空。'],
+    'site.admin_url': ['后台入口地址（公开看板的「管理后台」按钮指向这里）', 'text',
+      '留空则自动推导：master.yaml 的 admin_origin → 分离且只有一个管理域名时按访问协议拼出 → ' +
+      '都拿不到就保持同站相对路径 /admin/。' +
+      '只有当公开看板与后台**不在同一个源**（不同端口，或不同域名）而自动推导又推不出来时才需要填，' +
+      '例如 http://203.0.113.7:8081。填错的表现是"点看板上的登录按钮打开的是一个打不开的地址"。' +
+      '它只是个跳转目标，不参与任何鉴权，写错不会把谁挡在外面。'],
     // 第三个元素是可选的长说明，单独用作悬浮提示；
     // 没写时沿用第二个用途——把可见文案本身当提示。
     'agent.ip_whitelist_enabled': ['Agent 接口 IP 白名单', 'select:1=启用,0=关闭',
@@ -3442,7 +3448,7 @@
   // 避免一眼看去全是字段找不到重点。
   var SETTING_GROUPS = [
     ['站点与全局', ['site.title', 'timezone']],
-    ['站点形态', ['site.layout', 'site.public_hosts', 'site.admin_hosts']],
+    ['站点形态', ['site.layout', 'site.public_hosts', 'site.admin_hosts', 'site.admin_url']],
     ['公开看板', ['public.enabled', 'public.cards', 'public.lat_window']],
     ['数据保留', ['retention.raw_hours', 'retention.mid_days', 'retention.days', 'raw_resolution_s']],
     ['Agent 与上报', ['report_interval_s', 'probe_interval_s', 'offline_timeout_s', 'disk_min_free_mb',

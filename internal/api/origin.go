@@ -143,7 +143,9 @@ const (
 )
 
 // siteLayoutKeys 是"站点形态"这一簇设置项，用于判断一次保存是否动到了它们。
-var siteLayoutKeys = []string{"site.layout", "site.public_hosts", "site.admin_hosts"}
+// site.admin_url 也在同一簇里：它决定公开看板的「管理后台」按钮指向哪，
+// 改它的症状（"点登录跳到一个打不开的地址"）与改域名清单属于同一类。
+var siteLayoutKeys = []string{"site.layout", "site.public_hosts", "site.admin_hosts", "site.admin_url"}
 
 // siteLayoutValues 是 site.layout 的全部合法取值。
 //
@@ -318,6 +320,56 @@ func (h *Handler) siteGate(adminEntry bool, next http.Handler) http.Handler {
 		}
 		hostGate(allowed, next).ServeHTTP(w, r)
 	})
+}
+
+// adminEntryURL 返回公开看板上「管理后台」按钮应当跳转的地址（含 /admin/）。
+//
+// 取值的优先级（越靠前越"显式"）：
+//
+//  1. 设置项 site.admin_url —— 管理员在后台显式指定的入口地址；
+//  2. 站点形态是「同站」时直接返回空：此时相对路径 /admin/ 才是正确答案，
+//     一个绝对地址反而可能因为写错域名而失真；
+//  3. master.yaml 的 admin_origin（部署脚本会问出来并写进去）；
+//  4. 「分离」且只给了一个管理域名时，用**本次请求的协议** + 那个域名拼出来。
+//     走域名 + 反代的部署正是靠这条路自动得到 https://admin.example.com/admin/。
+//
+// 都拿不到就返回空，前端保留默认的 /admin/ —— 也就是升级前的行为。
+// 这是**唯一**安全的方向：猜错一个域名比不猜更糟（用户会被送到一个陌生站点）。
+func (h *Handler) adminEntryURL(r *http.Request) string {
+	// 同站：显式的 site.admin_url 仍然尊重（有人就是要把按钮指向别处）。
+	if v := strings.TrimSpace(h.settingOr("site.admin_url", "")); v != "" {
+		return withAdminPath(v)
+	}
+	if h.SiteLayoutMode() == siteLayoutSingle {
+		return ""
+	}
+	if v := strings.TrimSpace(h.AdminOrigin); v != "" {
+		return withAdminPath(v)
+	}
+	_, adm := h.effectiveHosts()
+	if len(adm) == 1 {
+		scheme := "http"
+		if h.requestSecure(r) {
+			scheme = "https"
+		}
+		return withAdminPath(scheme + "://" + adm[0])
+	}
+	return ""
+}
+
+// withAdminPath 把 origin 补成"后台入口地址"。
+//
+// 幂等：给 "https://admin.example.com" 返回 ".../admin/"，
+// 给已经带路径的 ".../admin/" 原样返回（不重复追加）。
+func withAdminPath(origin string) string {
+	v := strings.TrimRight(strings.TrimSpace(origin), "/")
+	if v == "" {
+		return ""
+	}
+	if strings.HasSuffix(v, "/admin") {
+		return v + "/"
+	}
+	return v + "/admin/"
 }
 
 // validateSiteLayoutFor 做站点形态的跨字段校验（保存前整体判断）。

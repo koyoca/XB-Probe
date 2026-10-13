@@ -98,8 +98,32 @@ func TestTLSModeValidation(t *testing.T) {
 		},
 		{
 			name:    "acme 挑战类型非法",
-			body:    "tls:\n  mode: acme\n  acme:\n    domains: [a.example.com]\n    challenge: dns-01\n",
+			body:    "tls:\n  mode: acme\n  acme:\n    domains: [a.example.com]\n    challenge: dns-02\n",
 			wantErr: "tls.acme.challenge 取值非法",
+		},
+		{
+			// dns-01 现在是合法取值，但**必须**带 DNS 凭据：少了它会在
+			// 申请首张证书时失败，而那时的错误看起来像"DNS 没生效"。
+			name:    "acme dns-01 缺少 API Token",
+			body:    "tls:\n  mode: acme\n  acme:\n    domains: [a.example.com]\n    challenge: dns-01\n",
+			wantErr: "必须配置 dns_api_token",
+		},
+		{
+			name:    "acme dns-01 不认识 DNS 提供方",
+			body:    "tls:\n  mode: acme\n  acme:\n    domains: [a.example.com]\n    challenge: dns-01\n    dns_provider: route53\n    dns_api_token: t\n",
+			wantErr: "tls.acme.dns_provider 取值非法",
+		},
+		{
+			name:    "acme dns-01 不支持 IP 证书",
+			body:    "tls:\n  mode: acme\n  acme:\n    ips: [203.0.113.7]\n    challenge: dns-01\n    dns_api_token: t\n",
+			wantErr: "不支持 acme.ips",
+		},
+		{
+			// dns-01 完全不碰本机端口，因此 http_addr 在这条路径上没有意义；
+			// 这里给一个明显非法的值，正确的行为是**忽略它**（不因为
+			// 一个用不上的字段把启动拦下来）。
+			name: "acme dns-01 忽略 http_addr",
+			body: "tls:\n  mode: acme\n  acme:\n    domains: [\"*.example.com\"]\n    challenge: dns-01\n    dns_api_token: t\n    http_addr: \"这不是地址\"\n",
 		},
 		{
 			name:    "acme 域名非法",

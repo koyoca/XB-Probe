@@ -5,11 +5,13 @@
 //	none        不启用 TLS（前置反代卸载，或本机/内网调试）
 //	files       自定义证书：直接读 cert_file / key_file，支持热加载
 //	selfsigned  自签：本进程生成 ECDSA 证书，SAN 覆盖 IP 与域名
-//	acme        自动申请：ACME v2，支持域名证书与 RFC 8738 的 IP 证书
+//	acme        自动申请：ACME v2，支持域名证书与 RFC 8738 的 IP 证书，
+//	            挑战可选 http-01 / tls-alpn-01 / dns-01（后者支持通配符）
 //
 // 设计上刻意保持"轻"：不引入任何新依赖（ACME 协议由 internal/acme 自实现），
 // 证书落盘复用同一把密钥（续期不换钥匙，否则已按 SPKI 指纹固定
-// 的 Agent 会全部掉线），并且启动不被网络阻塞——ACME 首次申请在后台进行。
+// 的 Agent 会全部掉线），并且启动不被网络阻塞——ACME 首次申请在后台进行，
+// 申请结果落进 status.json（见 status.go）供 `probe-master tls status` 查看。
 package tlsconf
 
 import (
@@ -82,6 +84,9 @@ type Provider struct {
 	cert        *tls.Certificate
 	nextRenewal time.Time
 	lastErr     string
+	// lastAttempt 是最近一次申请/续期尝试的开始时间，只用于状态展示
+	// （见 status.go）：运维判断"它是不是还在重试"靠的就是它。
+	lastAttempt time.Time
 
 	// renewMu 串行化申请/续期：并发下单会撞 CA 的速率限制。
 	renewMu sync.Mutex
@@ -137,12 +142,23 @@ func Setup(cfg config.TLSConfig, dataDir string, logger *slog.Logger) (*Provider
 
 	case "acme":
 		p.acmeHTTPAddr = cfg.ACME.HTTPAddr
-		client, err := acme.New(acme.Config{
+		acmeCfg := acme.Config{
 			DirectoryURL: acme.ResolveDirectory(cfg.ACME.CA),
 			Email:        cfg.ACME.Email,
 			CacheDir:     filepath.Join(cacheDir, "acme"),
 			Logger:       logger,
-		})
+		}
+		// dns-01 需要一个"记录写手"。在这里（而不是申请时）构造：
+		// 凭据写错应当在**启动时**就暴露，而不是等首张证书申请失败才发现
+		// ——那时错误信息只会是"授权校验失败"，离"Token 权限不对"很远。
+		if cfg.ACME.Challenge == acme.ChallengeDNS01 {
+			provider, err := newDNSProvider(cfg.ACME, logger)
+			if err != nil {
+				return nil, err
+			}
+			acmeCfg.DNSProvider = provider
+		}
+		client, err := acme.New(acmeCfg)
 		if err != nil {
 			return nil, fmt.Errorf("初始化 ACME 客户端失败: %w", err)
 		}
@@ -159,7 +175,30 @@ func Setup(cfg config.TLSConfig, dataDir string, logger *slog.Logger) (*Provider
 	default:
 		return nil, fmt.Errorf("未知的 tls.mode: %q", cfg.Mode)
 	}
+	// 启动时先落一次状态：这样"服务起来了但还没申请到证书"也是可读的，
+	// 而不是要等到第一次重试之后文件才出现。
+	p.writeStatus()
 	return p, nil
+}
+
+// newDNSProvider 按配置构造 dns-01 的记录写手。
+//
+// 目前只支持 Cloudflare。把"支持哪几家"这件事收在这里，而不是散在
+// 配置校验与调用点两处——两处各写一份的表现是：配置说支持、运行时报不支持。
+func newDNSProvider(cfg config.ACMEConfig, logger *slog.Logger) (acme.DNSProvider, error) {
+	switch strings.ToLower(strings.TrimSpace(cfg.DnsAPIProvider)) {
+	case "", "cloudflare":
+		provider, err := acme.NewCloudflare(acme.CloudflareConfig{
+			APIToken: cfg.DnsAPIToken,
+			Logger:   logger,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("初始化 Cloudflare DNS 提供方失败: %w", err)
+		}
+		return provider, nil
+	default:
+		return nil, fmt.Errorf("不支持的 tls.acme.dns_provider: %q（当前仅支持 cloudflare）", cfg.DnsAPIProvider)
+	}
 }
 
 // Mode 返回当前的取证书方式。
@@ -554,6 +593,16 @@ func (p *Provider) tick(ctx context.Context) {
 	case "selfsigned":
 		p.renewSelfSignedIfNeeded()
 	}
+	// 每轮之后落一次状态：`probe-master tls status` 与部署脚本读的就是它，
+	// 放在 tick 的出口（而不是各分支里）能保证"无论走哪条分支，状态都是新的"。
+	p.writeStatus()
+}
+
+// markAttempt 记录一次尝试的开始时间（供状态展示）。
+func (p *Provider) markAttempt() {
+	p.mu.Lock()
+	p.lastAttempt = time.Now()
+	p.mu.Unlock()
 }
 
 func (p *Provider) needsRenewal() bool {
@@ -576,6 +625,7 @@ func (p *Provider) renewSelfSignedIfNeeded() {
 		return
 	}
 	defer p.renewMu.Unlock()
+	p.markAttempt()
 	if err := p.regenerateSelfSigned(); err != nil {
 		p.setErr(err)
 		p.log.Error("刷新自签证书失败", "err", err.Error())
@@ -590,6 +640,7 @@ func (p *Provider) renewACME(ctx context.Context) {
 		return
 	}
 	defer p.renewMu.Unlock()
+	p.markAttempt()
 
 	key, err := p.loadOrCreateCertKey()
 	if err != nil {

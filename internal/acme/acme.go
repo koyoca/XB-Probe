@@ -28,7 +28,20 @@ var base64URL = base64.RawURLEncoding
 const (
 	ChallengeHTTP01    = "http-01"
 	ChallengeTLSALPN01 = "tls-alpn-01"
+	// ChallengeDNS01 不占用本机任何端口，且是通配符证书唯一可用的方式；
+	// 代价是需要域名 DNS 的写权限（见 dns01.go 的 DNSProvider）。
+	ChallengeDNS01 = "dns-01"
 )
+
+// IsSupportedChallenge 判断挑战类型是否被本客户端支持。
+// 集中一处是为了让配置校验与运行期判断不会各写一份而漂移。
+func IsSupportedChallenge(v string) bool {
+	switch v {
+	case ChallengeHTTP01, ChallengeTLSALPN01, ChallengeDNS01:
+		return true
+	}
+	return false
+}
 
 // ACME 目录地址。Let's Encrypt 生产/预发是绝大多数人的选择；
 // 预发环境有不被信任的证书但**没有速率限制**，调试期务必先用它。
@@ -170,6 +183,9 @@ type Config struct {
 	// PollInterval 是等待授权/订单状态时的轮询间隔，0 表示默认 2 秒。
 	// 服务端返回的 Retry-After 会覆盖它（夹到 [100ms, 10s]）。
 	PollInterval time.Duration
+	// DNSProvider 是 dns-01 用的记录写手。只有 challenge=dns-01 时必须提供；
+	// 为空时选择 dns-01 会在下单前就报错，而不是跑到一半才失败。
+	DNSProvider DNSProvider
 	// Logger 可空。
 	Logger *slog.Logger
 }
@@ -484,7 +500,7 @@ func (c *Client) ensureAccount(ctx context.Context) error {
 
 // Obtain 走完整下单流程并返回 PEM 证书链（叶证书在前，中间证书在后）。
 //
-// challengeType 取 ChallengeHTTP01 或 ChallengeTLSALPN01。
+// challengeType 取 ChallengeHTTP01 / ChallengeTLSALPN01 / ChallengeDNS01。
 // certKey 是新证书的私钥（由调用方生成并持久化，绝不外传）。
 func (c *Client) Obtain(ctx context.Context, ids []Identifier, certKey crypto.Signer, challengeType string) ([]byte, error) {
 	if len(ids) == 0 {
@@ -493,8 +509,14 @@ func (c *Client) Obtain(ctx context.Context, ids []Identifier, certKey crypto.Si
 	if challengeType == "" {
 		challengeType = ChallengeHTTP01
 	}
-	if challengeType != ChallengeHTTP01 && challengeType != ChallengeTLSALPN01 {
-		return nil, fmt.Errorf("acme: 不支持的挑战类型 %q", challengeType)
+	if !IsSupportedChallenge(challengeType) {
+		return nil, fmt.Errorf("acme: 不支持的挑战类型 %q（可选 http-01/tls-alpn-01/dns-01）", challengeType)
+	}
+	// 在**下单之前**就把"缺 DNS 凭据"这类问题拦下来：一旦建了订单又跑不完，
+	// 这一单会占着 CA 的速率配额，而且失败原因要等到挑战阶段才出现，
+	// 排查时容易被误读成"DNS 权限不对"。
+	if challengeType == ChallengeDNS01 && c.cfg.DNSProvider == nil {
+		return nil, errors.New("acme: 选择了 dns-01 但没有配置 DNS 提供方（tls.acme.dns_provider 与 dns_api_token）")
 	}
 	if err := c.ensureAccount(ctx); err != nil {
 		return nil, err
@@ -649,9 +671,14 @@ func (c *Client) solveAuthorization(ctx context.Context, authzURL, challengeType
 	if az.Status == "valid" {
 		return nil // 复用的有效授权，无需再挑战
 	}
-	if az.Wildcard && challengeType == ChallengeHTTP01 {
-		return fmt.Errorf("通配符域名 %s 只能用 dns-01 挑战；本客户端不支持 dns-01，"+
-			"请改用 tls-alpn-01 或为通配符单独申请通配符证书", az.Identifier.Value)
+	if az.Identifier.Type == "ip" && challengeType == ChallengeDNS01 {
+		return fmt.Errorf("IP 标识符 %s 不能用 dns-01（DNS 里没有 IP 的反向记录可写）："+
+			"请改回 http-01 或 tls-alpn-01", az.Identifier.Value)
+	}
+	if az.Wildcard && challengeType != ChallengeDNS01 {
+		return fmt.Errorf("通配符域名 %s 只能用 dns-01 挑战（CA 无法为通配符指定具体的 HTTP 路径）："+
+			"请在 tls.acme 里把 challenge 改成 dns-01 并配置 DNS 提供方，"+
+			"或改成逐个申请具体的子域名", az.Identifier.Value)
 	}
 	var ch *challenge
 	var available []string
@@ -665,7 +692,7 @@ func (c *Client) solveAuthorization(ctx context.Context, authzURL, challengeType
 		return fmt.Errorf("CA 未提供 %s 挑战（可用：%s）", challengeType, strings.Join(available, ", "))
 	}
 
-	cleanup, err := c.present(az.Identifier.Value, ch.Token, challengeType)
+	cleanup, err := c.present(ctx, az.Identifier.Value, ch.Token, challengeType)
 	if err != nil {
 		return err
 	}
@@ -704,7 +731,7 @@ func (c *Client) solveAuthorization(ctx context.Context, authzURL, challengeType
 		case "invalid":
 			for _, cc := range cur.Challenges {
 				if cc.Type == challengeType && cc.Status == "invalid" {
-					return fmt.Errorf("%s 校验失败（%s）：请确认 %s 可达且应答内容与 account key 指纹匹配",
+					return fmt.Errorf("%s 校验失败（%s）：%s",
 						challengeType, cur.Identifier.Value, reachabilityHint(challengeType))
 				}
 			}
@@ -714,10 +741,15 @@ func (c *Client) solveAuthorization(ctx context.Context, authzURL, challengeType
 }
 
 func reachabilityHint(challengeType string) string {
-	if challengeType == ChallengeTLSALPN01 {
-		return "TCP 443（并放行 ALPN acme-tls/1）"
+	switch challengeType {
+	case ChallengeTLSALPN01:
+		return "请确认 TCP 443 可达，且本进程返回的挑战证书带 acmeIdentifier 扩展（SNI 必须是被校验的域名）"
+	case ChallengeDNS01:
+		return "请确认 TXT 记录已写入并由权威 DNS 生效（_acme-challenge.<域名>），" +
+			"且记录值等于 base64url(SHA-256(keyAuthorization))；" +
+			"多数情况是 DNS API Token 的权限范围不含该域名，或记录还没传播完"
 	}
-	return "TCP 80 上的 /.well-known/acme-challenge/"
+	return "请确认 TCP 80 可达且 /.well-known/acme-challenge/ 应答内容与 account key 指纹匹配"
 }
 
 // present 把挑战应答登记到对应的应答通道，返回一个撤销函数。
@@ -726,7 +758,9 @@ func reachabilityHint(challengeType string) string {
 // /.well-known/acme-challenge/<token> 上吐出（验证期间必须可达）。
 // tls-alpn-01：为域名生成一张带 acmeIdentifier 扩展的自签证书，
 // 由调用方在 ALPN=acme-tls/1 的握手里返回。
-func (c *Client) present(identifier, token, challengeType string) (func(), error) {
+// dns-01：把摘要写进 `_acme-challenge.<域名>` 的 TXT 记录，
+// 校验完成后由返回的清理函数删掉。
+func (c *Client) present(ctx context.Context, identifier, token, challengeType string) (func(), error) {
 	keyAuth := keyAuthorization(token, c.thumb)
 	switch challengeType {
 	case ChallengeHTTP01:
@@ -739,6 +773,22 @@ func (c *Client) present(identifier, token, challengeType string) (func(), error
 		}
 		c.alpn.set(identifier, cert)
 		return func() { c.alpn.clear(identifier) }, nil
+	case ChallengeDNS01:
+		if c.cfg.DNSProvider == nil {
+			return func() {}, errors.New("acme: 选择了 dns-01 但没有配置 DNS 提供方")
+		}
+		remove, err := c.cfg.DNSProvider.Present(ctx, challengeRecordName(identifier), dnsTXTValue(keyAuth))
+		if err != nil {
+			return func() {}, fmt.Errorf("写入 dns-01 挑战记录失败: %w", err)
+		}
+		// 清理用一个**独立**的上下文：present 的 ctx 属于"提交挑战"这一次调用，
+		// 而清理发生在校验结束之后——那时它多半已经超时或被取消。
+		// 用它去删记录，等于每次失败都会在 DNS 里留下一条垃圾 TXT。
+		return func() {
+			cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+			defer cancel()
+			_ = remove(cctx)
+		}, nil
 	}
 	return func() {}, fmt.Errorf("acme: 不支持的挑战类型 %q", challengeType)
 }

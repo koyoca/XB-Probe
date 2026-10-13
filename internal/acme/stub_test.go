@@ -42,6 +42,11 @@ type stubCA struct {
 
 	lastContact []string // 最近一次 newAccount 提交的联系方式
 
+	// countNewOrders 非空时，每收到一次 newOrder 就加一。
+	// 用来断言"某些前置条件不满足时，根本不该向 CA 建订单"——
+	// 建了又跑不完的订单会白占 CA 的速率配额。
+	countNewOrders *int
+
 	// badNonceOnce 为 true 时，下一个受保护的 POST 会被回一个 badNonce 错误，
 	// 用来验证客户端"nonce 失效要重试一次"的健壮性。
 	badNonceOnce bool
@@ -70,8 +75,13 @@ type stubOrder struct {
 type stubAuthz struct {
 	id         string
 	identifier Identifier
-	challIDs   []string
-	status     string // pending | valid | invalid
+	// wildcard 模拟真实 CA 的行为：订单里写 *.example.com，
+	// 授权里的 identifier 是 example.com + wildcard=true
+	//（RFC 8555 §7.1.4：标识符值不带 `*.`）。客户端必须据此算出
+	// _acme-challenge.example.com，而不是 _acme-challenge.*.example.com。
+	wildcard bool
+	challIDs []string
+	status   string // pending | valid | invalid
 }
 
 type stubChallenge struct {
@@ -381,12 +391,21 @@ func (s *stubCA) handleNewOrder(w http.ResponseWriter, jws *parsedJWS) {
 		return
 	}
 	s.mu.Lock()
+	if s.countNewOrders != nil {
+		*s.countNewOrders++
+	}
 	oid := fmt.Sprintf("%d", len(s.orders)+1)
 	ord := &stubOrder{id: oid, identifiers: body.Identifiers}
 	for i, id := range body.Identifiers {
 		aid := fmt.Sprintf("%s-%d", oid, i)
 		az := &stubAuthz{id: aid, identifier: id, status: "pending"}
-		for _, ctyp := range []string{ChallengeHTTP01, ChallengeTLSALPN01} {
+		// 通配符：授权里的标识符去掉 `*.`，另用 wildcard 标志表达。
+		if strings.HasPrefix(id.Value, "*.") {
+			az.identifier = Identifier{Type: id.Type, Value: strings.TrimPrefix(id.Value, "*.")}
+			az.wildcard = true
+		}
+		// 三种挑战都提供，与真实的 Let's Encrypt 一致；客户端选哪种由调用方决定。
+		for _, ctyp := range []string{ChallengeHTTP01, ChallengeTLSALPN01, ChallengeDNS01} {
 			cid := aid + "-" + ctyp
 			s.challenges[cid] = &stubChallenge{
 				id: cid, authID: aid, typ: ctyp,
@@ -448,11 +467,12 @@ func (s *stubCA) authzBody(a *stubAuthz) map[string]any {
 			"type": c.typ, "url": s.url("/challenge/" + c.id), "token": c.token, "status": c.status,
 		})
 	}
-	status, identifier := a.status, a.identifier
+	status, identifier, wildcard := a.status, a.identifier, a.wildcard
 	s.mu.Unlock()
 	return map[string]any{
 		"status":     status,
 		"identifier": identifier,
+		"wildcard":   wildcard,
 		"challenges": challs,
 		"expires":    time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339),
 	}
@@ -636,7 +656,9 @@ func (s *stubCA) issue(csr *x509.CertificateRequest) ([]byte, error) {
 //
 // 两种挑战的"期望值"不同，真实 CA 就是这么比对的：
 //   - http-01：应答内容原样就是 keyAuthorization；
-//   - tls-alpn-01：证书里带的是 SHA-256(keyAuthorization) 的摘要。
+//   - tls-alpn-01：证书里带的是 SHA-256(keyAuthorization) 的摘要；
+//   - dns-01：TXT 记录里带的也是 SHA-256(keyAuthorization) 的摘要
+//     （与 tls-alpn-01 同一个摘要，只是载体不同）。
 func (s *stubCA) answerChallenge(c *stubChallenge) {
 	s.mu.Lock()
 	az := s.authzs[c.authID]
@@ -646,7 +668,7 @@ func (s *stubCA) answerChallenge(c *stubChallenge) {
 	}
 	keyAuth := keyAuthorization(c.token, s.accountThumbprint())
 	want := keyAuth
-	if c.typ == ChallengeTLSALPN01 {
+	if c.typ == ChallengeTLSALPN01 || c.typ == ChallengeDNS01 {
 		sum := sha256.Sum256([]byte(keyAuth))
 		want = base64.RawURLEncoding.EncodeToString(sum[:])
 	}

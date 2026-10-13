@@ -64,6 +64,22 @@ func main() {
 				os.Exit(1)
 			}
 			return
+		case "tls":
+			// tls 子命令自己打印完整报告，并用退出码表达三种结局
+			// （0 就绪 / 1 失败 / 2 尚无结果）。失败与"还没结果"都不再
+			// 重复打印一遍错误消息——报告里已经写清楚了。
+			err := runTLS(os.Args[2:])
+			switch {
+			case err == nil:
+			case errors.Is(err, errCertFailed):
+				os.Exit(1)
+			case errors.Is(err, errCertPending):
+				os.Exit(2)
+			default:
+				fmt.Fprintln(os.Stderr, "错误：", err)
+				os.Exit(1)
+			}
+			return
 		case "version", "-v", "--version":
 			fmt.Println("probe-master", version)
 			return
@@ -201,8 +217,10 @@ func run(cfgPath string) error {
 			Preload:           cfg.TLS.HSTS.Preload,
 		},
 		// 6.1：配了 public_hosts / admin_hosts 就强制两站点各用各的域名。
-		PublicHosts:      cfg.PublicHosts,
-		AdminHosts:       cfg.AdminHosts,
+		PublicHosts: cfg.PublicHosts,
+		AdminHosts:  cfg.AdminHosts,
+		// 公开看板的「管理后台」按钮按它跳转（分离部署时写死的 /admin/ 会跳错）。
+		AdminOrigin:      cfg.AdminOrigin,
 		TLSInfo:          tlsProvider,
 		ChallengeHandler: tlsProvider.ChallengeHandler(),
 		InstallMode:      func() string { return repo.GetSettingDefault("install.mode", "on_demand") },

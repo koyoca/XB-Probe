@@ -2017,8 +2017,27 @@
         setText($('site-title'), s.title);
       }
       if (s.lat_window) latWindow = s.lat_window;
+      if (s.admin_url) applyAdminURL(s.admin_url);
       applyCards(s.cards);
     }).catch(function () { });
+  }
+
+  // applyAdminURL 把顶栏「管理后台」按钮指到服务端算好的地址。
+  //
+  // 为什么不能写死 /admin/：公开看板与后台很可能不在同一个源上（不同端口、
+  // 不同域名），此时 /admin/ 会跳到公开站自己的路径下，得到 404 或 421——
+  // 现象是"点登录按钮打不开后台"。
+  //
+  // 只在 /site 明确给出绝对地址时才改：拿不到就保留 HTML 里写好的 /admin/
+  // （同站部署下它本来就是对的）。改不动也不报错——一个跳转链接不该
+  // 让整页停下来。
+  function applyAdminURL(url) {
+    var btn = $('btn-login');
+    if (!btn) return;
+    // 服务端已经限定了 http/https 前缀与字符集；这里再确认一次，
+    // 因为 href 是可执行上下文（javascript: 前缀会在点击时执行）。
+    if (!/^https?:\/\/[A-Za-z0-9._:\/-]+$/.test(url)) return;
+    btn.setAttribute('href', url);
   }
 
   loadSite();

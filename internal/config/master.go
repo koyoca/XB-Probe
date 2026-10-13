@@ -88,6 +88,19 @@ type ACMEConfig struct {
 	HTTPAddr  string   `yaml:"http_addr"`
 	Domains   []string `yaml:"domains"`
 	IPs       []string `yaml:"ips"`
+
+	// ---- challenge=dns-01 专用 ----
+	//
+	// DnsAPIProvider 目前只认 cloudflare；DnsAPIToken 是 Cloudflare 的
+	// API Token（**不是** Global API Key）。
+	//
+	// 这个 Token 权限很大（能改你的 DNS），因此：
+	//   - 请在 Cloudflare 上单独建一个只含 Zone:DNS:Edit + Zone:Zone:Read、
+	//     且只覆盖目标域名的 Token，不要用账户级 Token；
+	//   - master.yaml 是 0640 root:probe，与 master.key 同级，
+	//     不要把它复制进备份目录或贴进工单。
+	DnsAPIProvider string `yaml:"dns_provider"`
+	DnsAPIToken    string `yaml:"dns_api_token"`
 }
 
 // 默认值常量。测试与文档都引用它们，避免各处硬编码不一致。
@@ -99,6 +112,10 @@ const (
 	DefaultACMEChallenge = "http-01"
 	DefaultACMEHTTPAddr  = ":80"
 	DefaultACMECacheDir  = "tls"
+	// DefaultACMEDNSProvider 是目前唯一实现的 dns-01 提供方。
+	// 只实现一家时给个默认值，比让所有人都必须写出 "cloudflare" 更省事；
+	// 写错别的名字仍会报错并列出可选值。
+	DefaultACMEDNSProvider = "cloudflare"
 )
 
 // LoadMaster 读取 master.yaml 并填默认值。
@@ -172,6 +189,11 @@ func (c *MasterConfig) applyDefaults() {
 		t.ACME.Challenge = DefaultACMEChallenge
 	}
 	t.ACME.Challenge = strings.ToLower(strings.TrimSpace(t.ACME.Challenge))
+	t.ACME.DnsAPIProvider = strings.ToLower(strings.TrimSpace(t.ACME.DnsAPIProvider))
+	if t.ACME.DnsAPIProvider == "" && t.ACME.Challenge == "dns-01" {
+		t.ACME.DnsAPIProvider = DefaultACMEDNSProvider
+	}
+	t.ACME.DnsAPIToken = strings.TrimSpace(t.ACME.DnsAPIToken)
 	if t.ACME.HTTPAddr == "" {
 		t.ACME.HTTPAddr = DefaultACMEHTTPAddr
 	}
@@ -237,9 +259,9 @@ func (c *MasterConfig) validate() error {
 			return fmt.Errorf("tls.mode=acme 时必须至少配置一个 acme.domains 或 acme.ips")
 		}
 		switch c.TLS.ACME.Challenge {
-		case "http-01", "tls-alpn-01":
+		case "http-01", "tls-alpn-01", "dns-01":
 		default:
-			return fmt.Errorf("tls.acme.challenge 取值非法：%s（可选 http-01/tls-alpn-01）", c.TLS.ACME.Challenge)
+			return fmt.Errorf("tls.acme.challenge 取值非法：%s（可选 http-01/tls-alpn-01/dns-01）", c.TLS.ACME.Challenge)
 		}
 		for _, d := range c.TLS.ACME.Domains {
 			if err := checkDNSName(d); err != nil {
@@ -250,6 +272,25 @@ func (c *MasterConfig) validate() error {
 			if net.ParseIP(ip) == nil {
 				return fmt.Errorf("tls.acme.ips 含非法 IP：%q", ip)
 			}
+		}
+		// dns-01 三条专属规则。它们的共同点是"配置看起来没问题，
+		// 但要等到申请证书时才失败，而那时的错误信息离原因很远"。
+		if c.TLS.ACME.Challenge == "dns-01" {
+			if len(c.TLS.ACME.IPs) > 0 {
+				return fmt.Errorf("tls.acme.challenge=dns-01 不支持 acme.ips（DNS 里没有 IP 的挑战记录可写）：" +
+					"请把 IP 拆到另一个部署，或改用 http-01/tls-alpn-01")
+			}
+			switch c.TLS.ACME.DnsAPIProvider {
+			case "cloudflare":
+			default:
+				return fmt.Errorf("tls.acme.dns_provider 取值非法：%s（当前仅支持 cloudflare）", c.TLS.ACME.DnsAPIProvider)
+			}
+			if c.TLS.ACME.DnsAPIToken == "" {
+				return fmt.Errorf("tls.acme.challenge=dns-01 时必须配置 dns_api_token" +
+					"（Cloudflare 的 API Token，需具备 Zone:DNS:Edit 与 Zone:Zone:Read）")
+			}
+			// dns-01 不碰本机端口，因此 http_addr 在这条路径上毫无意义。
+			return nil
 		}
 		if c.TLS.ACME.HTTPAddr == "" {
 			return fmt.Errorf("tls.mode=acme 时 acme.http_addr 不能为空（http-01 需要明文监听；" +

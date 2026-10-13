@@ -36,6 +36,9 @@ func (h *Handler) handleSite(w http.ResponseWriter, r *http.Request) {
 		// 点阵时间窗原样下发（空值=默认 24h），前端据此生成"近 X"标题与
 		// "每个点约多久"的悬浮提示，不必把窗口文案硬编码在两处。
 		LatWindow: h.Repo.GetSettingDefault("public.lat_window", "24h"),
+		// 「管理后台」按钮去哪儿。公开站与后台不同源时，写死的 /admin/
+		// 会跳到公开站自己的路径下（404/421），所以由服务端算好再下发。
+		AdminURL: h.adminEntryURL(r),
 	})
 }
 

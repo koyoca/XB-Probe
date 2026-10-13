@@ -248,9 +248,16 @@ func TestObtainInputValidation(t *testing.T) {
 	if _, err := client.Obtain(context.Background(), nil, testCertKey(t), ChallengeHTTP01); err == nil {
 		t.Fatal("未指定标识符时应报错")
 	}
+	// dns-01 现在是受支持的挑战类型，但**没有配置 DNS 提供方**时必须报错
+	// （而不是被当成"不支持的挑战类型"糊过去——两者的排查方向完全不同）。
 	_, err := client.Obtain(context.Background(), []Identifier{DNSIdentifier("a.example.com")}, testCertKey(t), "dns-01")
+	if err == nil || !strings.Contains(err.Error(), "DNS 提供方") {
+		t.Fatalf("未配置 DNS 提供方时应明确报错，实际: %v", err)
+	}
+	// 真正不认识的类型仍然要拒绝。
+	_, err = client.Obtain(context.Background(), []Identifier{DNSIdentifier("a.example.com")}, testCertKey(t), "dns-02")
 	if err == nil || !strings.Contains(err.Error(), "不支持的挑战类型") {
-		t.Fatalf("dns-01 应被明确拒绝，实际: %v", err)
+		t.Fatalf("未知挑战类型应被明确拒绝，实际: %v", err)
 	}
 }
 

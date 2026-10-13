@@ -60,6 +60,15 @@ var settingDefaults = map[string]string{
 	// 出厂留空 = 完全沿用配置文件，升级后行为不变。
 	"site.public_hosts": "",
 	"site.admin_hosts":  "",
+	// site.admin_url 是公开看板顶栏「管理后台」按钮的跳转目标（绝对地址）。
+	//
+	// 空白默认值是**刻意的**：绝大多数部署是同站的，相对路径 /admin/ 既准确
+	// 又不受域名写错影响。只有在公开站与后台不同源（不同端口 / 不同域名）时
+	// 才需要它——此时写死的 /admin/ 会跳到公开站自己的路径下，得到 404 或 421。
+	//
+	// 留空时的推导顺序：master.yaml 的 admin_origin → 「分离」且只有一个
+	// 管理域名时按请求协议拼出来 → 都没有就保持同站相对路径。
+	"site.admin_url": "",
 	// public.cards 是公开看板的**卡片级**白名单。
 	// 取值 "all"（默认）= 不限制；空值 = 一张都不展示；否则是逗号分隔的卡片键。
 	// 与 public.fields 的区别：fields 管"某个字段的数据发不发给前端"，
@@ -122,6 +131,7 @@ var settingSpecs = map[string]func(string) error{
 	"site.layout":                enumValue(siteLayoutValues...),
 	"site.public_hosts":          validateHostList,
 	"site.admin_hosts":           validateHostList,
+	"site.admin_url":             optionalHTTPURL,
 	"public.enabled":             enumValue("0", "1"),
 	"public.fields":              validatePublicFields,
 	"public.cards":               validatePublicCards,
@@ -234,6 +244,22 @@ func optionalStrictURL(v string) error {
 	}
 	if !allowedURL(v) {
 		return fmt.Errorf("必须是以 https:// 开头、且仅含字母数字与 .-:/_ 的地址")
+	}
+	return nil
+}
+
+// optionalHTTPURL 允许空值；非空时必须是 http/https 地址。
+//
+// 与 install.master_url 的差别：那个会被拼进 shell 命令，所以强制 https；
+// 这个只是公开看板上「管理后台」按钮的跳转目标，明文 HTTP 直连 IP 的部署
+// 同样需要它。字符集照样收紧——它会进 <a href>，放开前缀等于留一个
+// 可被后台改写的脚本入口。
+func optionalHTTPURL(v string) error {
+	if v == "" {
+		return nil
+	}
+	if !allowedHTTPURL(v) {
+		return fmt.Errorf("必须以 http:// 或 https:// 开头，且仅含字母数字与 .-:/_")
 	}
 	return nil
 }

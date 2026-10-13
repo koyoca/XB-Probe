@@ -39,16 +39,20 @@ type Deps struct {
 
 	Version        string
 	TrustedProxies []string
-	TLSMode        string                // none | files | selfsigned | acme
-	TLSActive      bool                  // 本进程是否自己终止 TLS（决定 Secure Cookie 与 HSTS）
-	HSTS           HSTSConfig            // HSTS 下发策略（来自 tls.hsts）
-	PublicHosts    []string              // 6.1：公开站允许的 Host（空 = 不限制）
-	AdminHosts     []string              // 6.1：管理端允许的 Host（空 = 不限制）
-	TLSInfo        model.TLSStatusReader // 证书运行态（可为 nil，仅影响 /tls/status 的回显）
-	DistDir        string                // data_dir/dist
-	InstallMode    func() string         // on_demand | always | off
-	MasterURL      func() string
-	Logger         *slog.Logger
+	TLSMode        string     // none | files | selfsigned | acme
+	TLSActive      bool       // 本进程是否自己终止 TLS（决定 Secure Cookie 与 HSTS）
+	HSTS           HSTSConfig // HSTS 下发策略（来自 tls.hsts）
+	PublicHosts    []string   // 6.1：公开站允许的 Host（空 = 不限制）
+	AdminHosts     []string   // 6.1：管理端允许的 Host（空 = 不限制）
+	// AdminOrigin 是 master.yaml 里声明的管理端对外地址（如
+	// https://admin.example.com[:8443]）。公开看板的「管理后台」按钮按它跳转；
+	// 为空时按下发的 admin_hosts 推导，再不行就保持同站相对路径。
+	AdminOrigin string
+	TLSInfo     model.TLSStatusReader // 证书运行态（可为 nil，仅影响 /tls/status 的回显）
+	DistDir     string                // data_dir/dist
+	InstallMode func() string         // on_demand | always | off
+	MasterURL   func() string
+	Logger      *slog.Logger
 
 	// ChallengeHandler 是 ACME http-01 的应答处理器（mode=acme 且
 	// challenge=http-01 时由 tlsconf 提供）。它会被挂到所有监听地址上，
@@ -125,6 +129,31 @@ func allowedURL(raw string) bool {
 	if u.Scheme != "https" {
 		return false
 	}
+	return allowedURLChars(raw)
+}
+
+// allowedHTTPURL 与 allowedURL 同一套字符规则，但允许 http://。
+//
+// 用在"只是给浏览器跳转用"的地址上（如 site.admin_url）：明文 HTTP 直连 IP
+// 的部署填不出 https，一律拒绝等于让那类部署永远配不出正确的后台入口。
+// 字符集照样收紧——这个值会进 <a href>，放开前缀等于开一个可被后台改写的
+// 脚本入口（`javascript:` 之类）。
+func allowedHTTPURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return false
+	}
+	if u.Host == "" {
+		return false
+	}
+	return allowedURLChars(raw)
+}
+
+// allowedURLChars 是 URL 的字符白名单（字母数字与 .-:/_）。
+func allowedURLChars(raw string) bool {
 	for _, r := range raw {
 		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
 			continue

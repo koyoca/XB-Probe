@@ -18,7 +18,8 @@ Agent 13 个平台与 Master 的发布产物均由 CI 构建。
 - **单文件、零依赖**：全 Go，免 CGO 的内嵌 SQLite（`modernc.org/sqlite`）；前端只用原生
   HTML/CSS/JS（不引 CDN），因此 CSP 可以钉死在 `default-src 'self'`。
 - **自带 HTTPS**：内置零依赖 ACME v2 客户端（**域名证书 + RFC 8738 IP 证书**、
-  `http-01` / `tls-alpn-01`），也可以使用已有证书、自签证书，或交给前置 Caddy/Nginx。
+  `http-01` / `tls-alpn-01` / `dns-01`（Cloudflare，支持通配符）），也可以使用已有证书、自签证书，
+  或交给前置 Caddy/Nginx。
 - **多平台采集**：Linux（`/proc` + `/sys`，含 cgroup v1/v2 与容器识别）、Windows（纯 Win32 API，
   无外部命令）、FreeBSD（`sysctl` + `NET_RT_IFLIST`）。**macOS 明确不支持**。
 - **告警与资产**：离线 / 资源阈值 / 「探测连续失败」三类告警（按 `(节点, 类型)` 独立冷却，
@@ -75,6 +76,15 @@ sudo sh /path/to/deploy-master.sh --bin ./probe-master --dry-run    # 打印将�
 全程幂等——**再执行一次就是升级**（不会重建数据目录，也不会覆盖已有 `master.yaml`）。
 参数给全了就不问（`--yes` 等价于"全部别问"），所以同样的脚本也适合自动化。
 
+跑完会打印一段**部署完成**汇总（公开看板地址、管理后台地址、传输安全、站点形态，以及接下来该做什么）；
+选 `acme` 时还会等证书申请出结果，并把**成功 / 失败 / 仍在申请**逐条报出来，失败时按挑战方式给出排查方向。
+同样的信息随时可查：
+
+```bash
+probe-master tls status --config /etc/probe-master/master.yaml            # 等待并报告（rc 0=就绪 1=失败 2=进行中）
+probe-master tls status --config /etc/probe-master/master.yaml --json     # 给监控/脚本用
+```
+
 > **为什么不是 `curl … | sudo sh`**：管道会把 stdin 占掉，脚本里的 `read` 立刻拿到 EOF，
 > 于是所有交互项都静默取默认值（甚至空口令）——这正是"一键装完却登不进后台"的常见原因。
 > 上面的 `sh -c "$(...)"` 保留了终端 stdin。先看再跑（推荐）或没有 bash 时：
@@ -109,8 +119,8 @@ sudo sh install-master-bin.sh --yes \
 
 `--help` 看全量参数：`--version` / `--repo` / `--mirror` / `--arch` / `--script-ref` / `--tls-mode` /
 `--public-origin` / `--admin-origin` / `--admin-user` / `--public-listen` / `--admin-listen` / `--dir` /
-`--data` / `--bin-dir` / `--dist-base` / `--no-service` / `--force-config` / `--dry-run` / `--yes`
-（方式 B 另有 `--ref` / `--src` / `--go-version` / `--goproxy` / `--no-deps`）。
+`--data` / `--bin-dir` / `--dist-base` / `--no-service` / `--force-config` / `--dry-run` / `--yes` /
+`--uninstall` / `--keep-data`（方式 B 另有 `--ref` / `--src` / `--go-version` / `--goproxy` / `--no-deps`）。
 
 ## 部署（Windows）
 
@@ -125,7 +135,10 @@ $f="$env:TEMP\xb-install.ps1"; irm https://raw.githubusercontent.com/koyoca/XB-P
 
 参数与 Linux 版一致（`-Repo` `-Ref` `-Src` `-GoVersion` `-Dir` `-Data` `-PublicListen`
 `-AdminListen` `-PublicOrigin` `-AdminOrigin` `-AdminUser` `-DistBase` `-TlsMode` `-TlsDomain`
-`-AcmeEmail` `-NoStartupTask` `-ForceConfig` `-Yes` `-DryRun` …）。
+`-AcmeEmail` `-NoStartupTask` `-ForceConfig` `-Yes` `-DryRun` `-Uninstall` `-KeepData` …）。
+
+Windows 上的交互输入由 PowerShell 的 `Read-Host` 负责（退格、方向键、粘贴都是原生的），
+口令一律以 `-AsSecureString` 读入、不回显。
 
 Windows 上 Master 没有内置服务封装（Agent 才有），用"开机时以最高权限运行"的计划任务实现自启并配失败重启；
 数据目录用 ACL 收成"仅 Administrators 与 SYSTEM"（等价 Linux 的 0700）。
@@ -147,7 +160,7 @@ Master 自带 HTTPS，不强制依赖前置代理。`tls.mode`：
 | `none`       | 前置 Caddy/Nginx 卸载 TLS；本机/内网调试    | 需配 `trusted_proxies` 才认 `X-Forwarded-Proto`                           |
 | `files`      | 已有证书：商业证书、企业内网 CA、别处签发的          | 读 `cert_file` / `key_file`，**变更热加载**（30 秒节流，读失败保留旧证书）                   |
 | `selfsigned` | 内网 / 私有 IP 上想要"IP 证书"            | 本进程生成并落盘，SAN 覆盖 `hosts` 里的域名与 **IP**；Agent 侧用 SPKI 指纹固定即可安全使用        |
-| `acme`       | 有公网 IP、想自动申请与续期                  | 内置**零依赖 ACME v2 客户端**，域名证书 + **RFC 8738 IP 证书**，`http-01` / `tls-alpn-01` |
+| `acme`       | 有公网 IP、想自动申请与续期                  | 内置**零依赖 ACME v2 客户端**，域名证书 + **RFC 8738 IP 证书**，`http-01` / `tls-alpn-01` / `dns-01` |
 
 ```yaml
 tls:
@@ -162,6 +175,27 @@ tls:
   hsts: { enabled: true, max_age: 31536000, include_subdomains: false, preload: false }
 ```
 
+三种挑战方式的前提条件不同，**选错会在申请时才失败**，所以先看清楚：
+
+| challenge      | 前提                                                   | 通配符 |
+| -------------- | ---------------------------------------------------- | --- |
+| `http-01`      | 本机 80 端口可达且没被别的服务占着（反代要转发 `/.well-known/`）           | 不支持 |
+| `tls-alpn-01`  | 80 被占用、443 由本进程直接监听                                  | 不支持 |
+| `dns-01`       | DNS 服务商 API 凭据（现支持 Cloudflare），**不需要开放任何入站端口** | **支持 `*.example.com`** |
+
+```yaml
+tls:
+  mode: acme
+  acme:
+    challenge: "dns-01"
+    dns_provider: "cloudflare"        # 目前只实现 Cloudflare
+    dns_api_token: "..."              # 建议单独建一个 Token：只给 Zone:DNS:Edit + Zone:Zone:Read
+    domains: ["example.com", "*.example.com"]
+```
+
+`dns-01` 的凭据**刻意不提供命令行参数**（会留在 shell 历史里）。无人值守时用环境变量
+`PROBE_ACME_DNS_PROVIDER` / `PROBE_ACME_DNS_TOKEN`，交互执行时脚本会提示输入且不回显。
+
 两个刻意做成这样的点：
 
 - **续期复用同一把私钥**（只换证书不换密钥）。Agent 的证书固定用的是安装信息里的 SPKI 指纹，
@@ -170,7 +204,8 @@ tls:
   "已经加固"的错觉。判定与会话 Cookie 的 `Secure` **共用同一逻辑**，不会出现"Cookie 已降级、HSTS 还在发"。
 
 首张证书在后台申请，**不阻塞启动**；证书运行态（SAN / 到期 / SPKI 指纹 / 最近失败原因）见
-`GET /api/admin/v1/tls/status`，自签指纹会同时以 base64 与冒号十六进制两种写法打印，可直接填给 Agent。
+`GET /api/admin/v1/tls/status`，也可以用 `probe-master tls status` 在命令行看同一份；
+自签指纹会同时以 base64 与冒号十六进制两种写法打印，可直接填给 Agent。
 
 ## 公开看板与后台：两个域名，还是一个站点
 
@@ -195,6 +230,9 @@ admin_origin:  "https://admin.example.com"
 - **选 `split` 时两个域名清单都必须给**，否则保存被直接拒绝——这是防自锁：分离 + 缺管理域名会让
   后台在保存成功后的**下一个**请求上 421，而把它改回来恰好需要访问后台。
 - ACME 的 `/.well-known/acme-challenge/` 路径豁免该门禁（CA 按 IP 访问，永远命中不了域名白名单）。
+- **公开看板顶栏的「管理后台」按钮跟着站点形态走**：同站时是相对路径 `/admin/`；分离或不同端口时
+  自动补成绝对地址（优先设置项 `site.admin_url`，其次 `admin_origin`，再次由唯一的管理域名推导）。
+  多管理域名时**不猜**，保持相对路径。要指向别处就直接填 `site.admin_url`。
 
 典型接法是「一个端口（比如 8080）+ 两个域名都解析到这台机器 + 反代按 Host 转发」，反代方案里别忘了
 把反代网段填进 `trusted_proxies`。
@@ -231,6 +269,37 @@ sudo systemctl restart probe-agent     # 升级不会自行重启，输出里会
 备份在管理端「系统设置 → 数据库备份」手动触发或按日自动（`VACUUM INTO` 在线一致快照 + `keep` 轮转）。
 **不要用 `cp` 拷贝数据库文件**——WAL 模式下会拿到撕裂副本，能打开、能查询、但数据不一致。
 恢复时在管理端选一份快照执行恢复；条件允许的话，请在一台闲置实例上先走一遍，确认备份真的可用。
+
+## 卸载
+
+卸载**不需要源码、不需要 Go**：它从仓库取回部署脚本执行，所以不会因为工具链装不上而卸不掉。
+
+```bash
+# Linux（默认连数据一起清：系统服务、二进制、配置目录、数据目录、probe 用户）
+sudo sh -c "$(curl -fsSL https://raw.githubusercontent.com/koyoca/XB-Probe/main/uninstall-master.sh)"
+
+sudo sh -c "$(curl -fsSL https://raw.githubusercontent.com/koyoca/XB-Probe/main/uninstall-master.sh)" xb --keep-data
+sudo sh -c "$(curl -fsSL https://raw.githubusercontent.com/koyoca/XB-Probe/main/uninstall-master.sh)" xb --dry-run
+```
+
+```powershell
+# Windows
+$f="$env:TEMP\xb-uninstall.ps1"; irm https://raw.githubusercontent.com/koyoca/XB-Probe/main/uninstall-master.ps1 -OutFile $f; powershell -ExecutionPolicy Bypass -File $f
+```
+
+已经克隆过源码的机器不用再下脚本，两个入口都带 `--uninstall`：
+
+```bash
+sudo sh install-master.sh --uninstall --keep-data       # 或 install-master-bin.sh --uninstall
+```
+
+Windows 同理：`powershell -File install-master.ps1 -Uninstall -KeepData`。
+
+- 删除前先过闸：只肯删**像本脚本建的**路径（绝对路径、含 `probe`、至少两级），
+  `/`、`/etc`、`/probe` 这类一律拒绝，并把要删的东西列出来；交互执行时还会再确认一次。
+- 每一项都**逐条回显**"已删除 / 残留 / 不存在"——卸载最常出问题的地方不是删错，而是
+  "以为删了、其实因为只读挂载或权限没删掉"，那件事原本对用户完全不可见。
+- `--dry-run` 只列计划、不动系统；`--keep-data` 保留数据目录（里面有数据库与 `master.key`）。
 
 ## 从源码构建（开发）
 

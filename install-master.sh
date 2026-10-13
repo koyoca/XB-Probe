@@ -31,11 +31,19 @@
 #   --no-deps           不自动安装缺失的依赖，只报错
 #   --yes               不提问，全部取给定参数/默认值
 #   --dry-run           只打印将要执行的步骤，不改动系统
+#   --uninstall         卸载（连数据一起清；加 --keep-data 保留数据目录）
+#   --keep-data         与 --uninstall 同用
 #   -h, --help          显示本帮助
 #
 # 其余参数原样透传给 scripts/deploy-master.sh（--public-origin、--admin-origin、
 # --admin-user、--public-listen、--admin-listen、--dir、--data、--bin-dir、
 # --dist-base、--no-service、--force-config，以及全部 --tls-* 与 --acme-* 参数）。
+#
+# dns-01 的 DNS 凭据不走命令行（会进 shell 历史），用环境变量：
+#   PROBE_ACME_DNS_PROVIDER（默认 cloudflare）、PROBE_ACME_DNS_TOKEN
+#
+# 卸载**不碰源码与 Go**：它从仓库取回 scripts/deploy-master.sh 执行 --uninstall，
+# 所以不需要先装一套工具链，也不会因为 --src 不在而失败。
 #
 # 问答分两处，不是漏了：TLS 方式、对外地址、管理员账号在这里问（排在装依赖与编译
 # 之前，答案错了就不必动系统）；**监听端口**由 scripts/deploy-master.sh 在落盘前问。
@@ -74,6 +82,8 @@ ACME_CA=""
 ACME_CHALLENGE=""
 NO_SERVICE=""
 FORCE_CONFIG=""
+UNINSTALL=""
+KEEP_DATA=""
 
 # go.mod 声明的最低 Go 版本。低于它构建会直接失败，所以先在依赖检查时拦下，
 # 而不是等编译报一堆看不懂的语法错误。
@@ -91,12 +101,16 @@ install-master.sh —— XB-Probe Master 整机一键部署
   --no-deps            不自动安装缺失的依赖
   --yes                不提问，全取默认值
   --dry-run            只打印计划
+  --uninstall          卸载（连数据一起清；加 --keep-data 保留数据目录）
+  --keep-data          与 --uninstall 同用
   -h, --help           显示本帮助
 
   其余参数透传给 scripts/deploy-master.sh：
   --public-origin/--admin-origin/--admin-user/--public-listen/--admin-listen/
   --dir/--data/--bin-dir/--dist-base/--no-service/--force-config/
   --tls-mode/--tls-cert/--tls-key/--tls-domain/--tls-ip/--acme-email/--acme-ca/--acme-challenge
+
+  dns-01 的凭据用环境变量：PROBE_ACME_DNS_PROVIDER、PROBE_ACME_DNS_TOKEN
 EOF
 }
 
@@ -141,6 +155,8 @@ while [ $# -gt 0 ]; do
 	--acme-challenge) ACME_CHALLENGE="${2:-}"; shift 2 ;;
 	--no-service) NO_SERVICE="1"; shift ;;
 	--force-config) FORCE_CONFIG="1"; shift ;;
+	--uninstall) UNINSTALL="1"; shift ;;
+	--keep-data) KEEP_DATA="1"; shift ;;
 	-h | --help) usage; exit 0 ;;
 	*) err "未知参数：$1"; usage; exit 2 ;;
 	esac
@@ -159,6 +175,24 @@ download() {
 	else
 		return 1
 	fi
+}
+
+# raw_base <仓库地址> <ref>：把 GitHub 仓库地址换算成 raw 内容前缀（不带尾斜杠）。
+# 推导不出来就返回空——调用方据此选择"报错并给替代命令"，而不是瞎猜一个地址
+# 去下载一个可能不是我们要的脚本。**下载并执行一个来源不明的脚本**是这条链路上
+# 最危险的一步，宁可失败也不猜。
+raw_base() {
+	case "$1" in
+	https://github.com/*) _r="${1#https://github.com/}" ;;
+	git@github.com:*) _r="${1#git@github.com:}" ;;
+	*) printf ''; return 0 ;;
+	esac
+	_r="${_r%.git}"
+	case "$_r" in
+	*/*) : ;;
+	*) printf ''; return 0 ;;
+	esac
+	printf 'https://raw.githubusercontent.com/%s/%s' "$_r" "$2"
 }
 
 # ver_ge <要求> <实际>：版本号按 major.minor 比较（够用，且不依赖 sort -V 的差异）。
@@ -313,7 +347,9 @@ Darwin)
 	;;
 esac
 
-if [ "$(id -u)" -ne 0 ] && [ -z "$NO_SERVICE" ]; then
+# 卸载有它自己的一小段检查（下面）。这里把它排除在外，否则非 root 卸载会先撞上
+# 这段"要写 $BIN_DIR 与注册 systemd 服务"的提示——那段话描述的完全不是在做的事。
+if [ "$(id -u)" -ne 0 ] && [ -z "$NO_SERVICE" ] && [ -z "$UNINSTALL" ]; then
 	cat >&2 <<EOF
 错误：需要 root（要写 $BIN_DIR 与注册 systemd 服务）。
 
@@ -326,6 +362,50 @@ if [ "$(id -u)" -ne 0 ] && [ -z "$NO_SERVICE" ]; then
     sh install-master.sh --no-service --dir ./probe-master --data ./probe-master/data --bin-dir ./probe-master/bin
 EOF
 	exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# 卸载：--uninstall（排在依赖检查与编译之前）
+# ---------------------------------------------------------------------------
+#
+# 卸载不需要源码、不需要 Go，所以必须排在"装依赖 / clone / 编译"**之前**——
+# 否则"卸个东西"要先装一套工具链，是本末倒置，而且一旦工具链装不上就卸不了。
+#
+# 删除逻辑只有一份（scripts/deploy-master.sh --uninstall），这里从仓库把它取回来
+# 执行。**刻意不自己实现一遍删除**：两份删除逻辑迟早漂移，而这里赌的是用户的系统。
+if [ -n "$UNINSTALL" ]; then
+	if [ -z "$DRY_RUN" ] && [ "$(id -u)" -ne 0 ]; then
+		err "卸载需要 root 或 sudo（--dry-run 不需要）。"
+		exit 1
+	fi
+	_base="$(raw_base "$REPO" "$REF")"
+	if [ -z "$_base" ]; then
+		err "--repo 不是 GitHub 地址（$REPO），推导不出脚本下载地址。"
+		err "请改用：sudo sh -c \"\$(curl -fsSL https://raw.githubusercontent.com/koyoca/XB-Probe/main/uninstall-master.sh)\""
+		exit 2
+	fi
+	say "取部署脚本（$REF）以执行卸载"
+	_tmpd="$(mktemp -d 2>/dev/null || echo "/tmp/xb-uninst.$$")"
+	mkdir -p "$_tmpd"
+	# shellcheck disable=SC2064
+	trap "rm -rf '$_tmpd'" EXIT HUP INT TERM
+	if ! download "$_base/scripts/deploy-master.sh" >"$_tmpd/deploy-master.sh" 2>/dev/null ||
+		[ ! -s "$_tmpd/deploy-master.sh" ]; then
+		err "取不到 $_base/scripts/deploy-master.sh（网络？--ref 写错了？）"
+		exit 1
+	fi
+	set -- --uninstall
+	[ -n "$KEEP_DATA" ] && set -- "$@" --keep-data
+	[ -n "$DRY_RUN" ] && set -- "$@" --dry-run
+	[ -n "$DIR" ] && set -- "$@" --dir "$DIR"
+	[ -n "$DATA" ] && set -- "$@" --data "$DATA"
+	[ -n "$BIN_DIR" ] && set -- "$@" --bin-dir "$BIN_DIR"
+	say "开始卸载（接下来的输出来自 scripts/deploy-master.sh）"
+	if ! sh "$_tmpd/deploy-master.sh" "$@"; then
+		err "卸载脚本执行失败（上面是它的输出）。"
+		exit 1
+	fi
+	exit 0
 fi
 
 # 非交互式终端 + 又要提问 = 必然把所有问题答成默认值。与其装出一个"默认值拼起来的"
