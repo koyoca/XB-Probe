@@ -116,10 +116,14 @@ jobs:
 
           ## 免编译部署（Linux）
 
-              sudo sh -c "$(curl -fsSL https://raw.githubusercontent.com/REPO_PLACEHOLDER/TAG_PLACEHOLDER/install-master-bin.sh)" xb --version TAG_PLACEHOLDER
+              sudo sh -c "$(curl -fsSL https://raw.githubusercontent.com/REPO_PLACEHOLDER/main/install-master-bin.sh)" xb --version TAG_PLACEHOLDER
 
           机器上不需要 Go、不需要 git clone、不编译。脚本会下载下面的
           probe-master_linux_<arch>、用 SHA256SUMS.master 校验后再安装。
+
+          安装脚本刻意取 `main` 而不是本标签：**脚本与二进制分开演进**——
+          脚本里修一个诊断问题不该逼着用户去换版本号。真正决定装哪个版本的是
+          `--version TAG_PLACEHOLDER` 这个参数。
 
           ## 校验和
 

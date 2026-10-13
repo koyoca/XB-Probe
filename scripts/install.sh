@@ -161,10 +161,13 @@ EXPECTED="$(awk -v n="$NAME" '$2==n || $2=="*"n {print $1}' "$SUMS" | head -n1)"
 if [ -z "$EXPECTED" ]; then
   echo "错误：校验和中找不到 $NAME。" >&2; exit 1
 fi
+# 末尾的 sed 剔掉 GNU coreutils 的"已转义"标记（路径含反斜杠时它在整行前加 `\`，
+# 于是拿到 `\f01d9…` 而非 `f01d9…`，比对失败且把原因指向"被篡改"）。
+# 本脚本跑在 Linux 上一般不会触发，但校验路径上的错误诊断代价太高，不值得赌。
 if command -v sha256sum >/dev/null 2>&1; then
-  ACTUAL="$(sha256sum "$BIN" | awk '{print $1}')"
+  ACTUAL="$(sha256sum "$BIN" | awk '{print $1}' | sed 's/^\\//')"
 elif command -v shasum >/dev/null 2>&1; then
-  ACTUAL="$(shasum -a 256 "$BIN" | awk '{print $1}')"
+  ACTUAL="$(shasum -a 256 "$BIN" | awk '{print $1}' | sed 's/^\\//')"
 elif command -v sha256 >/dev/null 2>&1; then
   ACTUAL="$(sha256 -q "$BIN")"
 elif command -v openssl >/dev/null 2>&1; then

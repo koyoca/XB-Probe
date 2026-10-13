@@ -131,9 +131,12 @@ url_ok() { # url_ok <url>
   esac
 }
 sha256_of() { # sha256_of <file>
-  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+  # 末尾的 sed 剔掉 GNU coreutils 的"已转义"标记：路径含反斜杠时
+  # （MSYS/Cygwin 下 /tmp/… 会被当成 C:\…\… 输出）它会在整行前加一个 `\`，
+  # `awk '{print $1}'` 于是拿到 `\f01d9…`，比对必然失败且报错方向是错的。
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}' | sed 's/^\\//'
   elif command -v sha256 >/dev/null 2>&1; then sha256 -q "$1"
-  elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}' | sed 's/^\\//'
   elif command -v openssl >/dev/null 2>&1; then openssl dgst -sha256 "$1" | awk '{print $NF}'
   else return 1; fi
 }

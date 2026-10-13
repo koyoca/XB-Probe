@@ -90,16 +90,33 @@ download() {
 }
 
 # sha256_of <文件>：优先 GNU coreutils 的 sha256sum，macOS/BSD 退到 shasum。
-# 只输出 64 位十六进制串，便于直接比对。
+# 只输出 64 位十六进制串。
+#
+# 末尾那个 `sed 's/^\\//'` 不是装饰：**只要文件路径里含反斜杠**，
+# GNU coreutils 就会在整行前面加一个 `\` 作为"已转义"标记，于是
+# `awk '{print $1}'` 拿到的是 `\f01d9…` 而不是 `f01d9…`。不剔掉就会以
+# 「校验和不匹配」收场——在校验路径上给出指错方向的诊断，看起来像下载被篡改。
+# 什么时候会触发：MSYS/Cygwin 上 `/tmp/…` 会被 coreutils 当成 `C:\…\…` 输出。
+# （实测踩过一次：本脚本 Windows 侧的 dry-run 测试就是被它拦下的。）
 sha256_of() {
 	if command -v sha256sum >/dev/null 2>&1; then
-		sha256sum "$1" | awk '{print $1}'
+		sha256sum "$1"
 	elif command -v shasum >/dev/null 2>&1; then
-		shasum -a 256 "$1" | awk '{print $1}'
+		shasum -a 256 "$1"
 	else
 		err "找不到 sha256sum / shasum，无法校验下载内容。"
 		exit 1
-	fi
+	fi | awk '{print $1}' | sed 's/^\\//'
+}
+
+# is_hex64：判断拿到的到底是不是一个 sha256 摘要。
+# 有它才能把两种失败分开报：**"下载到的不是校验和"**（源站 404 页面、被劫持的
+# 门户页）与**"内容真的对不上"**（才算篡改）。混在一起报，等于把排查方向带偏。
+is_hex64() {
+	case "$1" in
+	*[!0-9a-fA-F]* | "") return 1 ;;
+	esac
+	[ "${#1}" -eq 64 ]
 }
 
 # ---------------------------------------------------------------------------
@@ -264,15 +281,17 @@ if [ -z "$WANT" ]; then
 	err "SHA256SUMS.master 里没有 $BIN_NAME 的条目——发布产物与脚本预期不一致。"
 	exit 1
 fi
-case "$WANT" in
-*[!0-9a-fA-F]* | "")	err "校验和格式不对（$WANT）。很可能下载到的是错误页而不是校验和文件。"; exit 1 ;;
-esac
-[ "${#WANT}" -eq 64 ] || {
-	err "校验和长度应为 64 位十六进制，实际 ${#WANT} 位（$WANT）。"
+if ! is_hex64 "$WANT"; then
+	err "SHA256SUMS.master 里 $BIN_NAME 的校验和不是 64 位十六进制（$WANT）——"
+	err "下载到的很可能不是校验和文件（错误页 / 门户劫持页）。"
 	exit 1
-}
+fi
 
 GOT="$(sha256_of "$TMP/$BIN_NAME")"
+if ! is_hex64 "$GOT"; then
+	err "本机 sha256 输出无法解析（${#GOT} 位：$GOT），无法校验下载内容。"
+	exit 1
+fi
 if [ "$GOT" != "$WANT" ]; then
 	err "校验和不匹配，已丢弃下载内容。"
 	err "  期望 $WANT"
