@@ -292,11 +292,11 @@ Write-Host "  2) 在「设置 → 安装与下载」核对（配置文件里写�
 Write-Host "       · Master 公网地址 install.master_url —— 留空则回落到 public_origin"
 Write-Host "       · 二进制下载源 install.dist_base  —— 留空则由本进程提供 /dist/"
 Write-Host "       · 安装入口模式 install.mode       —— 默认 on_demand"
-Write-Host "  3) 生成注册码，用它装第一个 Agent（见 docs/04 的 Agent 一键部署）"
+Write-Host "  3) 生成注册码，用它装第一个 Agent（见 README 的「添加被监控节点」）"
 Write-Host "  4) probe-master dist pull --version <版本> --from <发布源> --pubkey <公钥>   # Agent 自升级用"
 Write-Host "  5) 公开看板与后台是否分成两个域名 —— 在「设置 → 站点形态」里选："
 Write-Host "       跟随配置文件（默认）/ 同站（一个域名）/ 分离（两个域名，需同时填两份域名清单）"
-Write-Host "       运行时设置，改完即时生效、不用重启；分离靠 Host 而不是监听地址（见 docs/04 §2.5）"
+Write-Host "       运行时设置，改完即时生效、不用重启；分离靠 Host 而不是监听地址"
 Write-Host "  6) 配 TLS（acme 或前置反代 + trusted_proxies）与外部心跳 heartbeat_url"
 if (-not $PublicOrigin) {
     Write-Host "⚠ 没有给 -PublicOrigin：install.master_url 拿不到值，Master 会按请求的 Host 回填。" -ForegroundColor Yellow

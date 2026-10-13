@@ -3,7 +3,7 @@
 # 设计取舍，先读这段再改：
 #
 # 1. **依赖不随仓库提交，每个 job 显式 `go mod download`。** 本仓库**不含** vendor/
-#    （`go mod vendor` 实测 197 MB，见 docs/03 §3.2 与 .gitignore 末尾），
+#    （`go mod vendor` 实测约 208 MB，见 .gitignore 末尾），
 #    因此也**不能**设 `GOFLAGS=-mod=vendor`——那会直接 `go: inconsistent vendoring`
 #    失败。走默认的 `-mod=readonly`：依赖缺失时立刻报错，而不是偷偷改 go.mod。
 #    开启 setup-go 的模块缓存是安全的：cache key 由 go.sum 决定，go.sum 一变即失效，

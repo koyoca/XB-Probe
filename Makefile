@@ -30,7 +30,13 @@ PLATFORMS := linux/amd64 linux/arm64 linux/armv7 linux/armv6 linux/386 linux/ris
              windows/amd64 windows/386 windows/arm64 \
              freebsd/amd64 freebsd/arm64 freebsd/386 freebsd/arm
 
-.PHONY: all tidy fmt vet test test-race vulncheck master agent dist checksums sign verify-sums smoke restore-drill clean
+# Master 的发布矩阵（比 Agent 窄得多）。
+# 只发 Linux 两种架构：Master 是常驻服务端，没有人在 Windows/FreeBSD 上拿它当入口，
+# 多编几个平台只是多几份没人下载的产物。
+MASTER_PLATFORMS := linux/amd64 linux/arm64
+
+.PHONY: all tidy fmt vet test test-race vulncheck master agent dist master-dist \
+        checksums checksums-master release-assets sign verify-sums smoke clean
 
 all: master agent
 
@@ -46,7 +52,7 @@ vet:
 test:
 	go test ./...
 
-# 竞态检测需要 cgo 与 C 编译器（gcc / MinGW-w64 / clang），见 docs/03
+# 竞态检测需要 cgo 与 C 编译器（gcc / MinGW-w64 / clang）。
 test-race:
 	CGO_ENABLED=1 go test -race ./...
 
@@ -89,13 +95,37 @@ dist:
 	done
 	@$(MAKE) checksums
 
-# SHA256SUMS（12.6 / 12.8）。
+# Master 的交叉编译产物：给"无需编译"的一键部署用
+# （install-master-bin.sh 直接从 GitHub Releases 取这两份）。
+master-dist:
+	@mkdir -p $(DIST)
+	@for p in $(MASTER_PLATFORMS); do \
+		os=$${p%/*}; tag=$${p#*/}; \
+		echo ">> probe-master $$os/$$tag"; \
+		CGO_ENABLED=0 GOOS=$$os GOARCH=$$tag go build $(BUILD_FLAGS) \
+			-ldflags "$(LDFLAGS) -X $(MODULE)/internal/dist.PlatformTag=$${os}_$${tag}" \
+			-o "$(DIST)/probe-master_$${os}_$${tag}" ./cmd/probe-master || exit 1; \
+	done
+	@$(MAKE) checksums-master
+
+# SHA256SUMS（12.6 / 12.8）：Agent 侧的校验和文件。
 #
-# 注意只对 probe-agent_* 生成校验和：Master 自身不在发布矩阵里
-# （各部署自己构建），列进来会让"缺一个文件"变成常态噪音。
+# 只对 probe-agent_* 生成，**绝不能把 probe-master_* 并进来**：
+# 这份文件是 Agent 安装脚本 `sha256sum -c` 的输入，里面多两行 Master 产物，
+# Agent 那台机器上当然没有这些文件，校验必然 FAILED——而失败原因看起来
+# 完全像是"下载被篡改"。Master 单独一份（见 checksums-master）。
 checksums:
 	@test -n "$(SHA256SUM)" || { echo "找不到 sha256sum / shasum，无法生成校验和"; exit 1; }
 	@cd $(DIST) && $(SHA256SUM) probe-agent_* > SHA256SUMS && echo "==> $(DIST)/SHA256SUMS"
+
+# Master 的校验和：与 Agent 那份分开，理由见上面。
+checksums-master:
+	@test -n "$(SHA256SUM)" || { echo "找不到 sha256sum / shasum，无法生成校验和"; exit 1; }
+	@cd $(DIST) && $(SHA256SUM) probe-master_* > SHA256SUMS.master && echo "==> $(DIST)/SHA256SUMS.master"
+
+# 一次产出全部发布产物：Agent 13 平台 + Master 2 平台 + 两份校验和。
+# GitHub Actions 的 release 流水线只调这一个目标（见 .github/workflows/release.yml）。
+release-assets: dist master-dist
 
 # 用离线私钥签名 SHA256SUMS（6.8）。
 #
@@ -112,7 +142,7 @@ checksums:
 #   make verify-sums PUB=/path/to/minisign.pub
 sign:
 	@test -n "$(KEY)" || { echo "用法：make sign KEY=<私钥路径> [VERSION=x.y.z]"; exit 1; }
-	@command -v minisign >/dev/null 2>&1 || { echo "未安装 minisign，见 docs/03 工具链章节"; exit 1; }
+	@command -v minisign >/dev/null 2>&1 || { echo "未安装 minisign"; exit 1; }
 	@test -f "$(DIST)/SHA256SUMS" || { echo "找不到 $(DIST)/SHA256SUMS，先跑 make dist"; exit 1; }
 	@test -f "$(KEY)" || { echo "找不到私钥 $(KEY)"; exit 1; }
 	minisign -S -s "$(KEY)" -m "$(DIST)/SHA256SUMS" \
@@ -132,12 +162,6 @@ verify-sums:
 # 端到端冒烟（自建临时实例，端口 18180/18181，跑完自动清理）。
 smoke:
 	bash scripts/smoke-test.sh
-
-# 备份恢复演练（6.6 验收标准之一）：真实走一遍
-# 备份 -> 破坏主库 -> 从备份恢复 -> 校验节点与历史数据完整。
-# 自建临时实例（端口 18580/18581），跑完自动清理；KEEP_WORK=1 保留现场。
-restore-drill:
-	bash scripts/restore-drill.sh
 
 clean:
 	rm -rf bin $(DIST)

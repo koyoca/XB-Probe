@@ -1,0 +1,141 @@
+# 发布流水线：把"无需编译"部署所需的产物发到 GitHub Releases。
+#
+# 为什么要有它：`install-master.sh` 走的是"服务器上装 Go、现场编译"的路子。
+# 那条路对一台 1 核小机器并不友好（编译几分钟、还要几百 MB 缓存）。
+# 于是多了一条 `install-master-bin.sh`：只下载、校验、安装，机器上连 Go 都不需要。
+# 而"下载"得有东西可下——本流水线就是那个东西的唯一来源。
+#
+# 两条触发路径：
+#   · 推 v* 标签            → 用标签名作为版本（发布的正规入口）
+#   · workflow_dispatch     → 手动给一个版本号（首次发布、补发、重跑都用它）
+# 两者都不影响 main 分支的日常 CI（见 ci.yml，那里只做"能不能编出来"的检查）。
+#
+# 版本号去掉 v 前缀后交给 make，同时原样作为标签与 Release 名：
+#   tag v0.1.0 → VERSION=0.1.0 → 产物在 dist/0.1.0/、二进制内 main.version=0.1.0
+# 产物与标签对不上的话，自升级会拿着一个不存在的版本号去比对，所以这里必须一致。
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "版本号（不带 v 前缀），例如 0.1.0"
+        required: true
+        type: string
+
+# 建 Release 与上传资产都要写权限。GITHUB_TOKEN 是流水线自带的短期令牌，
+# 不需要任何个人令牌；这也意味着**本仓库的发布不依赖任何人的机器**。
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: 构建并发布产物
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # 与 ci.yml 同一口径：显式钉版本，不从 go.mod 读（那是下限，不是工具链）。
+          go-version: "1.27.2"
+          cache: true
+
+      - name: go mod download
+        run: go mod download
+
+      # 解析版本与标签。两个来源在这一步归一，后面只用 $VERSION / $TAG。
+      - name: 解析版本
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            V="${{ inputs.version }}"
+          else
+            V="${GITHUB_REF_NAME#v}"
+          fi
+          # 只接受 x.y.z（可带 -pre 后缀）。放松校验的代价是发布出一个
+          # 目录名/标签/二进制内版本号三者不一致的版本，事后极难对齐。
+          case "$V" in
+            v*) echo "版本号不要带 v 前缀：$V" >&2; exit 1 ;;
+            [0-9]*.[0-9]*.[0-9]*) : ;;
+            *) echo "版本号格式应为 x.y.z，收到：$V" >&2; exit 1 ;;
+          esac
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "tag=v$V" >> "$GITHUB_OUTPUT"
+          echo "本次发布：v$V"
+
+      # 一个目标产出全部资产（Agent 13 平台 + Master 2 平台 + 两份校验和）。
+      # 刻意不在这里手写 go build：构建定义只能有一处，否则本地编的与流水线编的
+      # 迟早不是同一个东西（Makefile 的 PLATFORMS 与 CI 矩阵就是这么对上账的）。
+      - name: 构建发布产物
+        run: make release-assets VERSION=${{ steps.ver.outputs.version }}
+
+      # 自检：产物数量与校验和都必须对得上。少一个平台说明有平台悄悄没编出来，
+      # 而这种"少了一份"如果没人拦，会以"用户下载 404"的形式在别人机器上暴露。
+      - name: 自检产物与校验和
+        run: |
+          cd "dist/${{ steps.ver.outputs.version }}"
+          a=$(ls probe-agent_* | grep -v '\.sha256$' | wc -l)
+          m=$(ls probe-master_* | wc -l)
+          echo "Agent 产物 ${a} 个，Master 产物 ${m} 个"
+          [ "${a}" -eq 13 ] || { echo "期望 13 个 Agent 产物，实际 ${a} 个"; exit 1; }
+          [ "${m}" -eq 2 ]  || { echo "期望 2 个 Master 产物，实际 ${m} 个"; exit 1; }
+          sha256sum -c SHA256SUMS
+          sha256sum -c SHA256SUMS.master
+          # Linux Master 二进制必须真能跑。交叉编译成别的架构、或漏了某个构建标签时，
+          # 这里会立刻失败，而不是等用户装上以后报 "cannot execute binary file"。
+          ./probe-master_linux_amd64 version
+
+      - name: 收集资产
+        run: |
+          mkdir -p release
+          cp "dist/${{ steps.ver.outputs.version }}"/probe-agent_* release/
+          cp "dist/${{ steps.ver.outputs.version }}"/probe-master_* release/
+          cp "dist/${{ steps.ver.outputs.version }}"/SHA256SUMS release/
+          cp "dist/${{ steps.ver.outputs.version }}"/SHA256SUMS.master release/
+          ls -l release/ | head -30
+
+      # 用 runner 自带的 gh（官方预装），不引入第三方 action：
+      # 依赖越少，供应链面越小。
+      #
+      # 发布说明用**引号 heredoc** 写（'EOF' 不做任何展开），否则正文里的
+      # 反引号会被 shell 当成命令替换、`$(...)` 会被当成子命令——一段说明文字
+      # 悄悄变成了要执行的代码。需要替换的值走环境变量，正文里保持原样。
+      - name: 创建或更新 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.ver.outputs.tag }}"
+          REPO="${{ github.repository }}"
+          cat > NOTES.md <<'EOF'
+          由 GitHub Actions 构建并发布的临时产物（无签名）。
+
+          ## 免编译部署（Linux）
+
+              sudo sh -c "$(curl -fsSL https://raw.githubusercontent.com/REPO_PLACEHOLDER/TAG_PLACEHOLDER/install-master-bin.sh)" xb --version TAG_PLACEHOLDER
+
+          机器上不需要 Go、不需要 git clone、不编译。脚本会下载下面的
+          probe-master_linux_<arch>、用 SHA256SUMS.master 校验后再安装。
+
+          ## 校验和
+
+          - SHA256SUMS        —— Agent 产物（13 个平台）
+          - SHA256SUMS.master —— Master 产物（linux/amd64、linux/arm64）
+
+          两者分开是刻意的：合并成一份会让 Agent 侧的 `sha256sum -c` 在
+          自己的目录里找不到 Master 文件而报 FAILED，看起来像"下载被篡改"。
+          EOF
+          sed -i "s|REPO_PLACEHOLDER|${REPO}|g; s|TAG_PLACEHOLDER|${TAG}|g" NOTES.md
+          cat NOTES.md
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG 已存在，改为覆盖上传资产"
+            gh release upload "$TAG" release/* --clobber
+          else
+            gh release create "$TAG" release/* --title "$TAG" --notes-file NOTES.md
+          fi
+          echo "==> https://github.com/${REPO}/releases/tag/${TAG}"

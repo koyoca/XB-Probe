@@ -31,7 +31,7 @@ require (
 //   - go 指令＝1.26.0 是**下限**：golang.org/x/net v0.61.0 要求 ≥1.26，
 //     且 GO-2026-6617（net/http 的 HPACK 竞态）在标准库侧要到 go1.26.9 才修掉。
 //   - SQLite 使用 modernc.org/sqlite：纯 Go，CGO_ENABLED=0 静态编译。
-//   - 首次构建执行：go mod tidy（依赖经 GOPROXY 拉取，见 docs/03 §3.2）。
+//   - 首次构建执行：go mod tidy（依赖经 GOPROXY 拉取）。
 //   - **vendor/ 不随仓库提交**：go mod vendor 实测约 208 MB（modernc.org 占大头），
 //     而依赖走 GOPROXY 只有几 MB。需要离线构建时在本机自行 go mod vendor，
 //     那份目录已被 .gitignore 排除。

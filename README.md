@@ -1,11 +1,5 @@
 # XB-Probe（自用轻量级服务器探针）
 
-> **关于名字**：项目名是 **XB-Probe**。代码里的默认站点标题、`docs/` 里的历史记录、
-> CI 与模块路径仍写作 "Server Probe"（`module github.com/yourorg/probe`）——
-> 这些是**内部代号**，改动它们会牵动源码、配置模板与全部文档，属于一次单独的改名动作，
-> 本轮有意不动：**这个仓库的代码与上游开发目录 `server-probe/` 逐字节一致**，
-> 以便继续双向同步。要改默认站点标题只需在管理端「设置 → 站点」里改，不必改代码。
-
 面向个人多节点 VPS 的极轻量、高安全、可插拔监控与资产管理系统。
 
 一个 **Master** 二进制（内嵌 SQLite、管理后台、公开看板与 IANA 时区库，零外部依赖）+ 若干 **Agent**
@@ -13,7 +7,7 @@
 公开看板与管理后台既能两个域名分离、也能同站，**运行时切换、无需重启**。
 
 状态：`go vet` 无告警 · `go test ./...` 25 个包全绿 · 26 个发布产物交叉编译通过（13 平台 × Master/Agent）·
-端到端冒烟 311 项通过（0 失败 / 1 跳过）· 备份恢复演练 35 项通过（0 失败 / 1 跳过）。
+端到端冒烟 311 项通过（0 失败 / 1 跳过）。
 
 ## 特性
 
@@ -30,12 +24,29 @@
 - **告警与资产**：离线 / 资源阈值 / 「探测连续失败」三类告警（按 `(节点, 类型)` 独立冷却，
   恢复通知不受冷却限制），Telegram 与 SMTP 渠道；计费周期、月费折算、流量配额与续期提醒。
 
-| 公开看板（浅色） | 管理后台（浅色） |
-| --- | --- |
-| ![公开看板](docs/screenshots-r105-public-light.png) | ![管理后台](docs/screenshots-r105-admin-light.png) |
-| ![公开看板（深色）](docs/screenshots-r105-public-dark.png) | ![管理后台（深色）](docs/screenshots-r105-admin-dark.png) |
+## 部署（Linux）
 
-## 一键部署（Linux）
+两种方式，选一种即可。**目标机器是 1 核小机器就用第一种**——它不需要 Go、不需要 git、不编译。
+
+### 方式 A：预编译二进制（推荐）
+
+```bash
+sudo sh -c "$(curl -fsSL https://raw.githubusercontent.com/koyoca/XB-Probe/main/install-master-bin.sh)"
+```
+
+下载对应架构的 `probe-master`、用 `SHA256SUMS.master` 校验、真跑一次 `version` 自检，然后交给部署脚本
+完成配置、初始化管理员、注册服务并做健康检查。机器上只需要 `curl`（或 `wget`）。
+
+```bash
+# 指定版本 / 换下载加速前缀 / 只看不装（下载并校验，不改动系统）
+sudo sh install-master-bin.sh --version v0.1.0
+sudo sh install-master-bin.sh --mirror https://ghfast.top/https://github.com
+sh install-master-bin.sh --dry-run --version v0.1.0
+```
+
+只发布 `linux/amd64` 与 `linux/arm64`。其它架构（含 FreeBSD）请用方式 B，它会现场编译。
+
+### 方式 B：取源码现场编译
 
 在**全新机器**上一条命令完成：检查/安装依赖（git、Go）→ `git clone` 拉取源码 → 编译 →
 交互式配置 → 注册 systemd 服务并启动 → 健康检查。
@@ -44,13 +55,16 @@
 sudo sh -c "$(curl -fsSL https://raw.githubusercontent.com/koyoca/XB-Probe/main/install-master.sh)"
 ```
 
+若机器上已有 Go ≥ 1.26 就直接用，否则脚本会下载官方 Go；支持 systemd / OpenRC / procd / SysV 自动探测。
+
+### 两种方式共同的注意事项
+
 脚本会依次问你：TLS 方式、域名与邮箱、公开站/管理端地址、管理员账号与口令等，**直接回车取默认值**。
 全程幂等——**再执行一次就是升级**（不会重建数据目录，也不会覆盖已有 `master.yaml`）。
 
 > **为什么不是 `curl … | sudo sh`**：管道会把 stdin 占掉，脚本里的 `read` 立刻拿到 EOF，
 > 于是所有交互项都静默取默认值（甚至空口令）——这正是"一键装完却登不进后台"的常见原因。
-> 上面的 `sh -c "$(...)"` 保留了终端 stdin，也没有 `sudo` 关闭额外 fd 的问题。
-> 先看再跑（推荐）或没有 bash 时：
+> 上面的 `sh -c "$(...)"` 保留了终端 stdin。先看再跑（推荐）或没有 bash 时：
 >
 > ```bash
 > curl -fsSL https://raw.githubusercontent.com/koyoca/XB-Probe/main/install-master.sh -o install-master.sh
@@ -60,33 +74,32 @@ sudo sh -c "$(curl -fsSL https://raw.githubusercontent.com/koyoca/XB-Probe/main/
 **要在一行式里带参数，必须先插一个占位名**——`sh -c` 之后的第一个词会成为 `$0`，不会被当作参数：
 
 ```bash
-sudo sh -c "$(curl -fsSL https://raw.githubusercontent.com/koyoca/XB-Probe/main/install-master.sh)" xb \
-  --yes --no-service --dir ./probe-master --data ./probe-master/data --bin-dir ./probe-master/bin
+sudo sh -c "$(curl -fsSL https://raw.githubusercontent.com/koyoca/XB-Probe/main/install-master-bin.sh)" xb \
+  --no-service --dir ./probe-master --data ./probe-master/data --bin-dir ./probe-master/bin
 ```
 
 若写成 `…"$(curl …)" --yes`，`--yes` 会被拼进脚本正文而不是当作参数，表现为莫名其妙的"需要 root"报错。
 
-支持 Linux（systemd / OpenRC / procd / SysV 自动探测）与 FreeBSD（只做取源码 + 编译）。
-容器或没有 systemd、没有 root 时可以不用 root：
+容器或没有 systemd、没有 root 时可以完全不用 root（两个脚本都支持 `--no-service`）：
 
 ```bash
-sh install-master.sh --no-service --dir ./probe-master --data ./probe-master/data --bin-dir ./probe-master/bin
+sh install-master-bin.sh --no-service --dir ./probe-master --data ./probe-master/data --bin-dir ./probe-master/bin
 ```
 
 完全非交互（CI / 批量部署）：
 
 ```bash
-sudo sh install-master.sh --yes \
+sudo sh install-master-bin.sh --yes \
   --public-origin https://status.example.com \
   --tls-mode acme --tls-domain status.example.com --acme-email ops@example.com
 ```
 
-常用参数：`--repo` / `--ref`（分支或标签）/ `--src`（源码目录，默认 `/opt/xb-probe`）/
-`--go-version` / `--goproxy` / `--no-deps` / `--tls-mode` / `--public-origin` / `--admin-origin` /
-`--admin-user` / `--public-listen` / `--admin-listen` / `--dir` / `--data` / `--bin-dir` /
-`--dist-base` / `--force-config` / `--dry-run` / `--yes`。`--help` 看全量说明。
+`--help` 看全量参数：`--version` / `--repo` / `--mirror` / `--arch` / `--tls-mode` / `--public-origin` /
+`--admin-origin` / `--admin-user` / `--public-listen` / `--admin-listen` / `--dir` / `--data` / `--bin-dir` /
+`--dist-base` / `--no-service` / `--force-config` / `--dry-run` / `--yes`（方式 B 另有 `--ref` / `--src` /
+`--go-version` / `--goproxy` / `--no-deps`）。
 
-## 一键部署（Windows）
+## 部署（Windows）
 
 以**管理员** PowerShell 执行：
 
@@ -102,7 +115,7 @@ $f="$env:TEMP\xb-install.ps1"; irm https://raw.githubusercontent.com/koyoca/XB-P
 `-AcmeEmail` `-NoStartupTask` `-ForceConfig` `-Yes` `-DryRun` …）。
 
 Windows 上 Master 没有内置服务封装（Agent 才有），用"开机时以最高权限运行"的计划任务实现自启并配失败重启；
-数据目录用 ACL 收成"仅 Administrators 与 SYSTEM"（等价 Linux 的 0700）。详见 `docs/04-部署与运维.md` §2.2。
+数据目录用 ACL 收成"仅 Administrators 与 SYSTEM"（等价 Linux 的 0700）。
 
 ## 部署后必做
 
@@ -142,8 +155,9 @@ tls:
   换密钥指纹就变、**所有 Agent 会同时离线**；自签证书同理，配置没变就复用磁盘上的产物。
 - **HSTS 只在"确认走 HTTPS"的连接上下发**。明文 HTTP 上发它浏览器按规范直接忽略，却会造成
   "已经加固"的错觉。判定与会话 Cookie 的 `Secure` **共用同一逻辑**，不会出现"Cookie 已降级、HSTS 还在发"。
-- 首张证书在后台申请，**不阻塞启动**；证书运行态（SAN / 到期 / SPKI 指纹 / 最近失败原因）见
-  `GET /api/admin/v1/tls/status`，自签指纹会同时以 base64 与冒号十六进制两种写法打印，可直接填给 Agent。
+
+首张证书在后台申请，**不阻塞启动**；证书运行态（SAN / 到期 / SPKI 指纹 / 最近失败原因）见
+`GET /api/admin/v1/tls/status`，自签指纹会同时以 base64 与冒号十六进制两种写法打印，可直接填给 Agent。
 
 ## 公开看板与后台：两个域名，还是一个站点
 
@@ -169,7 +183,8 @@ admin_origin:  "https://admin.example.com"
   后台在保存成功后的**下一个**请求上 421，而把它改回来恰好需要访问后台。
 - ACME 的 `/.well-known/acme-challenge/` 路径豁免该门禁（CA 按 IP 访问，永远命中不了域名白名单）。
 
-反代样例（Caddy/Nginx 两个域名转发到同一个端口）与三个易踩点见 `docs/04-部署与运维.md` §2.5。
+典型接法是「一个端口（比如 8080）+ 两个域名都解析到这台机器 + 反代按 Host 转发」，反代方案里别忘了
+把反代网段填进 `trusted_proxies`。
 
 ## 添加被监控节点（Agent 一键安装）
 
@@ -187,8 +202,8 @@ Windows 节点用后台给出的 PowerShell 命令。Agent 装好后纯外联上
 ## 升级、备份与回滚
 
 ```bash
-# Master：再跑一次一键脚本即可（幂等，走"停服务 → 换二进制 → 启动"的升级路径）
-sudo sh -c "$(curl -fsSL https://raw.githubusercontent.com/koyoca/XB-Probe/main/install-master.sh)"
+# Master：再跑一次部署脚本即可（幂等，走"停服务 → 换二进制 → 启动"的升级路径）
+sudo sh -c "$(curl -fsSL https://raw.githubusercontent.com/koyoca/XB-Probe/main/install-master-bin.sh)"
 
 # Agent 自升级（取件走节点令牌鉴权，不依赖公开的 /dist/）
 sudo probe-agent upgrade --check && sudo probe-agent upgrade
@@ -202,11 +217,7 @@ sudo systemctl restart probe-agent     # 升级不会自行重启，输出里会
 
 备份在管理端「系统设置 → 数据库备份」手动触发或按日自动（`VACUUM INTO` 在线一致快照 + `keep` 轮转）。
 **不要用 `cp` 拷贝数据库文件**——WAL 模式下会拿到撕裂副本，能打开、能查询、但数据不一致。
-上线前请实地跑一次恢复演练：
-
-```bash
-bash scripts/restore-drill.sh     # 真备份 → 破坏主库 → 恢复 → 逐项比对（用临时实例，不碰真实数据）
-```
+恢复时在管理端选一份快照执行恢复；条件允许的话，请在一台闲置实例上先走一遍，确认备份真的可用。
 
 ## 从源码构建（开发）
 
@@ -219,33 +230,19 @@ cp configs/master.yaml.example master.yaml   # 先改 data_dir / master_key_file
 ./bin/probe-master --config ./master.yaml    # 打开 http://127.0.0.1:18281/admin/
 ```
 
-装 Go 工具链（含国内镜像与排错表）与 `vendor/` 的取舍见 `docs/03-工具链安装与环境搭建.md`；
-构建约定、测试矩阵、CI 与踩坑记录见 `docs/05-实现细节与常见问题.md`。仓库里**没有** `vendor/`，
-依赖由 `go.mod` + `go.sum` 锁定。
+需要 Go ≥ 1.26（发布产物用 1.27.2 编），`CGO_ENABLED=0` 静态编译。仓库里**没有** `vendor/`，
+依赖由 `go.mod` + `go.sum` 锁定、走 `GOPROXY` 拉取；需要离线构建时在本机自行 `go mod vendor`。
 
-自检（都会自己起临时实例，不影响你的数据）：
+自检（会自己起临时实例，不影响你的数据）：
 
 ```bash
 go test ./...                    # 25 个包
 bash scripts/smoke-test.sh       # 端到端冒烟（311 项断言）
-bash scripts/restore-drill.sh    # 备份恢复演练（35 项断言）
 ```
-
-## 文档
-
-| 文档                                       | 内容                                                       |
-| ---------------------------------------- | -------------------------------------------------------- |
-| `docs/01-执行摘要.md`                        | 设计哲学、拓扑与通信、安全要点、**上线前检查清单**                              |
-| `docs/02-落地实施计划.md`                      | 里程碑与**验收标准**（含勾选状态）、风险与缓解                                |
-| `docs/03-工具链安装与环境搭建.md`                   | **开发机**：Go / minisign / Chrome 安装、国内镜像、环境变量、排错表           |
-| `docs/04-部署与运维.md`                       | **上线操作手册**：Master 部署、发布产物入库、Agent 安装与自升级、故障处理、验证清单        |
-| `docs/05-实现细节与常见问题.md`                   | 目录结构、两个前端的说明、测试矩阵、构建状态与 CI、签名实现、扩展点、**踩坑记录**             |
 
 ## 合规与安全提示
 
-上线前请对照 `docs/01-执行摘要.md` 末尾的**上线前检查清单**逐项确认，尤其是：公开站与管理端
-分离为不同源、启用 TOTP 并保存恢复码、`trusted_proxies` 配置正确、`dist` 外置并用 `make sign`
-签名（公钥填进设置项 `install.pubkey`），以及**自己再跑一次** `bash scripts/restore-drill.sh`
-确认备份在这台机器上真的可恢复。
+上线前请逐项确认：公开站与管理端分离为不同源、启用 TOTP 并保存恢复码、`trusted_proxies` 配置正确、
+`dist` 外置并用 `make sign` 签名（公钥填进设置项 `install.pubkey`），以及备份确实恢复得回来。
 
 本项目是**自用监控工具**：请只监控你拥有或已获授权的设备。

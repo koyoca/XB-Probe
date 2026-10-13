@@ -315,5 +315,4 @@ cat <<'EOF'
   2) cp configs/master.yaml.example master.yaml 并修改 data_dir / 监听地址
   3) ./bin/probe-master init-admin --config ./master.yaml
   4) ./bin/probe-master --config ./master.yaml
-详见 docs/03-工具链安装与环境搭建.md
 EOF
