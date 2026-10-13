@@ -15,11 +15,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yourorg/probe/internal/auth"
-	"github.com/yourorg/probe/internal/config"
-	"github.com/yourorg/probe/internal/db"
-	"github.com/yourorg/probe/internal/dist"
-	"github.com/yourorg/probe/internal/store"
+	"github.com/koyoca/xb-probe/internal/auth"
+	"github.com/koyoca/xb-probe/internal/config"
+	"github.com/koyoca/xb-probe/internal/db"
+	"github.com/koyoca/xb-probe/internal/dist"
+	"github.com/koyoca/xb-probe/internal/store"
 )
 
 // 本文件包含子命令与公开快照构建函数。
@@ -51,7 +51,7 @@ func jsonUnmarshal(raw []byte, v any) bool { return json.Unmarshal(raw, v) == ni
 
 func runInitAdmin(args []string) error {
 	fs := flag.NewFlagSet("init-admin", flag.ContinueOnError)
-	cfgPath := fs.String("config", "/etc/probe-master/master.yaml", "配置文件路径")
+	cfgPath := fs.String("config", "/etc/xb-probe-master/master.yaml", "配置文件路径")
 	username := fs.String("username", "admin", "管理员用户名")
 	password := fs.String("password", "", "密码；留空则交互输入")
 	if err := fs.Parse(args); err != nil {
@@ -113,7 +113,7 @@ func runInitAdmin(args []string) error {
 
 func runResetAdmin(args []string) error {
 	fs := flag.NewFlagSet("reset-admin", flag.ContinueOnError)
-	cfgPath := fs.String("config", "/etc/probe-master/master.yaml", "配置文件路径")
+	cfgPath := fs.String("config", "/etc/xb-probe-master/master.yaml", "配置文件路径")
 	username := fs.String("username", "admin", "管理员用户名")
 	password := fs.String("password", "", "新密码；留空则交互输入")
 	phone := fs.Bool("i-know-what-i-am-doing", false, "确认在 Master 主机本机执行")
@@ -174,7 +174,7 @@ func promptPassword() (string, error) {
 // dist pull（12.6）
 // ---------------------------------------------------------------------------
 
-// runDist 实现 `probe-master dist pull --version <版本> --from <URL>`：
+// runDist 实现 `xb-probe-master dist pull --version <版本> --from <URL>`：
 // 从第三方源（GitHub Releases / CDN）拉取发布文件并校验后入库（12.6）。
 //
 // 为什么必须有校验：`dist` 是"新装 Agent 的自举来源"。若拉取过程被中间人替换，
@@ -184,10 +184,10 @@ func promptPassword() (string, error) {
 // 任何一个文件校验失败，就删除已下载的全部内容（不留半套），避免"部分可用"的错觉。
 func runDist(args []string) error {
 	if len(args) == 0 || args[0] != "pull" {
-		return fmt.Errorf("用法：probe-master dist pull --version <版本> --from <URL> [--sums-from <URL>] [--platform linux_amd64]")
+		return fmt.Errorf("用法：xb-probe-master dist pull --version <版本> --from <URL> [--sums-from <URL>] [--platform linux_amd64]")
 	}
 	fs := flag.NewFlagSet("dist pull", flag.ContinueOnError)
-	cfgPath := fs.String("config", "/etc/probe-master/master.yaml", "配置文件路径")
+	cfgPath := fs.String("config", "/etc/xb-probe-master/master.yaml", "配置文件路径")
 	version := fs.String("version", "", "版本号")
 	from := fs.String("from", "", "发布文件来源 URL 前缀（不含文件名，如 https://example.com/v1.2.3）")
 	sumsFrom := fs.String("sums-from", "", "SHA256SUMS 的来源 URL（默认：与 --from 同源）")
@@ -248,7 +248,7 @@ func runDist(args []string) error {
 	}
 	fmt.Printf("已获取 SHA256SUMS（%d 条），来源 %s\n", len(sums), sumsURL)
 
-	// 2) 选出要拉取的文件。文件名约定：probe-agent_<os>_<arch>[.exe]。
+	// 2) 选出要拉取的文件。文件名约定：xb-probe-agent_<os>_<arch>[.exe]。
 	type job struct{ name, want string }
 	var jobs []job
 	names := make([]string, 0, len(sums))
@@ -257,7 +257,7 @@ func runDist(args []string) error {
 	}
 	sort.Strings(names)
 	for _, n := range names {
-		if !strings.HasPrefix(n, "probe-agent_") {
+		if !strings.HasPrefix(n, "xb-probe-agent_") {
 			continue
 		}
 		if *platform != "" && !strings.Contains(n, *platform) {
@@ -347,7 +347,7 @@ func fetchRaw(client *http.Client, url string) ([]byte, error) {
 
 // loadPubKey 把 `--pubkey` 的值解析成公钥文本，支持两种写法：
 //   - 直接给公钥内容（以 `untrusted comment:` 或 `RW` 开头的多行文本）
-//   - 给公钥文件路径（推荐：写成 /etc/probe-master/minisign.pub，避免命令行里粘贴长文本）
+//   - 给公钥文件路径（推荐：写成 /etc/xb-probe-master/minisign.pub，避免命令行里粘贴长文本）
 //
 // 判定顺序：先看是否是已存在的文件，再当作文本。这样两种写法都不会歧义。
 func loadPubKey(spec string) (string, error) {

@@ -13,16 +13,29 @@ import (
 	"sync"
 	"time"
 
-	"github.com/yourorg/probe/internal/model"
+	"github.com/koyoca/xb-probe/internal/model"
 )
 
 // RingPoint 是实时层的一个采样点。
+//
+// MemUsed / DiskUsed 是**字节**，与 MemPct 并存而不是二选一：
+// "最近 30 分钟"这条历史曲线走的是内存环形缓冲（不读时序表），而前端/公开接口
+// 对 `mem`、`disk_used` 声明的单位都是 bytes（见 api.unitOf）。
+// 曾经这里只有 MemPct，于是那一层：
+//   - `disk_used` 没有对应字段，pickRing 落进 default 返回 0 —— 磁盘曲线在
+//     "最近 30 分钟"下**永远是 0 B**（24 小时视图读时序表，所以看起来只坏了一档）；
+//   - `mem` 返回的是百分比，却被当成字节画，坐标轴数字完全不对。
+//
+// 两个字段都是"业务上合法的 0"（刚开机的机器磁盘占用不会是 0，但空盘可以是），
+// 所以**不能**用"是否为零"来判断有没有数据——判据是字段在不在。
 type RingPoint struct {
-	TS     int64
-	CPU    int // ×100
-	MemPct int // ×100
-	RxBps  int64
-	TxBps  int64
+	TS       int64
+	CPU      int   // ×100
+	MemPct   int   // ×100
+	MemUsed  int64 // 字节
+	DiskUsed int64 // 字节
+	RxBps    int64
+	TxBps    int64
 }
 
 // RingBuffer 是固定容量的环形缓冲，满时覆盖最旧数据。
@@ -157,19 +170,27 @@ func (n *NodeRuntime) Uptime(now int64) int64 {
 	return now - n.BootTime
 }
 
-// Percent 计算 used/total 的百分比（×100 存储），total<=0 返回 0。
+// Percent 计算 used/total 的万分比（0~10000），供进度条与超额判定。
+//
+// total<=0 表示"不限额/无基数" → 0；used<0 视为无数据 → 0；
+// used>=total 一律 10000（前端把 10000 当满额，给更大的数没有意义）。
+//
+// ★ 这里刻意用 float64 而不是整数除法的 used*10000/total。后者在 used 超过
+// 约 9.2e14（≈820 TB）时乘积溢出 int64 变成负数，而负值会**绕过**上面那条
+// "超过 10000 就收敛"的判断，把一个负数百分比直接画到页面上。这个量级看起来
+// 很远，但流量是累计值、倍率最高 1000，而且后台新增了「手工矫正本周期用量」
+// 输入（上限 1 PiB）——它成了把 used 送进这个函数的最短路径。
+//
+// 三条调用路径（内存/磁盘、带宽、流量额度）共用这一份实现：分成两份时，
+// 同一个数字会在"保存计费后立即重算"与"下一次慢循环"之间来回跳。
 func Percent(used, total int64) int {
-	if total <= 0 {
+	if total <= 0 || used <= 0 {
 		return 0
 	}
-	if used < 0 {
-		return 0
+	if used >= total {
+		return 10000
 	}
-	v := used * 10000 / total
-	if v > 10000 {
-		v = 10000
-	}
-	return int(v)
+	return int(float64(used) / float64(total) * 10000)
 }
 
 // ---------------------------------------------------------------------------

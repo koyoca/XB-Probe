@@ -3,7 +3,7 @@ package pipeline
 import (
 	"testing"
 
-	"github.com/yourorg/probe/internal/db"
+	"github.com/koyoca/xb-probe/internal/db"
 )
 
 // ---------------------------------------------------------------------------

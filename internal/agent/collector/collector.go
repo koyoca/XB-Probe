@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/yourorg/probe/internal/model"
+	"github.com/koyoca/xb-probe/internal/model"
 )
 
 // Collector 是平台采集接口。

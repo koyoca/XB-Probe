@@ -6,7 +6,7 @@ import (
 	"os"
 	"runtime"
 
-	"github.com/yourorg/probe/internal/model"
+	"github.com/koyoca/xb-probe/internal/model"
 )
 
 // New 返回非 Linux 平台的采集器。

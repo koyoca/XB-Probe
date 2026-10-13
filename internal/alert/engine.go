@@ -99,11 +99,24 @@ type Store interface {
 	MarkDelivered(id int64) error
 }
 
+// ChannelProvider 返回**当前**启用的告警渠道。
+//
+// 为什么是函数而不是一份切片：渠道是管理员在后台随时增删改的运行时设置，
+// 而引擎活得比任何一次配置修改都长。把切片塞进构造函数里，等于在启动那一刻
+// 把"渠道清单"拍平成快照 —— 之后在后台新建的 Telegram 渠道，告警**永远走不到**它。
+//
+// 真机上的症状极具误导性：后台点"测试发送"能收到（那条路是现读设置、现建渠道），
+// 但真出事时一条告警都收不到，而告警事件表里 delivered=0、日志里没有任何报错。
+// 这与站点形态那次的教训是同一个：**清单必须每次现读**，冻结进闭包/构造器
+// 得到的"改完即时生效"是假的，而且不报错。
+type ChannelProvider func() []Channel
+
 // Engine 负责判定、收敛、冷却与分发。
 type Engine struct {
 	rules map[string]Rule
 	store Store
-	chans []Channel
+	// chans 是"每次分发时现取渠道"的提供者，不是渠道快照。见 ChannelProvider。
+	chans ChannelProvider
 
 	// 连续确认计数：(nodeID, kind) -> 计数与首次时间
 	mu       sync.Mutex
@@ -118,17 +131,40 @@ type streakVal struct {
 	lastSeen int64
 }
 
-// New 创建告警引擎。
+// New 用一份**固定的**渠道列表创建告警引擎。
+//
+// 只适合"渠道在进程生命周期内不会变"的场景（测试、以及把渠道写死在配置文件里的用法）。
+// 从数据库读渠道的 Master **必须**用 NewDynamic：否则后台新建的渠道对告警不可见。
 func New(rules map[string]Rule, store Store, channels []Channel) *Engine {
+	return NewDynamic(rules, store, func() []Channel { return channels })
+}
+
+// NewDynamic 用"每次分发现取"的提供者创建告警引擎（Master 走这条）。
+//
+// provide 会在**每次真正要投递**时被调用一次（不是每个采样点），
+// 所以它可以安全地读数据库、解密渠道配置：告警是低频事件，而且此时
+// "渠道是不是最新的"比"省一次查询"重要得多。
+func NewDynamic(rules map[string]Rule, store Store, provide ChannelProvider) *Engine {
 	if rules == nil {
 		rules = DefaultRules()
+	}
+	if provide == nil {
+		provide = func() []Channel { return nil }
 	}
 	return &Engine{
 		rules:  rules,
 		store:  store,
-		chans:  channels,
+		chans:  provide,
 		streak: make(map[streakKey]streakVal),
 	}
+}
+
+// SetChannelProvider 替换渠道提供者（测试与热重载用）。
+func (e *Engine) SetChannelProvider(provide ChannelProvider) {
+	if provide == nil {
+		provide = func() []Channel { return nil }
+	}
+	e.chans = provide
 }
 
 // SetNodeNameResolver 注入节点名解析（用于消息文本）。
@@ -263,12 +299,16 @@ func (e *Engine) Recover(ctx context.Context, nodeID int64, stateKind, detail st
 }
 
 // dispatch 向所有渠道投递，任一渠道成功即视为已送达。
+//
+// 渠道列表在这里**现取**（见 ChannelProvider）：管理员刚在后台加的渠道，
+// 下一条告警就该走到它，不需要重启 Master。
 func (e *Engine) dispatch(ctx context.Context, m Message) bool {
-	if len(e.chans) == 0 {
+	chans := e.chans()
+	if len(chans) == 0 {
 		return false
 	}
 	okAny := false
-	for _, c := range e.chans {
+	for _, c := range chans {
 		if err := sendWithRetry(ctx, c, m); err == nil {
 			okAny = true
 		}

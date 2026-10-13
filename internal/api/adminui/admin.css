@@ -468,6 +468,21 @@ pre.code {
 .check-row { display: flex; align-items: center; gap: 8px; font-size: 13px; }
 .check-row > input { width: auto; margin: 0; }
 
+/* 通用对话框里那段"要照抄到别处"的内容（注册码 / 命令行）。
+   等宽 + 可选中：它会被复制到节点上执行，等宽字体让 o/O、1/l 这类字符能分清。
+   user-select 显式打开，防止被外层的按钮禁用样式波及。 */
+.copy-value {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
+  padding: 8px 10px; margin: 0 0 12px;
+}
+.copy-value > code {
+  flex: 1 1 auto; min-width: 0;
+  font-family: ui-monospace, Consolas, monospace; font-size: 13px;
+  word-break: break-all; user-select: all;
+}
+.copy-value > button { flex: 0 0 auto; }
+
 /* ---------- 设置项：卡片勾选组（public.cards）----------
    .settings-grid 是 auto-fill 多列网格，勾选组要独占一整行，因此用
    grid-column: 1 / -1 而不是简单地放在网格里当一格。 */

@@ -6,11 +6,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yourorg/probe/internal/alert"
-	"github.com/yourorg/probe/internal/db"
-	"github.com/yourorg/probe/internal/model"
-	"github.com/yourorg/probe/internal/state"
-	"github.com/yourorg/probe/internal/store"
+	"github.com/koyoca/xb-probe/internal/alert"
+	"github.com/koyoca/xb-probe/internal/db"
+	"github.com/koyoca/xb-probe/internal/model"
+	"github.com/koyoca/xb-probe/internal/state"
+	"github.com/koyoca/xb-probe/internal/store"
 )
 
 // 探测连续失败告警（4.5）的端到端测试。

@@ -1,10 +1,10 @@
-﻿# Server Probe —— Master 一键部署（Windows）
+﻿# XB-Probe —— Master 一键部署（Windows）
 #
 # 覆盖：放二进制 → 写配置并初始化管理员 → 注册开机自启（计划任务）→ 健康检查
 # → 证书状态 → 收尾汇总。幂等：重复执行走「升级」路径（停任务 → 换二进制 → 启动）。
 #
 # 用法（管理员 PowerShell）：
-#   powershell -ExecutionPolicy Bypass -File scripts\deploy-master.ps1 -Bin bin\probe-master.exe -AdminUser ops
+#   powershell -ExecutionPolicy Bypass -File scripts\deploy-master.ps1 -Bin bin\xb-probe-master.exe -AdminUser ops
 #
 # 不传 -AdminPassword 时会交互式提示（推荐）。
 #
@@ -14,16 +14,27 @@
 # 想在任何环境下都走一遍问答（自测用）：$env:PROBE_ASK_FORCE = "1"。
 #
 # 只看不装（打印将要写入的 master.yaml，不建目录、不注册任务、不建管理员）：
-#   powershell -File scripts\deploy-master.ps1 -Bin bin\probe-master.exe -DryRun
+#   powershell -File scripts\deploy-master.ps1 -Bin bin\xb-probe-master.exe -DryRun
 #
 # 卸载（默认连数据一起清；数据目录里有数据库与 master.key）：
 #   powershell -File scripts\deploy-master.ps1 -Uninstall
 #   powershell -File scripts\deploy-master.ps1 -Uninstall -KeepData
 #   powershell -File scripts\deploy-master.ps1 -Uninstall -DryRun   # 只列出会删什么
 #
+# 只升级 Master 本体（换二进制 + 重启计划任务；不问站点/证书/管理员，也不改它们）：
+#   powershell -File scripts\deploy-master.ps1 -UpgradeOnly -Bin bin\xb-probe-master.exe
+#
+# 只重置管理员密码（不卸载、不清数据、不重写配置、不重启任务）：
+#   powershell -File scripts\deploy-master.ps1 -ResetPassword
+#   口令按 -AdminPassword / $env:PROBE_ADMIN_PASSWORD / 交互的先后取；
+#   用户名默认 ops，可用 -AdminUser 指定。
+#
+# 只看这次会问什么、选哪些模式（给入口脚本用，不碰系统、不需要管理员）：
+#   powershell -File scripts\deploy-master.ps1 -AskMode
+#
 # 说明：Master 在 Windows 上没有内置的服务封装（Agent 才有），这里用
 # 「开机时以最高权限运行」的计划任务实现自启；需要真正的服务形态（可 Restart-Service）
-# 时请用 NSSM / WinSW 包一层，命令行仍是一句：probe-master -config <配置文件>
+# 时请用 NSSM / WinSW 包一层，命令行仍是一句：xb-probe-master -config <配置文件>
 #
 # dns-01 的 DNS 凭据：优先用环境变量（命令行参数会进 PSReadLine 历史）
 #   $env:PROBE_ACME_DNS_PROVIDER（默认 cloudflare）
@@ -32,8 +43,8 @@
 
 param(
     [string]$Bin = "",
-    [string]$Dir = "C:\ProgramData\probe-master",
-    [string]$Data = "C:\ProgramData\probe-master\data",
+    [string]$Dir = "C:\ProgramData\xb-probe-master",
+    [string]$Data = "C:\ProgramData\xb-probe-master\data",
     [string]$PublicListen = "",
     [string]$AdminListen = "",
     [string]$PublicOrigin = "",
@@ -57,7 +68,15 @@ param(
     [switch]$Yes,
     [switch]$DryRun,
     [switch]$Uninstall,
-    [switch]$KeepData
+    [switch]$KeepData,
+    # 只升级 Master 本体：只换二进制 + 重启计划任务。配置、证书、管理员账号、
+    # 发布目录一个都不动（详见 0.3）。
+    [switch]$UpgradeOnly,
+    # 只重置管理员密码：不卸载、不清数据、不重写配置、不重启任务（详见 0.4）。
+    [switch]$ResetPassword,
+    # 只打印"做什么"的菜单并把答案写到 stdout 然后退出：入口脚本用它来"先问后做"。
+    # 不碰系统、不读配置、不需要管理员，也不需要已经装好（见 0.1b）。
+    [switch]$AskMode
 )
 
 $ErrorActionPreference = "Stop"
@@ -71,20 +90,8 @@ function Write-Step { param([string]$Msg) Write-Host "==> $Msg" -ForegroundColor
 function Write-Warn2 { param([string]$Msg) Write-Host "警告：$Msg" -ForegroundColor Yellow }
 function Write-Err2 { param([string]$Msg) Write-Host "错误：$Msg" -ForegroundColor Red }
 
-# 0) 管理员权限检查
-#
-# 只在"真要写系统"时才要管理员：-DryRun 一个字节都不写（预览完就 exit），
-# 硬要提权会把"我只想先看看它会写什么"这一步也拦下来——等于逼人跳过预览，
-# 而预览恰恰是这条链路上唯一一件不需要信任就能做的事。
-# 卸载同理：-Uninstall -DryRun 只是把"会删什么"列出来。
-$id = [Security.Principal.WindowsIdentity]::GetCurrent()
-$pr = New-Object Security.Principal.WindowsPrincipal($id)
-if (-not $DryRun -and -not $pr.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Write-Err2 "请用「以管理员身份运行」的 PowerShell 执行。"
-    exit 1
-}
-
-$target = Join-Path $Dir "probe-master.exe"
+# 0) 目标路径（参数默认值的唯一来源在 param() 与上面那两个常量里）
+$target = Join-Path $Dir "xb-probe-master.exe"
 $cfg = Join-Path $Dir "master.yaml"
 
 # ---------------------------------------------------------------------------
@@ -97,6 +104,91 @@ if ($Yes) { $Ask = $false }
 if ($env:PROBE_NO_ASK) { $Ask = $false }
 if ([Console]::IsInputRedirected) { $Ask = $false }
 if ($env:PROBE_ASK_FORCE) { $Ask = $true }
+
+# ---------------------------------------------------------------------------
+# 0.1b) -AskMode：只问"做什么"，把答案写到 stdout 然后退出
+# ---------------------------------------------------------------------------
+#
+# 菜单**只有这一份**（与 scripts/deploy-master.sh 的 0a-3 一一对应）。入口脚本
+# （install-master.ps1）用它是为了"先问后做"：选卸载/重置密码的人不该先等一次
+# 完整的 Go 编译；选"只升级本体"的人也不该先答完整站问答才发现自己白答了。
+#
+# 通道约定（入口要靠它解析）：菜单与提示走 **stderr / 控制台**，答案走 **stdout**
+# ——调用方要拿到一个干净的数字，不能被菜单文本污染。
+function Show-ModeMenu {
+    Write-Host ""
+    Write-Host "这个脚本可以做五件事："
+    Write-Host ""
+    Write-Host "  1) 安装 / 升级 Master"
+    Write-Host "     装（或升级）Master 本体：二进制、配置、开机自启，以及新节点要用的"
+    Write-Host "     Agent 发布文件。**会重新收敛整站配置**：重写 master.yaml、按需要申请"
+    Write-Host "     证书、初始化管理员。适合首次安装，或配置被改坏了要拉回正轨。"
+    Write-Host ""
+    Write-Host "  2) 卸载 Master"
+    Write-Host "     停任务 -> 删计划任务、二进制、配置、数据。默认**连数据一起删**。"
+    Write-Host ""
+    Write-Host "  3) 只更新 Agent 发布文件"
+    Write-Host "     去 GitHub 查最新 Release，把它的 Agent 发布文件拉进 data_dir/dist/。"
+    Write-Host "     不动 Master 的二进制、配置与自启（不重启、也不重问任何配置）。"
+    Write-Host ""
+    Write-Host "  4) 只升级 Master 本体"
+    Write-Host "     只换二进制并重启任务。**不重写 master.yaml、不申请证书、不碰管理员"
+    Write-Host "     账号、也不重拉 Agent 发布文件**。适合「网站已经跑得好好的，只想把"
+    Write-Host "     Master 升到新版本」。启动失败会自动换回旧二进制。"
+    Write-Host ""
+    Write-Host "  5) 重置管理员密码"
+    Write-Host "     只改一个管理员的登录口令（用户名默认 ops，可用 -AdminUser 指定），"
+    Write-Host "     其它什么都不动。忘了后台密码时用它，不必卸载重装。"
+    Write-Host ""
+}
+
+function Read-ModeAnswer {
+    # 读不到（标准输入被重定向 / -Yes）时取 1：与 shell 侧一致，默认是"安装"。
+    Show-ModeMenu
+    $a = ""
+    try { $a = Read-Host "请输入 1、2、3、4 或 5 [1]" } catch { $a = "" }
+    if (-not $a) { $a = "1" }
+    switch -Regex ($a.Trim()) {
+        "^2$|^uninstall$|^卸载$" { return "2" }
+        "^3$|^release$|^更新$|^发布文件$" { return "3" }
+        "^4$|^upgrade$|^升级本体$|^只升级本体$" { return "4" }
+        "^5$|^password$|^重置密码$|^改密码$" { return "5" }
+        default { return "1" }
+    }
+}
+
+if ($AskMode) {
+    # 答案走 stdout（Write-Output），菜单走控制台。**只输出那一个数字**。
+    Write-Output (Read-ModeAnswer)
+    exit 0
+}
+
+# ---------------------------------------------------------------------------
+# 0.1c) 四个「只做一件事」的模式互斥
+# ---------------------------------------------------------------------------
+#
+# 判据写成"数一数有几个"，而不是"两两组合列举"：多一个模式就要多 N 对组合，
+# 写全很啰嗦且漏一对没人发现。同时给就是自相矛盾的要求，直接拒绝——而不是让其中
+# 一个悄悄赢：悄悄赢的那种，用户以为做了 A、实际做了 B，而且两条路都不报错。
+$oneShot = @()
+if ($Uninstall) { $oneShot += "-Uninstall" }
+if ($UpgradeOnly) { $oneShot += "-UpgradeOnly" }
+if ($ResetPassword) { $oneShot += "-ResetPassword" }
+if ($oneShot.Count -gt 1) {
+    Write-Err2 "这几项都只做一件事，不能同时使用：$($oneShot -join " ")"
+    Write-Host "  「卸载」「只升级本体」「重置密码」一次只能选一个。" -ForegroundColor Red
+    exit 2
+}
+
+# ---------------------------------------------------------------------------
+# 0.1d) 管理员权限检查
+# ---------------------------------------------------------------------------
+$id = [Security.Principal.WindowsIdentity]::GetCurrent()
+$pr = New-Object Security.Principal.WindowsPrincipal($id)
+if (-not $DryRun -and -not $pr.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Write-Err2 "请用「以管理员身份运行」的 PowerShell 执行。"
+    exit 1
+}
 
 # Read-Answer：读一行，空答案取默认值。不问时直接把默认值交回去——
 # "问"与"不问"对后面的逻辑是同一件事。
@@ -223,7 +315,7 @@ if ($Uninstall) {
         if (-not $P) { return $false }
         $t = $P.TrimEnd("\", "/")
         if (-not $t) { return $false }
-        # `C:\ProgramData\probe-master` 命中（盘根 + 一级 + 分隔符）；
+        # `C:\ProgramData\xb-probe-master` 命中（盘根 + 一级 + 分隔符）；
         # `C:` 与 `C:\probe` 都不命中。
         if ($t -notmatch "^[A-Za-z]:[\\/][^\\/]+[\\/]") { return $false }
         return ($t -like "*probe*")
@@ -269,11 +361,11 @@ if ($Uninstall) {
         }
     }
 
-    Write-Step "卸载 Server Probe Master"
+    Write-Step "卸载 XB-Probe Master"
     if ($DryRun) { Write-Host "    （dry-run：只列出将要做的事，不删除任何东西）" }
 
     Write-Step "1/4 注销并停止计划任务"
-    $taskName = "probe-master"
+    $taskName = "xb-probe-master"
     $existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     if (-not $existing) {
         Write-Host "    计划任务 $taskName 不存在"
@@ -309,6 +401,213 @@ if ($Uninstall) {
         Write-Host "==> 卸载完成。" -ForegroundColor Green
         Write-Host "    自启是计划任务、不是 Windows 服务，所以没有需要额外清理的服务登记项。"
     }
+    exit 0
+}
+
+# ---------------------------------------------------------------------------
+# 0.3) 只升级 Master 本体 -UpgradeOnly
+# ---------------------------------------------------------------------------
+#
+# 用户原话：「如果 master 更新，但是我只想更新本体，如果我选择 1) 安装 / 升级 Master，
+# 那么他会全部走一遍流程，包括站点设置、证书申请、管理员账号设置等全部流程，但是
+# 这些我不想做，我仅仅只想升级 master 本体」。
+#
+# 所以本块只做一件事：把二进制换掉、把计划任务重启一次。**一个字节的配置都不写**。
+# 位置在 TLS 问答之前，而且办完就 exit——上面那些"站点/证书/管理员"的问答因此
+# 一次都不会出现。
+function Invoke-UpgradeRollback {
+    param([string]$Why)
+    Write-Err2 "升级失败：$Why"
+    if ($script:UpgradeBackup -and (Test-Path $script:UpgradeBackup)) {
+        try {
+            Copy-Item -LiteralPath $script:UpgradeBackup -Destination $target -Force
+            Stop-ScheduledTask -TaskName "xb-probe-master" -ErrorAction SilentlyContinue
+            Start-ScheduledTask -TaskName "xb-probe-master" -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 1
+            $st = (Get-ScheduledTask -TaskName "xb-probe-master" -ErrorAction SilentlyContinue).State
+            if ($st -eq "Running") {
+                Write-Host "    已还原旧二进制并重启任务（状态：$st）。" -ForegroundColor Yellow
+            } else {
+                Write-Host "    已还原旧二进制，但任务仍未起来——请手工查看：Get-ScheduledTask -TaskName xb-probe-master" -ForegroundColor Red
+            }
+        } catch {
+            Write-Host "    还原失败：$($_.Exception.Message)" -ForegroundColor Red
+        }
+        Write-Host "    备份仍留在 $script:UpgradeBackup（确认无误后可自行删除）。" -ForegroundColor Yellow
+    } else {
+        Write-Host "    没有可用的备份（升级前就不存在 $target），未做还原。" -ForegroundColor Yellow
+    }
+    exit 1
+}
+
+if ($UpgradeOnly) {
+    Write-Step "只升级 Master 本体"
+
+    if (-not $Bin) {
+        Write-Err2 "只升级本体需要指定新二进制：-Bin <新版的 xb-probe-master.exe>。"
+        Write-Host "  · 走一键安装脚本的话，install-master.ps1 -UpgradeOnly 会把新二进制带过来；" -ForegroundColor Red
+        Write-Host "  · 手工执行时就是上面那条命令。" -ForegroundColor Red
+        exit 2
+    }
+    if (-not (Test-Path -LiteralPath $Bin)) {
+        Write-Err2 "-Bin 指向的文件不存在：$Bin"
+        exit 2
+    }
+    $srcFull = (Resolve-Path -LiteralPath $Bin).Path
+    $dstFull = $null
+    if (Test-Path -LiteralPath $target) { $dstFull = (Resolve-Path -LiteralPath $target).Path }
+    if ($dstFull -and $srcFull -eq $dstFull) {
+        Write-Host "    源与目标相同（$target）：没有可升级的内容，什么都没做。" -ForegroundColor Yellow
+        exit 0
+    }
+    # 三件事全部在**停任务之前**做完。这是本模式唯一能"在动系统之前失败"的机会：
+    # 等停了任务才发现二进制跑不起来，就白断了一次服务。
+    $newVer = $null
+    try { $newVer = (& $Bin version) 2>&1 | Out-String } catch { $newVer = $null }
+    if (-not $newVer) {
+        Write-Err2 "$Bin 跑不起来（架构不对？文件没传完？）。"
+        # 不用 PS7 的三元运算符（`? :`）：本文件要能在 Windows PowerShell 5.1 上跑。
+        $bits = "32"
+        if ([Environment]::Is64BitOperatingSystem) { $bits = "64" }
+        Write-Host "      换成 Windows $bits 位的那份产物再试。" -ForegroundColor Red
+        exit 2
+    }
+    Write-Host "    新二进制：$Bin"
+    Write-Host "    版本：$($newVer.Trim())"
+    Write-Host "    不会改动：$cfg、证书、管理员账号、$Data\dist\"
+
+    if ($DryRun) {
+        Write-Host "    [dry-run] 停任务 -> 备份 $target -> 拷入 $Bin -> 启动任务 -> 验活"
+        Write-Host "==> dry-run：未改动任何东西。" -ForegroundColor Cyan
+        exit 0
+    }
+
+    $script:UpgradeBackup = "$target.bak"
+    if (Test-Path -LiteralPath $target) {
+        try {
+            Copy-Item -LiteralPath $target -Destination $script:UpgradeBackup -Force -ErrorAction Stop
+        } catch {
+            Write-Err2 "备份现有二进制到 $script:UpgradeBackup 失败，已中止（不升级没有退路的二进制）。"
+            exit 1
+        }
+        Write-Host "    已备份旧二进制到 $script:UpgradeBackup"
+    }
+
+    $taskName = "xb-probe-master"
+    $hasTask = [bool](Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)
+    if ($hasTask) { Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue }
+
+    try {
+        Copy-Item -LiteralPath $Bin -Destination $target -Force -ErrorAction Stop
+    } catch {
+        Invoke-UpgradeRollback "写入 $target 失败：$($_.Exception.Message)"
+    }
+    Write-Host "    已写入 $target"
+
+    if (-not $hasTask) {
+        Write-Warn2 "本机没有 $taskName 计划任务（没装过？或用了 -NoStartupTask），不会替你重启。"
+        Write-Host "      新二进制已在位，下次启动就是新版本。"
+        Write-Host "==> 升级完成" -ForegroundColor Green
+        exit 0
+    }
+    try {
+        Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
+    } catch {
+        Invoke-UpgradeRollback "启动计划任务失败：$($_.Exception.Message)"
+    }
+    # Start-ScheduledTask 一返回就认为"成功"，而进程可能**立刻**因为别的原因退出
+    # （端口被占、配置里的键不认识）。多等一秒再确认一次，把"根本没起来"抓在
+    # 回滚点上——判据要挑"真的可用"，不挑"命令没报错"。
+    Start-Sleep -Seconds 1
+    $st = (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue).State
+    if ($st -ne "Running") {
+        Invoke-UpgradeRollback "新二进制启动后没有跑起来（状态：$st；端口被占或配置不匹配都会这样）"
+    }
+
+    Write-Host "==> 升级完成" -ForegroundColor Green
+    Write-Host "    运行中的版本：$($newVer.Trim())"
+    Write-Host "    任务状态：$st"
+    Write-Host "    未改动：$cfg、证书、管理员账号、$Data\dist\"
+    Write-Host "    旧二进制留在 $script:UpgradeBackup（确认无误后可删）。"
+    exit 0
+}
+
+# ---------------------------------------------------------------------------
+# 0.4) 重置管理员密码 -ResetPassword
+# ---------------------------------------------------------------------------
+#
+# 用户原话：「如果我 web 界面忘记密码，就必须利用脚本卸载重装，所以 master 或者
+# 一键部署脚本具备重新设置密码选项」。卸载重装会连数据一起清掉，为了改一个口令
+# 付这个代价毫无道理。
+#
+# 实现只有一步：调 `xb-probe-master reset-admin`。它有 --i-know-what-i-am-doing
+# 这道闸，这里**主动传**它——那道闸挡的是"随手敲一条命令误改生产口令"，而本模式
+# 是用户明确选了「重置管理员密码」，属于它的正当用途。反过来说，这也意味着本模式
+# 不该出现在任何"无人值守的默认路径"里。
+if ($ResetPassword) {
+    Write-Step "重置管理员密码"
+    $rpUser = $AdminUser
+    if (-not $rpUser) { $rpUser = "ops" }
+
+    if ($DryRun) {
+        Write-Host "    [dry-run] 将会执行：$target reset-admin -config $cfg -username $rpUser"
+        Write-Host "    [dry-run] 口令在正式执行时交互输入（或由 -AdminPassword / 环境变量 PROBE_ADMIN_PASSWORD 提供）。"
+        Write-Host "==> dry-run：未改动任何东西。" -ForegroundColor Cyan
+        exit 0
+    }
+    if (-not (Test-Path -LiteralPath $target)) {
+        Write-Err2 "找不到 $target —— 这台机器上还没有装 Master？首次部署请走安装流程。"
+        exit 1
+    }
+    if (-not (Test-Path -LiteralPath $cfg)) {
+        Write-Err2 "读不到 $cfg —— 拿不到配置，不敢继续。"
+        exit 1
+    }
+
+    # 口令来源优先级与安装流程一致：参数 > 环境变量 > 交互。
+    # 交互时问两遍并要求一致——重置口令没有"再输一次确认"的话，打错一个字符就变成
+    # "重置成功但登不进去"，而那看起来完全像 bug。
+    if (-not $AdminPassword) {
+        $sec1 = Read-Host "管理员 $rpUser 的新口令（不回显）" -AsSecureString
+        $sec2 = Read-Host "再输一遍确认" -AsSecureString
+        $p1 = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+            [Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec1))
+        $p2 = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+            [Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec2))
+        if ($p1 -ne $p2) {
+            Write-Err2 "两次输入的口令不一致，未做任何改动。"
+            exit 2
+        }
+        $AdminPassword = $p1
+    }
+    if (-not $AdminPassword) {
+        Write-Err2 "口令不能为空。"
+        exit 2
+    }
+
+    # 与安装流程同一个道理：**把输出收进来再自己判退出码**。直接把外部命令的输出
+    # 往控制台一扔、只看有没有抛异常的话，很多失败会被当成"完成"。
+    $rpOut = ""
+    $rpRc = 1
+    try {
+        $rpOut = (& $target reset-admin -config $cfg -username $rpUser `
+                -password $AdminPassword --i-know-what-i-am-doing) 2>&1 | Out-String
+        $rpRc = $LASTEXITCODE
+        if ($null -eq $rpRc) { $rpRc = 0 }
+    } catch {
+        $rpOut = "$($_.Exception.Message)"
+        $rpRc = 1
+    }
+    Write-Host ($rpOut -replace "(?m)^", "    ")
+    if ($rpRc -ne 0) {
+        Write-Err2 "重置口令失败（上面是 xb-probe-master 的输出）。"
+        Write-Host "      用户名「$rpUser」不存在时也会这样——可用 -AdminUser 指定。" -ForegroundColor Red
+        exit 1
+    }
+    # 口令不进任何后续输出/历史。
+    Remove-Variable AdminPassword -ErrorAction SilentlyContinue
+    Write-Host "==> 完成：管理员 $rpUser 的口令已更新，其它任何东西都没动。" -ForegroundColor Green
+    Write-Host "    用新口令登录后，建议在「系统设置 -> 安全」里核对 TOTP 状态。"
     exit 0
 }
 
@@ -548,7 +847,7 @@ if ($Ask) {
     Write-Host "  管理员：$AdminUser（口令随后输入）"
     Write-Host "  配置目录：$Dir"
     Write-Host "  数据目录：$Data"
-    Write-Host "  自启：$(if ($NoStartupTask) { '不注册（-NoStartupTask）' } else { '计划任务 probe-master（开机自启）' })"
+    Write-Host "  自启：$(if ($NoStartupTask) { '不注册（-NoStartupTask）' } else { '计划任务 xb-probe-master（开机自启）' })"
     Write-Host ""
     if (-not (Confirm-Yes "继续？")) {
         Write-Host "已取消，未改动系统。" -ForegroundColor Yellow
@@ -702,7 +1001,7 @@ if ($NoStartupTask) {
     Write-Step "5/6 跳过自启注册"
 } else {
     Write-Step "5/6 注册开机自启（计划任务）"
-    $taskName = "probe-master"
+    $taskName = "xb-probe-master"
     $taskArg = "-config ""$cfg"""
     $action = New-ScheduledTaskAction -Execute $target -Argument $taskArg -WorkingDirectory $Dir
     $trigger = New-ScheduledTaskTrigger -AtStartup
@@ -784,7 +1083,7 @@ if ($TlsMode -eq "none") {
         Write-Host "      `"$target`" tls status -config `"$cfg`" -wait 120"
     } elseif ($certRc -ne 0) {
         Write-Host "    （证书申请失败。上面列出的排查项每条都能直接执行；改完配置后）"
-        Write-Host "      Restart-ScheduledTask -TaskName probe-master 会立即重试。"
+        Write-Host "      Restart-ScheduledTask -TaskName xb-probe-master 会立即重试。"
     }
 }
 
@@ -821,7 +1120,7 @@ Write-Host "       · Master 公网地址 install.master_url —— 留空则回
 Write-Host "       · 二进制下载源 install.dist_base  —— 留空则由本进程提供 /dist/"
 Write-Host "       · 安装入口模式 install.mode       —— 默认 on_demand"
 Write-Host "  3) 生成注册码，用它装第一个 Agent（见 README 的「添加被监控节点」）"
-Write-Host "  4) probe-master dist pull --version <版本> --from <发布源> --pubkey <公钥>   # Agent 自升级用"
+Write-Host "  4) xb-probe-master dist pull --version <版本> --from <发布源> --pubkey <公钥>   # Agent 自升级用"
 Write-Host "  5) 公开看板与后台是否分成两个域名 —— 在「设置 → 站点形态」里选："
 Write-Host "       跟随配置文件（默认）/ 同站（一个域名）/ 分离（两个域名，需同时填两份域名清单）"
 Write-Host "       运行时设置，改完即时生效、不用重启；分离靠 Host 而不是监听地址"

@@ -12,7 +12,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
-	"github.com/yourorg/probe/internal/model"
+	"github.com/koyoca/xb-probe/internal/model"
 )
 
 // Windows 采集实现（12.5）。

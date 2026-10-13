@@ -5,9 +5,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yourorg/probe/internal/auth"
-	"github.com/yourorg/probe/internal/model"
-	"github.com/yourorg/probe/internal/store"
+	"github.com/koyoca/xb-probe/internal/auth"
+	"github.com/koyoca/xb-probe/internal/model"
+	"github.com/koyoca/xb-probe/internal/store"
 )
 
 // TOTP 启用流程与恢复码（6.2）。

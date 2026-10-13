@@ -5,7 +5,7 @@
 // 从而把新总和全额计入，造成数 GB 级的虚高。
 package traffic
 
-import "github.com/yourorg/probe/internal/model"
+import "github.com/koyoca/xb-probe/internal/model"
 
 // counterWrap32 是 32 位计数器的模（4 GiB）。
 const counterWrap32 int64 = 1 << 32

@@ -38,8 +38,8 @@ func TestUnsupportedManagerFailsLoudly(t *testing.T) {
 	if m.Name() != "plan9" {
 		t.Fatalf("Name 未透传：%q", m.Name())
 	}
-	ins := m.Install("/usr/local/bin/probe-agent", "/etc/probe-agent/agent.yaml", "probe")
-	uni := m.Uninstall("/usr/local/bin/probe-agent", "/etc/probe-agent/agent.yaml")
+	ins := m.Install("/usr/local/bin/xb-probe-agent", "/etc/xb-probe-agent/agent.yaml", "probe")
+	uni := m.Uninstall("/usr/local/bin/xb-probe-agent", "/etc/xb-probe-agent/agent.yaml")
 
 	for what, err := range map[string]error{"Install": ins, "Uninstall": uni} {
 		if err == nil {
@@ -75,7 +75,7 @@ func TestExists(t *testing.T) {
 
 func TestEnsureDirsCreatesParents(t *testing.T) {
 	base := t.TempDir()
-	cfgPath := filepath.Join(base, "probe-agent", "nested", "agent.yaml")
+	cfgPath := filepath.Join(base, "xb-probe-agent", "nested", "agent.yaml")
 
 	if err := EnsureDirs(cfgPath); err != nil {
 		t.Fatalf("创建配置目录失败：%v", err)

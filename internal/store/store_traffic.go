@@ -5,7 +5,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/yourorg/probe/internal/traffic"
+	"github.com/koyoca/xb-probe/internal/traffic"
 )
 
 // 流量与计费持久层（4.3 / 6.4 / 13.4.1）。

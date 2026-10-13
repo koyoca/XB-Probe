@@ -9,10 +9,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yourorg/probe/internal/model"
-	"github.com/yourorg/probe/internal/state"
-	"github.com/yourorg/probe/internal/store"
-	"github.com/yourorg/probe/internal/theme"
+	"github.com/koyoca/xb-probe/internal/model"
+	"github.com/koyoca/xb-probe/internal/state"
+	"github.com/koyoca/xb-probe/internal/store"
+	"github.com/koyoca/xb-probe/internal/theme"
 )
 
 // 公开 API（文档 7.3 / 5.1）。
@@ -22,7 +22,7 @@ import (
 
 // handleSite 对应 GET /api/public/v1/site。
 func (h *Handler) handleSite(w http.ResponseWriter, r *http.Request) {
-	title := h.Repo.GetSettingDefault("site.title", "Server Probe")
+	title := h.Repo.GetSettingDefault("site.title", "XB-Probe")
 	active := h.Themes.Active()
 	if v := h.Repo.GetSettingDefault("theme.active", ""); v != "" {
 		active = v
@@ -472,12 +472,28 @@ func unitOf(metric string) string {
 	}
 }
 
+// pickRing 从内存实时层的一个采样点里取出某个指标。
+//
+// 单位必须与 unitOf 声明的**逐字一致**：前端就是拿那个单位去格式化的
+// （bytes → fmtBytes，pct → 百分号）。这里曾经把 `mem` 映射成 pct_x100 的
+// MemPct，而 unitOf("mem") 说 bytes —— 30 分钟视图的内存坐标轴因此把
+// "4500" 当成 4500 字节显示。
+//
+// `disk_used` 原本没有分支、落进 default 返回 0：那一档的磁盘曲线**恒为 0 B**，
+// 而 24 小时以上读时序表、一切正常 —— 典型的"只坏一个时间范围"。
+//
+// 没有数据时返回 0 而不是 panic：环形缓冲是固定容量的，机器刚上线时点很少，
+// 前端的"没有数据"判定看的是**点数**，不是值。
 func pickRing(p state.RingPoint, metric string) int64 {
 	switch metric {
 	case "cpu":
 		return int64(p.CPU)
-	case "mem":
+	case "mem", "mem_used":
+		return p.MemUsed
+	case "mem_pct":
 		return int64(p.MemPct)
+	case "disk_used":
+		return p.DiskUsed
 	case "net_rx":
 		return p.RxBps
 	case "net_tx":

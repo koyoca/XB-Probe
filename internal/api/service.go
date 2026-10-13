@@ -13,14 +13,14 @@ import (
 	"strconv"
 	"sync/atomic"
 
-	"github.com/yourorg/probe/internal/alert"
-	"github.com/yourorg/probe/internal/auth"
-	"github.com/yourorg/probe/internal/model"
-	"github.com/yourorg/probe/internal/pipeline"
-	"github.com/yourorg/probe/internal/state"
-	"github.com/yourorg/probe/internal/store"
-	"github.com/yourorg/probe/internal/theme"
-	"github.com/yourorg/probe/internal/traffic"
+	"github.com/koyoca/xb-probe/internal/alert"
+	"github.com/koyoca/xb-probe/internal/auth"
+	"github.com/koyoca/xb-probe/internal/model"
+	"github.com/koyoca/xb-probe/internal/pipeline"
+	"github.com/koyoca/xb-probe/internal/state"
+	"github.com/koyoca/xb-probe/internal/store"
+	"github.com/koyoca/xb-probe/internal/theme"
+	"github.com/koyoca/xb-probe/internal/traffic"
 )
 
 // Deps 是接口层依赖的聚合。
@@ -61,7 +61,7 @@ type Deps struct {
 	ChallengeHandler http.Handler
 
 	// Heartbeat 暴露外部心跳（A5）的运行态供后台展示。
-	// 由 cmd/probe-master 的调度器实现并注入；测试或未接线的场景允许为 nil。
+	// 由 cmd/xb-probe-master 的调度器实现并注入；测试或未接线的场景允许为 nil。
 	Heartbeat model.HeartbeatReader
 }
 

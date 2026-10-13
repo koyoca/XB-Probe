@@ -103,13 +103,13 @@ func TestReleaseArtifactNamingIsConsistentEverywhere(t *testing.T) {
 			"ArtifactName 算出的名字与实际编出来的文件对不上，Agent 自升级会 404",
 			agentPrefix, keysOf(prefixes))
 	}
-	const masterPrefix = "probe-master"
+	const masterPrefix = "xb-probe-master"
 	if !prefixes[masterPrefix] {
 		t.Errorf("Makefile 里没有 Master 产物（抽到的是 %v）——免编译部署取不到二进制", keysOf(prefixes))
 	}
 
 	// --- 2) 免编译脚本期望的名字 ↔ Makefile ---
-	// 脚本里写的是 probe-master_linux_${ARCH}；把它按主机架构展开后，
+	// 脚本里写的是 xb-probe-master_linux_${ARCH}；把它按主机架构展开后，
 	// 必须恰好是 Makefile 会编出来的那些文件名。
 	reInstName := regexp.MustCompile(`BIN_NAME="([a-z-]+)_linux_\$\{ARCH\}"`)
 	im := reInstName.FindStringSubmatch(inst)

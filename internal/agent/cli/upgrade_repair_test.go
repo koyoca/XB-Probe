@@ -7,16 +7,16 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/yourorg/probe/internal/agent/service"
+	"github.com/koyoca/xb-probe/internal/agent/service"
 )
 
 // ---------------------------------------------------------------------------
 // "升级顺手把服务定义与配置属主修好"这一条的护栏
 //
 // 真机事故：节点是 v0.1.1 装的（那一版的 unit 里没有 ReadWritePaths=<配置目录>，
-// 安装时也没做属主交接），`probe-agent upgrade` 升到 v0.1.2 并重启后
+// 安装时也没做属主交接），`xb-probe-agent upgrade` 升到 v0.1.2 并重启后
 //
-//	错误： 读取配置失败: open /etc/probe-agent/agent.yaml: permission denied
+//	错误： 读取配置失败: open /etc/xb-probe-agent/agent.yaml: permission denied
 //
 // ——只换二进制修不了这两样。所以升级必须在**不重启**的前提下重写服务定义
 // 并把配置交给服务用户。
@@ -49,20 +49,20 @@ func (f *fakeManager) Uninstall(binPath, cfgPath string) error { return nil }
 // 传错任何一个，得到的都是一份"看起来修好了、服务还是起不来"的定义。
 func TestRepairServiceDefinitionPassesTheInstalledPaths(t *testing.T) {
 	f := &fakeManager{}
-	if err := repairServiceDefinition(f, "/etc/probe-agent/agent.yaml", "/usr/local/bin/probe-agent"); err != nil {
+	if err := repairServiceDefinition(f, "/etc/xb-probe-agent/agent.yaml", "/usr/local/bin/xb-probe-agent"); err != nil {
 		t.Fatalf("repairServiceDefinition 返回错误：%v", err)
 	}
 	if len(f.calls) != 1 {
 		t.Fatalf("RewriteDefinition 调用了 %d 次（应为 1）：要么没修，要么修了不只一次", len(f.calls))
 	}
-	want := "/usr/local/bin/probe-agent|/etc/probe-agent/agent.yaml|" + service.DefaultUser
+	want := "/usr/local/bin/xb-probe-agent|/etc/xb-probe-agent/agent.yaml|" + service.DefaultUser
 	if f.calls[0] != want {
 		t.Errorf("RewriteDefinition 收到的参数不对：\n  实际 %s\n  期望 %s", f.calls[0], want)
 	}
 
 	// 失败必须能传出去（调用方要靠它决定提示里写"已修复"还是"请手工执行"）。
 	f2 := &fakeManager{err: errors.New("模拟失败")}
-	if err := repairServiceDefinition(f2, "/etc/probe-agent/agent.yaml", "/usr/local/bin/probe-agent"); err == nil {
+	if err := repairServiceDefinition(f2, "/etc/xb-probe-agent/agent.yaml", "/usr/local/bin/xb-probe-agent"); err == nil {
 		t.Error("RewriteDefinition 报错时 repairServiceDefinition 却返回 nil：失败会被说成修好了")
 	}
 }
@@ -73,8 +73,8 @@ func TestRepairServiceDefinitionPassesTheInstalledPaths(t *testing.T) {
 // 给出能照着做的补救命令**：跳过而只字不提，用户看到的就是"升级成功了、服务还是起不来"。
 func TestRepairAfterUpgradeSkipsAreExplicitAndActionable(t *testing.T) {
 	const (
-		cfg = "/etc/probe-agent/agent.yaml"
-		bin = "/usr/local/bin/probe-agent"
+		cfg = "/etc/xb-probe-agent/agent.yaml"
+		bin = "/usr/local/bin/xb-probe-agent"
 	)
 	for _, c := range []struct {
 		name         string
@@ -99,7 +99,7 @@ func TestRepairAfterUpgradeSkipsAreExplicitAndActionable(t *testing.T) {
 		if !strings.Contains(note, "install --service-only") {
 			t.Errorf("%s：跳过了却没给补救命令。\n"+
 				"  用户看到的是「升级成功」而服务起不来，而修它的命令就一个："+
-				"sudo probe-agent install --service-only", c.name)
+				"sudo xb-probe-agent install --service-only", c.name)
 		}
 	}
 }
@@ -107,8 +107,8 @@ func TestRepairAfterUpgradeSkipsAreExplicitAndActionable(t *testing.T) {
 // TestRepairAfterUpgradeRunsAndReportsFailure 正常路径：既动手、又在失败时给出补救。
 func TestRepairAfterUpgradeRunsAndReportsFailure(t *testing.T) {
 	const (
-		cfg = "/etc/probe-agent/agent.yaml"
-		bin = "/usr/local/bin/probe-agent"
+		cfg = "/etc/xb-probe-agent/agent.yaml"
+		bin = "/usr/local/bin/xb-probe-agent"
 	)
 	ok := &fakeManager{}
 	if note := repairAfterUpgrade(ok, cfg, bin, true, false, false); len(ok.calls) != 1 {
@@ -139,8 +139,8 @@ func TestRepairAfterUpgradeRunsAndReportsFailure(t *testing.T) {
 // 这里还顺带验 `errors.Is` 能穿过包装：各平台返回的是包了一层的错误
 // （Windows 那份会带上 SCM 的原始报错），直接比对 `== ErrNotInstalled` 是认不出来的。
 func TestRepairAfterUpgradeTreatsNotInstalledAsNormal(t *testing.T) {
-	f := &fakeManager{err: fmt.Errorf("%w（SCM 里没有 probe-agent）：模拟", service.ErrNotInstalled)}
-	note := repairAfterUpgrade(f, "/etc/probe-agent/agent.yaml", "/usr/local/bin/probe-agent", true, false, false)
+	f := &fakeManager{err: fmt.Errorf("%w（SCM 里没有 xb-probe-agent）：模拟", service.ErrNotInstalled)}
+	note := repairAfterUpgrade(f, "/etc/xb-probe-agent/agent.yaml", "/usr/local/bin/xb-probe-agent", true, false, false)
 
 	if strings.Contains(note, "警告") {
 		t.Errorf("「没注册成服务」被报成了警告：%q\n"+
@@ -155,7 +155,7 @@ func TestRepairAfterUpgradeTreatsNotInstalledAsNormal(t *testing.T) {
 //
 // 修复必须发生在 updater.Upgrade 之后、"已是最新"的早退**之前**：
 // 老节点最常见的状态就是"二进制早升级过了，但 unit 与配置属主还是更早那次安装的"——
-// 那台机器跑 `probe-agent upgrade` 只会得到"已是最新，无需升级"。
+// 那台机器跑 `xb-probe-agent upgrade` 只会得到"已是最新，无需升级"。
 // 若把修复放在"真的换了二进制"之后，最需要修的那台恰恰永远修不到，
 // 而且命令还会告诉它"一切正常"。
 func TestUpgradeRepairsEvenWhenAlreadyLatest(t *testing.T) {

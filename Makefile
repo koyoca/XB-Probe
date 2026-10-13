@@ -1,8 +1,8 @@
-# Server Probe —— 构建与发布（对应文档 12.6）
+# XB-Probe —— 构建与发布（对应文档 12.6）
 #
 # 所有产物均为 CGO_ENABLED=0 静态编译，不使用 UPX（避免杀软误报）。
 
-MODULE      := github.com/yourorg/probe
+MODULE      := github.com/koyoca/xb-probe
 VERSION     ?= 1.0.0
 LDFLAGS     := -s -w -X main.version=$(VERSION)
 BUILD_FLAGS := -trimpath
@@ -64,13 +64,13 @@ vulncheck:
 
 # Master 单二进制：内嵌默认主题与迁移脚本（12.1 / 11）
 master:
-	CGO_ENABLED=0 go build $(BUILD_FLAGS) -ldflags "$(LDFLAGS)" -o bin/probe-master ./cmd/probe-master
+	CGO_ENABLED=0 go build $(BUILD_FLAGS) -ldflags "$(LDFLAGS)" -o bin/xb-probe-master ./cmd/xb-probe-master
 
 # 本机 Agent
 agent:
-	CGO_ENABLED=0 go build $(BUILD_FLAGS) -ldflags "$(LDFLAGS)" -o bin/probe-agent ./cmd/probe-agent
+	CGO_ENABLED=0 go build $(BUILD_FLAGS) -ldflags "$(LDFLAGS)" -o bin/xb-probe-agent ./cmd/xb-probe-agent
 
-# 交叉编译发布产物：probe-agent_<os>_<标签>[.exe]
+# 交叉编译发布产物：xb-probe-agent_<os>_<标签>[.exe]
 # 同时把发布标签写进二进制：armv7/armv6 在 Go 里都是 GOARCH=arm（靠 GOARM 区分），
 # 运行时拿不到 GOARM，自升级只能靠注入的标签精确匹配产物名（见 internal/dist.CurrentTag）。
 dist:
@@ -87,10 +87,10 @@ dist:
 		echo ">> $$os/$$tag (GOARCH=$$goarch$${goarm:+ GOARM=}$$goarm)"; \
 		if [ -n "$$goarm" ]; then \
 			CGO_ENABLED=0 GOOS=$$os GOARCH=$$goarch GOARM=$$goarm go build $(BUILD_FLAGS) \
-				-ldflags "$${ldflags}" -o "$(DIST)/probe-agent_$${os}_$${tag}$${ext}" ./cmd/probe-agent || exit 1; \
+				-ldflags "$${ldflags}" -o "$(DIST)/xb-probe-agent_$${os}_$${tag}$${ext}" ./cmd/xb-probe-agent || exit 1; \
 		else \
 			CGO_ENABLED=0 GOOS=$$os GOARCH=$$goarch go build $(BUILD_FLAGS) \
-				-ldflags "$${ldflags}" -o "$(DIST)/probe-agent_$${os}_$${tag}$${ext}" ./cmd/probe-agent || exit 1; \
+				-ldflags "$${ldflags}" -o "$(DIST)/xb-probe-agent_$${os}_$${tag}$${ext}" ./cmd/xb-probe-agent || exit 1; \
 		fi; \
 	done
 	@$(MAKE) checksums
@@ -101,27 +101,27 @@ master-dist:
 	@mkdir -p $(DIST)
 	@for p in $(MASTER_PLATFORMS); do \
 		os=$${p%/*}; tag=$${p#*/}; \
-		echo ">> probe-master $$os/$$tag"; \
+		echo ">> xb-probe-master $$os/$$tag"; \
 		CGO_ENABLED=0 GOOS=$$os GOARCH=$$tag go build $(BUILD_FLAGS) \
 			-ldflags "$(LDFLAGS) -X $(MODULE)/internal/dist.PlatformTag=$${os}_$${tag}" \
-			-o "$(DIST)/probe-master_$${os}_$${tag}" ./cmd/probe-master || exit 1; \
+			-o "$(DIST)/xb-probe-master_$${os}_$${tag}" ./cmd/xb-probe-master || exit 1; \
 	done
 	@$(MAKE) checksums-master
 
 # SHA256SUMS（12.6 / 12.8）：Agent 侧的校验和文件。
 #
-# 只对 probe-agent_* 生成，**绝不能把 probe-master_* 并进来**：
+# 只对 xb-probe-agent_* 生成，**绝不能把 xb-probe-master_* 并进来**：
 # 这份文件是 Agent 安装脚本 `sha256sum -c` 的输入，里面多两行 Master 产物，
 # Agent 那台机器上当然没有这些文件，校验必然 FAILED——而失败原因看起来
 # 完全像是"下载被篡改"。Master 单独一份（见 checksums-master）。
 checksums:
 	@test -n "$(SHA256SUM)" || { echo "找不到 sha256sum / shasum，无法生成校验和"; exit 1; }
-	@cd $(DIST) && $(SHA256SUM) probe-agent_* > SHA256SUMS && echo "==> $(DIST)/SHA256SUMS"
+	@cd $(DIST) && $(SHA256SUM) xb-probe-agent_* > SHA256SUMS && echo "==> $(DIST)/SHA256SUMS"
 
 # Master 的校验和：与 Agent 那份分开，理由见上面。
 checksums-master:
 	@test -n "$(SHA256SUM)" || { echo "找不到 sha256sum / shasum，无法生成校验和"; exit 1; }
-	@cd $(DIST) && $(SHA256SUM) probe-master_* > SHA256SUMS.master && echo "==> $(DIST)/SHA256SUMS.master"
+	@cd $(DIST) && $(SHA256SUM) xb-probe-master_* > SHA256SUMS.master && echo "==> $(DIST)/SHA256SUMS.master"
 
 # 一次产出全部发布产物：Agent 13 平台 + Master 2 平台 + 两份校验和。
 # GitHub Actions 的 release 流水线只调这一个目标（见 .github/workflows/release.yml）。

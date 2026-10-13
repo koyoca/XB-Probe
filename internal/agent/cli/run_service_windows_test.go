@@ -42,7 +42,7 @@ func TestOpenServiceLogWritesToConfigDir(t *testing.T) {
 	}
 
 	// 写入要真的落到文件（追加模式），否则"日志文件存在但永远是空的"。
-	const line = "probe-agent 启动\n"
+	const line = "xb-probe-agent 启动\n"
 	if _, err := f.WriteString(line); err != nil {
 		t.Fatalf("写日志失败：%v", err)
 	}
@@ -56,7 +56,7 @@ func TestOpenServiceLogWritesToConfigDir(t *testing.T) {
 }
 
 // TestRunAsServiceStaysInForegroundForPlainProcess 普通前台进程绝不能被
-// 当成系统服务：一旦被吞掉，`probe-agent run` 会静默返回、什么都不干。
+// 当成系统服务：一旦被吞掉，`xb-probe-agent run` 会静默返回、什么都不干。
 func TestRunAsServiceStaysInForegroundForPlainProcess(t *testing.T) {
 	called := false
 	entered := runAsService(filepath.Join(t.TempDir(), "agent.yaml"), false, func(_ context.Context) error {

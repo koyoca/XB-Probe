@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    Server Probe —— Windows 构建脚本（不依赖 make）。
+    XB-Probe —— Windows 构建脚本（不依赖 make）。
 
 .DESCRIPTION
     等价于 Makefile 的 master / agent / dist / checksums 目标，纯 PowerShell 实现，
@@ -60,7 +60,7 @@ $ldflags = "-s -w -X main.version=$Version"
 
 # 发布标签 → 产物名的第 2 段。armv7/armv6 在 Go 里**都是** GOARCH=arm（靠 GOARM 区分），
 # 运行时拿不到 GOARM，所以标签只能构建时写进二进制（见 internal/dist.CurrentTag）。
-# 不注入的后果是静默的：32 位 ARM 节点会去要 probe-agent_linux_arm，
+# 不注入的后果是静默的：32 位 ARM 节点会去要 xb-probe-agent_linux_arm，
 # 而发布矩阵里只有 ..._armv7/_armv6，于是自升级永远报"该平台未发布此版本"。
 function Get-PlatformTag {
     param([string] $os, [string] $arch, [string] $goarm)
@@ -98,15 +98,15 @@ if (-not $Dist) {
     New-Item -ItemType Directory -Force -Path (Join-Path $projRoot 'bin') | Out-Null
     $env:CGO_ENABLED = '0'
 
-    & go build -trimpath -ldflags $ldflags -o 'bin/probe-master.exe' ./cmd/probe-master
-    if ($LASTEXITCODE -ne 0) { Write-Err2 "probe-master 编译失败"; exit 1 }
-    Write-Ok "bin\probe-master.exe"
+    & go build -trimpath -ldflags $ldflags -o 'bin/xb-probe-master.exe' ./cmd/xb-probe-master
+    if ($LASTEXITCODE -ne 0) { Write-Err2 "xb-probe-master 编译失败"; exit 1 }
+    Write-Ok "bin\xb-probe-master.exe"
 
-    # Agent 带上本机发布标签：`probe-agent upgrade` 要靠它挑对产物名。
+    # Agent 带上本机发布标签：`xb-probe-agent upgrade` 要靠它挑对产物名。
     $hostTag = Get-PlatformTag (& go env GOOS).Trim() (& go env GOARCH).Trim() (& go env GOARM).Trim()
-    & go build -trimpath -ldflags (Get-Ldflags $hostTag) -o 'bin/probe-agent.exe' ./cmd/probe-agent
-    if ($LASTEXITCODE -ne 0) { Write-Err2 "probe-agent 编译失败"; exit 1 }
-    Write-Ok "bin\probe-agent.exe（发布标签 $hostTag）"
+    & go build -trimpath -ldflags (Get-Ldflags $hostTag) -o 'bin/xb-probe-agent.exe' ./cmd/xb-probe-agent
+    if ($LASTEXITCODE -ne 0) { Write-Err2 "xb-probe-agent 编译失败"; exit 1 }
+    Write-Ok "bin\xb-probe-agent.exe（发布标签 $hostTag）"
 
     Get-ChildItem bin | ForEach-Object { Write-Host ("    {0,-22} {1,8:N1} MB" -f $_.Name, ($_.Length / 1MB)) -ForegroundColor Gray }
     exit 0
@@ -145,14 +145,14 @@ foreach ($p in $platforms) {
     $ext = ''
     if ($os -eq 'windows') { $ext = '.exe' }
 
-    $out = Join-Path $distDir "probe-agent_${os}_${tag}${ext}"
+    $out = Join-Path $distDir "xb-probe-agent_${os}_${tag}${ext}"
     Write-Host "    -> $os/$tag" -ForegroundColor Gray
 
     $env:GOOS = $os
     $env:GOARCH = $arch
     if ($goarm -ne '0') { $env:GOARM = $goarm } else { Remove-Item Env:GOARM -ErrorAction SilentlyContinue }
 
-    & go build -trimpath -ldflags (Get-Ldflags "${os}_${tag}") -o $out ./cmd/probe-agent
+    & go build -trimpath -ldflags (Get-Ldflags "${os}_${tag}") -o $out ./cmd/xb-probe-agent
     if ($LASTEXITCODE -ne 0) {
         Write-Err2 "$os/$tag 编译失败"
         $failed += "$os/$tag"
@@ -173,7 +173,7 @@ if ($failed.Count -gt 0) {
 Write-Step "生成 SHA256SUMS"
 $sumsPath = Join-Path $distDir 'SHA256SUMS'
 $lines = @()
-Get-ChildItem -Path $distDir -Filter 'probe-agent_*' -File |
+Get-ChildItem -Path $distDir -Filter 'xb-probe-agent_*' -File |
     Sort-Object Name |
     ForEach-Object {
         $h = (Get-FileHash -Path $_.FullName -Algorithm SHA256).Hash.ToLower()

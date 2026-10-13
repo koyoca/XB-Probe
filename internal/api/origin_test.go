@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/yourorg/probe/internal/acme"
-	"github.com/yourorg/probe/internal/model"
+	"github.com/koyoca/xb-probe/internal/acme"
+	"github.com/koyoca/xb-probe/internal/model"
 )
 
 // ---------------------------------------------------------------------------

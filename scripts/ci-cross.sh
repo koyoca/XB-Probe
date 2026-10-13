@@ -54,7 +54,7 @@ if [ -z "${MODULE}" ]; then
   exit 1
 fi
 
-out="bin/ci/probe-agent_${os}_${tag}${ext}"
+out="bin/ci/xb-probe-agent_${os}_${tag}${ext}"
 mkdir -p bin/ci
 
 echo ">> ${os}/${tag}（GOARCH=${goarch}${goarm:+ GOARM=}${goarm}）→ ${out}"
@@ -65,10 +65,10 @@ echo ">> ${os}/${tag}（GOARCH=${goarch}${goarm:+ GOARM=}${goarm}）→ ${out}"
 LDFLAGS="-s -w -X ${MODULE}/internal/dist.PlatformTag=${os}_${tag}"
 if [ -n "${goarm}" ]; then
   CGO_ENABLED=0 GOOS="${os}" GOARCH="${goarch}" GOARM="${goarm}" \
-    go build -trimpath -ldflags "${LDFLAGS}" -o "${out}" ./cmd/probe-agent
+    go build -trimpath -ldflags "${LDFLAGS}" -o "${out}" ./cmd/xb-probe-agent
 else
   CGO_ENABLED=0 GOOS="${os}" GOARCH="${goarch}" \
-    go build -trimpath -ldflags "${LDFLAGS}" -o "${out}" ./cmd/probe-agent
+    go build -trimpath -ldflags "${LDFLAGS}" -o "${out}" ./cmd/xb-probe-agent
 fi
 
 # 产物存在且非空，才算这一步真的过了（早期曾出现 build 静默产出 0 字节文件）。

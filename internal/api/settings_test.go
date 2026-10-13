@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/yourorg/probe/internal/model"
+	"github.com/koyoca/xb-probe/internal/model"
 )
 
 // public.fields 的取值校验（7.3）。

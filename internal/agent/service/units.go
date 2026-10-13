@@ -9,8 +9,8 @@ import (
 //
 // 为什么把这些模板从各自的平台文件里搬出来、并做成纯函数：
 //
-//  1. **它们以前把二进制路径写死了**（openrc 的 `command="/usr/local/bin/probe-agent"`、
-//     procd 的 `command /usr/bin/probe-agent`），而 Install 明明是收 binPath 的。
+//  1. **它们以前把二进制路径写死了**（openrc 的 `command="/usr/local/bin/xb-probe-agent"`、
+//     procd 的 `command /usr/bin/xb-probe-agent`），而 Install 明明是收 binPath 的。
 //     用 `--dir /opt/probe` 装出来的服务指向一个不存在的路径，症状是"服务起了就退出"
 //     或"command not found"，与真正的原因（模板写死）隔得很远。
 //     现在三个路径（二进制、配置、用户）统一由参数带进来，没有第二份来源。
@@ -21,7 +21,7 @@ import (
 //
 // 顺带修掉一个只在 FreeBSD 上现形的老问题：freebsd 那份模板只有 3 个 %s 却传了 4 个参数，
 // fmt 会把多余参数渲染成字面量 `%!(EXTRA string=probe)` 追加在脚本末尾。那一行会被 sh
-// 当成命令执行（`EXTRA string=probe`），于是 `service probe_agent start` 的退出码来自
+// 当成命令执行（`EXTRA string=probe`），于是 `service xb_probe_agent start` 的退出码来自
 // 一次 "command not found" 而不是 run_rc_command —— 看起来像"服务起不来"。
 
 // renderSystemdUnit 渲染 systemd 单元。
@@ -37,12 +37,12 @@ import (
 // 少了这一行，服务本身能跑、上报也正常，只有远端配置的落盘会失败并被记成
 // "拉取配置失败"，极难与"权限问题"联系起来。Master 侧的 unit 同样是这个写法（ReadWritePaths=$DATA）。
 //
-// 这里**不能**写死 `/etc/probe-agent`：`--dir` 允许把配置放到别处，
+// 这里**不能**写死 `/etc/xb-probe-agent`：`--dir` 允许把配置放到别处，
 // 写死会让所有自定义目录的安装都失去写回能力。所以由 cfgPath 推导。
 func renderSystemdUnit(binPath, cfgPath, user string) string {
 	cfgDir := filepath.Dir(cfgPath)
 	return fmt.Sprintf(`[Unit]
-Description=Server Probe Agent
+Description=XB-Probe Agent
 After=network-online.target
 Wants=network-online.target
 
@@ -75,31 +75,37 @@ WantedBy=multi-user.target
 //   - 容器内（LXC/Docker）OpenRC 的依赖若不存在，`rc-service ... start` 仍可正常工作，
 //     但 `rc-update add` 写入的 runlevel 目录可能不存在——所以那一步失败只警告不致命。
 //
-// TODO（与 Alpine/LXC 真机验证一起收口）：服务以非 root 的 probe 用户运行，
-// 而 output_log 指向 /var/log/probe-agent.log —— 该文件需要事先建好并把属主交给服务用户，
-// 否则 openrc-run 打不开日志文件。真机上确认过再补，不凭猜改。
-func renderOpenRCScript(binPath, cfgPath, user string) string {
+// logPath 由调用方（openrcManager）传入而**不是写死**：它同时要出现在脚本里和
+// "预建日志文件并交接属主"那一步里，两处各写一个字面量必然漂移，
+// 而漂移的症状是"服务装好了但起不来"（见 EnsureLogFile 的说明）。
+//
+// `depend()` 里用 **use net 而不是 need net**：
+// `need` 是硬依赖——依赖解析不到（精简容器里常常没有提供 `net` 的服务）时
+// `rc-service <svc> start` 会**直接失败**，而这台机器上网络明明是通的。
+// 用 `use` 保留"有 net 就先等它"的顺序语义，但少了硬依赖的失败条件。
+// `after firewall` 保持原样（防火墙没起来也不该挡住我们）。
+func renderOpenRCScript(binPath, cfgPath, user, logPath string) string {
 	return fmt.Sprintf(`#!/sbin/openrc-run
 
-name="probe-agent"
-description="Server Probe Agent"
+name="xb-probe-agent"
+description="XB-Probe Agent"
 
 command="%s"
 command_args="run --config %s"
 command_user="%s"
 command_background="true"
-pidfile="/run/probe-agent.pid"
-output_log="/var/log/probe-agent.log"
-error_log="/var/log/probe-agent.log"
+pidfile="/run/xb-probe-agent.pid"
+output_log="%s"
+error_log="%s"
 
 respawn_delay=5
 respawn_max=0
 
 depend() {
-	need net
+	use net
 	after firewall
 }
-`, binPath, cfgPath, user)
+`, binPath, cfgPath, user, logPath, logPath)
 }
 
 // renderProcdScript 渲染 OpenWrt 的 /etc/init.d 脚本（rc.common 风格 + procd 服务定义）。
@@ -126,22 +132,22 @@ start_service() {
 func renderSysVScript(binPath, cfgPath, user string) string {
 	return fmt.Sprintf(`#!/bin/sh
 ### BEGIN INIT INFO
-# Provides:          probe-agent
+# Provides:          xb-probe-agent
 # Required-Start:    $network $remote_fs
 # Required-Stop:     $network $remote_fs
 # Default-Start:     2 3 4 5
 # Default-Stop:      0 1 6
-# Short-Description: Server Probe Agent
+# Short-Description: XB-Probe Agent
 ### END INIT INFO
 
 DAEMON="%s"
 ARGS="run --config %s"
-PIDFILE="/var/run/probe-agent.pid"
+PIDFILE="/var/run/xb-probe-agent.pid"
 USER="%s"
 
 start() {
 	if [ -f "$PIDFILE" ] && kill -0 "$(cat $PIDFILE)" 2>/dev/null; then
-		echo "probe-agent 已在运行"
+		echo "xb-probe-agent 已在运行"
 		return 0
 	fi
 	if command -v start-stop-daemon >/dev/null 2>&1; then
@@ -150,14 +156,14 @@ start() {
 	else
 		su -s /bin/sh -c "$DAEMON $ARGS &" "$USER" && echo $! > "$PIDFILE"
 	fi
-	echo "probe-agent 已启动"
+	echo "xb-probe-agent 已启动"
 }
 
 stop() {
 	if [ -f "$PIDFILE" ]; then
 		kill "$(cat $PIDFILE)" 2>/dev/null && rm -f "$PIDFILE"
 	fi
-	echo "probe-agent 已停止"
+	echo "xb-probe-agent 已停止"
 }
 
 case "$1" in
@@ -176,7 +182,7 @@ esac
 //   - 必须 `# PROVIDE:` / `# REQUIRE:` 注释块，否则 rcorder 会忽略它；
 //   - 用 /usr/sbin/daemon 做后台化（FreeBSD 官方推荐的 rc 脚本写法），
 //     因为它能自动写 pidfile 并在进程退出后重启；
-//   - _probe_agent 用户若不存在，用 pw(8) 创建（FreeBSD 没有 useradd）。
+//   - _xb_probe_agent 用户若不存在，用 pw(8) 创建（FreeBSD 没有 useradd）。
 //
 // ⚠ 这里**故意没有** `-u <user>`：脚本以 root 运行，与 Linux 侧"专用低权限用户"的约定
 // 不一致。原因是 FreeBSD 上非 root 能否开 ICMP（raw socket）需要真机确认，而
@@ -186,22 +192,22 @@ esac
 func renderFreeBSDRcScript(binPath, cfgPath string) string {
 	return fmt.Sprintf(`#!/bin/sh
 
-# PROVIDE: probe_agent
+# PROVIDE: xb_probe_agent
 # REQUIRE: NETWORKING
 # KEYWORD: shutdown
 
 . /etc/rc.subr
 
-name="probe_agent"
-rcvar="probe_agent_enable"
+name="xb_probe_agent"
+rcvar="xb_probe_agent_enable"
 pidfile="/var/run/${name}.pid"
 
 command="/usr/sbin/daemon"
 procname="%s"
 command_args="-p ${pidfile} -r -f ${procname} run --config %s"
-start_precmd="probe_agent_precmd"
+start_precmd="xb_probe_agent_precmd"
 
-probe_agent_precmd()
+xb_probe_agent_precmd()
 {
 	if [ ! -f %s ]; then
 		err 1 "%s 不存在，请先安装"
@@ -209,7 +215,7 @@ probe_agent_precmd()
 }
 
 load_rc_config $name
-: ${probe_agent_enable:="YES"}
+: ${xb_probe_agent_enable:="YES"}
 run_rc_command "$1"
 `, binPath, cfgPath, cfgPath, cfgPath)
 }

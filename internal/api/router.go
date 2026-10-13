@@ -5,8 +5,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yourorg/probe/internal/acme"
-	"github.com/yourorg/probe/internal/auth"
+	"github.com/koyoca/xb-probe/internal/acme"
+	"github.com/koyoca/xb-probe/internal/auth"
 )
 
 // 路由装配（文档 5.2 / 7.0 / 13.4.5）。
@@ -204,6 +204,7 @@ func (h *Handler) AdminRoutes() http.Handler {
 	mux.HandleFunc("PUT /api/admin/v1/nodes/{id}/billing", h.requireAdmin(h.handlePutBilling))
 	mux.HandleFunc("POST /api/admin/v1/nodes/{id}/billing/renew", h.requireAdmin(h.handleRenew))
 	mux.HandleFunc("GET /api/admin/v1/nodes/{id}/traffic", h.requireAdmin(h.handleTraffic))
+	mux.HandleFunc("PUT /api/admin/v1/nodes/{id}/traffic", h.requireAdmin(h.handleSetTrafficUsage))
 
 	// 探测
 	mux.HandleFunc("GET /api/admin/v1/probe-targets", h.requireAdmin(h.handleListTargets))
@@ -322,7 +323,7 @@ func (h *Handler) agentIPGate(next http.Handler) http.Handler {
 //
 // 之所以不各起一个 http.Server：公开站与 Agent 接口通常共用同一域名与端口，
 // 由反向代理（Caddy/Nginx）统一转发到本机的一个监听地址。
-// 管理端若配置了独立监听地址，则单独起一个 Server（见 cmd/probe-master）。
+// 管理端若配置了独立监听地址，则单独起一个 Server（见 cmd/xb-probe-master）。
 func (h *Handler) RootRoutes() http.Handler {
 	root := http.NewServeMux()
 	// 更具体的模式优先，因此 Agent 与公开接口互不干扰。

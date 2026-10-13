@@ -15,10 +15,10 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/yourorg/probe/internal/agent/agentconfig"
-	"github.com/yourorg/probe/internal/agent/service"
-	"github.com/yourorg/probe/internal/dist"
-	"github.com/yourorg/probe/internal/model"
+	"github.com/koyoca/xb-probe/internal/agent/agentconfig"
+	"github.com/koyoca/xb-probe/internal/agent/service"
+	"github.com/koyoca/xb-probe/internal/dist"
+	"github.com/koyoca/xb-probe/internal/model"
 )
 
 // ---------------------------------------------------------------------------
@@ -141,7 +141,7 @@ func TestRunWithoutArgsPrintsUsageAndReportsMisuse(t *testing.T) {
 	if out != "" {
 		t.Errorf("用法不应写到 stdout，实际：%q", out)
 	}
-	if !strings.Contains(errOut, "用法：probe-agent") {
+	if !strings.Contains(errOut, "用法：xb-probe-agent") {
 		t.Fatalf("stderr 缺少用法提示，实际：%q", errOut)
 	}
 }
@@ -166,7 +166,7 @@ func TestRunHelpVariantsReturnZero(t *testing.T) {
 			if out != "" {
 				t.Errorf("帮助不应写到 stdout，实际：%q", out)
 			}
-			if !strings.Contains(errOut, "用法：probe-agent") {
+			if !strings.Contains(errOut, "用法：xb-probe-agent") {
 				t.Fatalf("stderr 缺少用法提示，实际：%q", errOut)
 			}
 		})
@@ -187,7 +187,7 @@ func TestRunVersionVariants(t *testing.T) {
 			if !strings.Contains(out, runtime.GOOS+"/"+runtime.GOARCH) {
 				t.Fatalf("版本输出未包含平台，实际：%q", out)
 			}
-			// 发布标签必须一并打印：`probe-agent upgrade` 靠它挑产物名，而
+			// 发布标签必须一并打印：`xb-probe-agent upgrade` 靠它挑产物名，而
 			// "标签没注入"是静默的（go build 对指向不存在符号的 -X 不报错）。
 			// 这行是运维唯一能直接看出"手上这份是发布构建吗"的地方。
 			if !strings.Contains(out, dist.CurrentTag()) {
@@ -571,7 +571,7 @@ func TestResolvePathsWithExplicitDir(t *testing.T) {
 	if cfgPath != filepath.Join(dir, "agent.yaml") {
 		t.Errorf("配置路径不对：%q", cfgPath)
 	}
-	if binPath != filepath.Join(dir, "probe-agent") {
+	if binPath != filepath.Join(dir, "xb-probe-agent") {
 		t.Errorf("二进制路径不对：%q", binPath)
 	}
 }
@@ -630,7 +630,7 @@ func TestResolvePathsDefaultsPerPlatform(t *testing.T) {
 
 	cfgPath, binPath, err := resolvePaths("", false)
 
-	// 非 Windows 且非 root 时缺省路径是系统目录（/usr/local/bin、/etc/probe-agent），
+	// 非 Windows 且非 root 时缺省路径是系统目录（/usr/local/bin、/etc/xb-probe-agent），
 	// **必须**被拒。这一层以前只在 Windows 上跑过，于是 Linux 非 root（也就是 CI）
 	// 上一直没被断言到——那时它验证的其实是"默认路径要 root"，而不是"不要 root"。
 	if runtime.GOOS != "windows" && !isRoot() {
@@ -645,7 +645,7 @@ func TestResolvePathsDefaultsPerPlatform(t *testing.T) {
 	if cfgPath != agentconfig.DefaultPath() {
 		t.Errorf("配置路径未采用平台默认：%q vs %q", cfgPath, agentconfig.DefaultPath())
 	}
-	if binPath != filepath.Join(agentconfig.DefaultBinaryDir(), "probe-agent") {
+	if binPath != filepath.Join(agentconfig.DefaultBinaryDir(), "xb-probe-agent") {
 		t.Errorf("二进制路径未采用平台默认：%q", binPath)
 	}
 	if !filepath.IsAbs(cfgPath) || !filepath.IsAbs(binPath) {
@@ -686,14 +686,14 @@ func TestReadManifest(t *testing.T) {
 	})
 
 	t.Run("取首行且去空白", func(t *testing.T) {
-		if err := os.WriteFile(manifest, []byte("  /opt/probe/probe-agent  \n/opt/probe/agent.yaml\n"), 0o600); err != nil {
+		if err := os.WriteFile(manifest, []byte("  /opt/probe/xb-probe-agent  \n/opt/probe/agent.yaml\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		got, err := readManifest(cfgPath)
 		if err != nil {
 			t.Fatalf("读取失败：%v", err)
 		}
-		if got != "/opt/probe/probe-agent" {
+		if got != "/opt/probe/xb-probe-agent" {
 			t.Fatalf("应取首行并 trim，得到 %q", got)
 		}
 	})
@@ -747,7 +747,7 @@ func TestCounterBitsFollowsArchWidth(t *testing.T) {
 
 func TestInstallServiceSkipsManifestWhenNoService(t *testing.T) {
 	dir := t.TempDir()
-	binPath := filepath.Join(dir, "probe-agent")
+	binPath := filepath.Join(dir, "xb-probe-agent")
 	cfgPath := filepath.Join(dir, "agent.yaml")
 
 	out, _ := captureOutput(t, func() {

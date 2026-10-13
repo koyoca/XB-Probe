@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/yourorg/probe/internal/agent/cli"
+	"github.com/koyoca/xb-probe/internal/agent/cli"
 )
 
 // TestVersionFallsBackToDev 保证本地手工构建的二进制不会对外表现成"正式版"。
@@ -18,7 +18,7 @@ func TestVersionFallsBackToDev(t *testing.T) {
 
 // TestMainOnlyDelegatesToCLI 是源码护栏。
 //
-// cmd/probe-agent 的全部职责只有一句：把 argv 交给 cli.Run 并把返回值当作退出码。
+// cmd/xb-probe-agent 的全部职责只有一句：把 argv 交给 cli.Run 并把返回值当作退出码。
 // 一旦有人把参数剪裁、退出码或 version 的传递改坏（例如漏掉 os.Args[1:]，
 // 让子命令名被当成程序名），服务管理器读到的退出码就会失真——
 // 而这是"服务注册成功但反复重启"的典型成因，运行时测试极难复现。

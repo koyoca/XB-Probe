@@ -3,7 +3,7 @@ package store
 import (
 	"testing"
 
-	"github.com/yourorg/probe/internal/alert"
+	"github.com/koyoca/xb-probe/internal/alert"
 )
 
 // 分页查询（告警事件 / 审计日志）的回归护栏。

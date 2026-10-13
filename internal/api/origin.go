@@ -6,14 +6,14 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/yourorg/probe/internal/acme"
+	"github.com/koyoca/xb-probe/internal/acme"
 )
 
 // 6.1 公开站与管理端分离为不同源（status.example.com / admin.example.com）。
 //
 // "不同源"（origin = scheme + host + port）在代码层面靠三件事落地：
 //
-//  1. 两个独立监听地址（cmd/probe-master，已支持）；
+//  1. 两个独立监听地址（cmd/xb-probe-master，已支持）；
 //  2. 两边只服务自己的路由（PublicRoutes / AdminRoutes，已支持）；
 //  3. **Host 白名单**（本文件）：配了 public_hosts / admin_hosts 之后，
 //     用错域名的请求返回 421。
@@ -188,7 +188,7 @@ func siteLayoutDefault() string {
 
 // SiteLayoutMode 返回规范化后的站点形态取值（auto / single / split）。
 //
-// 导出给 cmd/probe-master 在启动日志里回显"最终生效值"用：后台的设置项会
+// 导出给 cmd/xb-probe-master 在启动日志里回显"最终生效值"用：后台的设置项会
 // 顶替配置文件里的对应项，只打印配置文件那一份，运维就无从确认到底哪个域名
 // 能打开后台。
 //

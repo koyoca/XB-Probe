@@ -23,7 +23,7 @@
 // 使用方式（只有 Master 需要，Agent 不引用 internal/traffic，
 // 也不做任何本地时区换算，因此不给 Agent 增加体积）：
 //
-//	import _ "github.com/yourorg/probe/internal/tzdata"
+//	import _ "github.com/koyoca/xb-probe/internal/tzdata"
 package tzdata
 
 import _ "time/tzdata"

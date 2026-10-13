@@ -79,8 +79,8 @@ jobs:
       - name: 自检产物与校验和
         run: |
           cd "dist/${{ steps.ver.outputs.version }}"
-          a=$(ls probe-agent_* | grep -v '\.sha256$' | wc -l)
-          m=$(ls probe-master_* | wc -l)
+          a=$(ls xb-probe-agent_* | grep -v '\.sha256$' | wc -l)
+          m=$(ls xb-probe-master_* | wc -l)
           echo "Agent 产物 ${a} 个，Master 产物 ${m} 个"
           [ "${a}" -eq 13 ] || { echo "期望 13 个 Agent 产物，实际 ${a} 个"; exit 1; }
           [ "${m}" -eq 2 ]  || { echo "期望 2 个 Master 产物，实际 ${m} 个"; exit 1; }
@@ -88,13 +88,13 @@ jobs:
           sha256sum -c SHA256SUMS.master
           # Linux Master 二进制必须真能跑。交叉编译成别的架构、或漏了某个构建标签时，
           # 这里会立刻失败，而不是等用户装上以后报 "cannot execute binary file"。
-          ./probe-master_linux_amd64 version
+          ./xb-probe-master_linux_amd64 version
 
       - name: 收集资产
         run: |
           mkdir -p release
-          cp "dist/${{ steps.ver.outputs.version }}"/probe-agent_* release/
-          cp "dist/${{ steps.ver.outputs.version }}"/probe-master_* release/
+          cp "dist/${{ steps.ver.outputs.version }}"/xb-probe-agent_* release/
+          cp "dist/${{ steps.ver.outputs.version }}"/xb-probe-master_* release/
           cp "dist/${{ steps.ver.outputs.version }}"/SHA256SUMS release/
           cp "dist/${{ steps.ver.outputs.version }}"/SHA256SUMS.master release/
           ls -l release/ | head -30
@@ -119,7 +119,7 @@ jobs:
               sudo sh -c "$(curl -fsSL https://raw.githubusercontent.com/REPO_PLACEHOLDER/main/install-master-bin.sh)" xb --version TAG_PLACEHOLDER
 
           机器上不需要 Go、不需要 git clone、不编译。脚本会下载下面的
-          probe-master_linux_<arch>、用 SHA256SUMS.master 校验后再安装。
+          xb-probe-master_linux_<arch>、用 SHA256SUMS.master 校验后再安装。
 
           安装脚本刻意取 `main` 而不是本标签：**脚本与二进制分开演进**——
           脚本里修一个诊断问题不该逼着用户去换版本号。真正决定装哪个版本的是

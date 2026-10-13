@@ -346,12 +346,12 @@
   // 语义是"那段时间没有探测"，绝不能涂深假装健康。
   // 轮询每 3 秒一次但点阵数据约 60 秒才变一次，用签名跳过无谓的 DOM 重建。
   //
-  // LAT_ROWS 是**恒定行数**：有的节点有专属目标、有的没有，行数随节点变化
-  // 会把卡片高度拉得参差不齐（同一行网格里的卡片底边对不齐）。行数恒定后
-  // 所有卡片等高；不足的补占位行（灰点 + "—"，与"缺值渲染 — 不省略行"
-  // 的约定同源），超过的折叠进块内滚动区。占位行让不同卡片的第 i 行
-  // 保持在同一水平线上——点阵本来就是拿来看"横向对齐"的。
-  var LAT_ROWS = 4;
+  // 点阵块按**实际有几条目标**渲染几行，一行都不补。
+  //
+  // 早先这里有一个 LAT_ROWS=4 的"恒定行数"，不足的用占位行补齐，为的是卡片等高。
+  // 但占位行长得和真行一样（全灰点 + 三个 "—"），于是"只有 1 条探测目标"的节点
+  // 看起来像"1 条通 + 3 条全挂"——那是需要立刻处理的故障形态，不该被凭空造出来。
+  // 等高改由 CSS 的固定块高保证（见 style.css 的 .n-lat），空白就老实空着。
 
   // 点阵时间窗（settings.public.lat_window，/site 下发）。默认 24h；
   // 标题文案与"每个点约多久"的悬浮提示都按它生成，不硬编码。
@@ -401,9 +401,9 @@
     }
 
     list.forEach(function (b) { box.appendChild(latRow(b)); });
-    // 占位行的点数取自真实行（后端 LatencyBarsSegments 变了也不会漂移）。
-    var dots = (list[0] && list[0].rtt && list[0].rtt.length) || 32;
-    for (var i = list.length; i < LAT_ROWS; i++) box.appendChild(latPlaceholderRow(dots));
+    // 这里**不再**补占位行把行数凑到 LAT_ROWS：块高由 CSS 固定，卡片照样等高。
+    // 补出来的"全灰点 + —"会被读成"这个目标一条也没探通"，而它根本不存在。
+    // 目标多于 4 条时块内滚动（CSS 的 overflow-y），也不裁掉任何一条真数据。
   }
 
   // latRow 渲染一行（一条探测目标）：目标名 + 当前延迟/丢包 + 两行小点。
@@ -445,26 +445,6 @@
     row.appendChild(dotsLine(b, 'rtt'));
     row.appendChild(dotsLine(b, 'loss'));
     return row;
-  }
-
-  // latPlaceholderRow 占位行：与真实行同结构（同名同值的"—"、全灰点），
-  // 只为把行数补齐到 LAT_ROWS，让卡片等高、各行跨卡片水平对齐。
-  function latPlaceholderRow(n) {
-    var row = el('div', 'lb-row lb-row-ph');
-    var head = el('div', 'lb-head');
-    head.appendChild(el('span', 'lb-name muted-v', '—'));
-    head.appendChild(el('span', 'lb-val muted-v', '—'));
-    head.appendChild(el('span', 'lb-val lb-loss muted-v', '—'));
-    row.appendChild(head);
-    row.appendChild(emptyDots(n));
-    row.appendChild(emptyDots(n));
-    return row;
-  }
-
-  function emptyDots(n) {
-    var line = el('div', 'lb-dots');
-    for (var i = 0; i < n; i++) line.appendChild(el('i', 'lb-dot none'));
-    return line;
   }
 
   function lastNonNull(arr) {

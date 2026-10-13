@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/yourorg/probe/internal/model"
-	"github.com/yourorg/probe/internal/theme"
+	"github.com/koyoca/xb-probe/internal/model"
+	"github.com/koyoca/xb-probe/internal/theme"
 )
 
 // 公开看板顶栏「管理后台」按钮的跳转地址（site.admin_url 及其推导规则）。

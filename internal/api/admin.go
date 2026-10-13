@@ -10,12 +10,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yourorg/probe/internal/alert"
-	"github.com/yourorg/probe/internal/auth"
-	"github.com/yourorg/probe/internal/model"
-	"github.com/yourorg/probe/internal/state"
-	"github.com/yourorg/probe/internal/store"
-	"github.com/yourorg/probe/internal/traffic"
+	"github.com/koyoca/xb-probe/internal/alert"
+	"github.com/koyoca/xb-probe/internal/auth"
+	"github.com/koyoca/xb-probe/internal/model"
+	"github.com/koyoca/xb-probe/internal/state"
+	"github.com/koyoca/xb-probe/internal/store"
+	"github.com/koyoca/xb-probe/internal/traffic"
 )
 
 // 管理 API（文档 7.2 / 5.2）。所有写请求必须携带 X-CSRF-Token（由 requireAdmin 校验）。
@@ -552,6 +552,83 @@ func (h *Handler) handleTraffic(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// maxManualTrafficBytes 是手工矫正「单方向已用流量」的上限（1 PiB）。
+//
+// 作用是挡误填（比如把价格当字节填进流量框）并给下游的百分比换算留足上界：
+// traffic.Percent 与 traffic.Billable（倍率最高 1000）在这个量级上都不会溢出。
+const maxManualTrafficBytes int64 = 1 << 50
+
+// handleSetTrafficUsage 手工矫正某节点「当前计费周期已用流量」（4.3）。
+//
+// 用途：Agent 重装/换机导致累计值从零开始、或运营商侧已计入的流量需要在面板上
+// 对齐。**只改本周期合计**，不改 traffic_daily 的按日明细——日明细是"那天实际
+// 跑了多少"的历史事实，矫正一个合计值不该顺手改写历史。
+//
+// 单位是**原始计量值**（字节，未按 traffic_mode 折算、未乘 traffic_multiplier），
+// 与 GET /nodes/{id}/traffic?period=current 返回的 period_rx/period_tx 完全同口径。
+// 前端把这两个数字直接回填进输入框，所以是"看到什么就改什么"，不需要管理员
+// 心算倍率与口径。折算后的计费流量由 refreshBillingRuntime 按库里现有的
+// 口径与倍率重算。
+func (h *Handler) handleSetTrafficUsage(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathInt64(r, "id")
+	if !ok {
+		writeErr(w, http.StatusBadRequest, model.ErrInvalidParam, "非法 ID")
+		return
+	}
+	var req struct {
+		PeriodRx int64 `json:"period_rx"`
+		PeriodTx int64 `json:"period_tx"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, model.ErrInvalidParam, "请求体解析失败")
+		return
+	}
+	if req.PeriodRx < 0 || req.PeriodTx < 0 ||
+		req.PeriodRx > maxManualTrafficBytes || req.PeriodTx > maxManualTrafficBytes {
+		writeErr(w, http.StatusBadRequest, model.ErrInvalidParam,
+			"流量取值应在 0 ~ "+fmtBytes(maxManualTrafficBytes)+" 之间")
+		return
+	}
+	// traffic_state 对 nodes(id) 有外键：不先判存在性的话，一个不存在的 id
+	// 会在 Upsert 时撞成外键错误，最后变成一个"保存失败"的 500。
+	if n, err := h.Repo.GetNode(id); err != nil || n == nil {
+		writeErr(w, http.StatusNotFound, model.ErrNotFound, "节点不存在")
+		return
+	}
+	if h.Tracker == nil {
+		writeErr(w, http.StatusInternalServerError, model.ErrInternal, "流量计量未接线")
+		return
+	}
+	now := time.Now()
+	if err := h.Tracker.SetUsage(id, req.PeriodRx, req.PeriodTx, now); err != nil {
+		writeErr(w, http.StatusInternalServerError, model.ErrInternal, "保存失败")
+		return
+	}
+	h.applyTrafficUsage(id)
+	_ = h.Repo.Audit(now.Unix(), actorOf(r), "traffic.override", fmt.Sprint(id), RealIP(r))
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// applyTrafficUsage 把矫正后的用量同步进运行态并重算计费流量。
+//
+// 不能只写库：详情页与看板读的是 state.NodeRuntime 里的 TrafficUsed，而它由
+// 调度器每 60 秒从 tracker 重算一次。这里按同样的口径手动跑一遍，管理员保存后
+// 立刻能看到新数字——否则他会以为没保存成功，然后再点一次。
+func (h *Handler) applyTrafficUsage(nodeID int64) {
+	if h.Registry == nil || h.Tracker == nil {
+		return
+	}
+	rx, tx, _ := h.Tracker.Used(nodeID)
+	_ = h.Registry.Update(nodeID, func(n *state.NodeRuntime) {
+		n.PeriodRx, n.PeriodTx = rx, tx
+	})
+	// 只有存在计费行时才走 refreshBillingRuntime：它会用 b 覆盖价格、周期、
+	// 到期时间等字段，拿一个零值 BillingRow 去调用会把它们全部清空。
+	if b, err := h.Repo.GetBilling(nodeID); err == nil && b != nil {
+		h.refreshBillingRuntime(nodeID, *b)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // 探测目标
 // ---------------------------------------------------------------------------
@@ -1023,7 +1100,7 @@ func (h *Handler) handleTestChannel(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, model.ErrNotFound, "渠道不存在或配置无法解密")
 		return
 	}
-	if err := ch.Send(r.Context(), alert.Message{Title: "Server Probe 测试消息", Body: "渠道配置正常。"}); err != nil {
+	if err := ch.Send(r.Context(), alert.Message{Title: "XB-Probe 测试消息", Body: "渠道配置正常。"}); err != nil {
 		writeErr(w, http.StatusBadGateway, "send_failed", err.Error())
 		return
 	}
@@ -1036,7 +1113,21 @@ func (h *Handler) handleGetRules(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, model.ErrInternal, "查询失败")
 		return
 	}
-	writeJSON(w, http.StatusOK, rules)
+	// 每条规则额外带一个中文名。由**服务端**出（alert.KindLabel 是唯一来源）：
+	// 前端自己写一份 kind→中文 的映射，将来加规则类型时必然只改一处。
+	//
+	// 嵌入 alert.Rule 而不是包一层 `rule` 字段：内嵌结构体的字段会被 JSON 展平，
+	// 于是 PUT 回来的请求体形状不变（handlePutRules 仍解成 map[string]alert.Rule，
+	// 多出来的 label 被忽略）——前端可以把 GET 的响应原样送回去。
+	type ruleView struct {
+		alert.Rule
+		Label string `json:"label"`
+	}
+	out := make(map[string]ruleView, len(rules))
+	for kind, rule := range rules {
+		out[kind] = ruleView{Rule: rule, Label: alert.KindLabel(kind)}
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (h *Handler) handlePutRules(w http.ResponseWriter, r *http.Request) {
@@ -1070,8 +1161,20 @@ func (h *Handler) handleListEvents(w http.ResponseWriter, r *http.Request) {
 	// 返回信封而不是裸数组：分页必须带上 total，前端才算得出"第 3 / 12 页"。
 	// limit/offset 回传的是**实际生效**的窗口（越界会被拉回最后一页），
 	// 前端据此纠正自己的页码，避免"页码写着第 9 页、表里是第 3 页"。
+	//
+	// 每条事件额外带 kind_label：落库的 kind 是**状态键**，带参数的复合类型长这样——
+	// `expire:30`、`traffic:80`、`probe_fail:12`。管理员在表里看到 `expire:30`
+	// 根本不知道那是什么，而它的含义只存在于 alert.KindLabel 里。
+	type eventView struct {
+		alert.Event
+		KindLabel string `json:"kind_label"`
+	}
+	items := make([]eventView, 0, len(events))
+	for _, e := range events {
+		items = append(items, eventView{Event: e, KindLabel: alert.KindLabel(e.Kind)})
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"items": events, "limit": meta.Limit, "offset": meta.Offset, "total": meta.Total,
+		"items": items, "limit": meta.Limit, "offset": meta.Offset, "total": meta.Total,
 	})
 }
 
@@ -1435,6 +1538,9 @@ func (h *Handler) billingLoc(tz string) *time.Location {
 // 保存计费后立即重算 TrafficUsed / TrafficUsedPct，而不是等下一次调度器慢循环：
 // 管理员刚把倍率从 1 改成 2，页面上的百分比应当马上翻倍，否则他会以为没保存成功。
 // 原始计量值取运行态里的 PeriodRx/PeriodTx（与调度器同源，都是 tracker.Used）。
+//
+// 百分比走 state.Percent，与调度器同一个实现：两处各写一份整数除法时，
+// "保存计费后"与"下一次慢循环后"会显示出两个不同的数字。
 func (h *Handler) refreshBillingRuntime(nodeID int64, b store.BillingRow) {
 	_ = h.Registry.Update(nodeID, func(n *state.NodeRuntime) {
 		n.PriceMinor = b.PriceMinor
@@ -1445,16 +1551,8 @@ func (h *Handler) refreshBillingRuntime(nodeID int64, b store.BillingRow) {
 		if b.Cycle == model.CycleLifetime {
 			n.ExpireAt = 0
 		}
-		if b.TrafficQuota > 0 {
-			n.TrafficUsed = traffic.Billable(n.PeriodRx, n.PeriodTx, b.TrafficMode, b.TrafficMultiplier)
-			n.TrafficUsedPct = int(n.TrafficUsed * 10000 / b.TrafficQuota)
-			if n.TrafficUsedPct > 10000 {
-				n.TrafficUsedPct = 10000
-			}
-		} else {
-			// 不限量：用量仍要算出来给看板显示，只是没有百分比。
-			n.TrafficUsed = traffic.Billable(n.PeriodRx, n.PeriodTx, b.TrafficMode, b.TrafficMultiplier)
-			n.TrafficUsedPct = 0
-		}
+		// 不限量时用量仍要算出来给看板显示，只是没有百分比（Percent 返回 0）。
+		n.TrafficUsed = traffic.Billable(n.PeriodRx, n.PeriodTx, b.TrafficMode, b.TrafficMultiplier)
+		n.TrafficUsedPct = state.Percent(n.TrafficUsed, b.TrafficQuota)
 	})
 }

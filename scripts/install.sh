@@ -1,5 +1,5 @@
 #!/bin/sh
-# probe-agent 一键安装脚本（文档 12.3）
+# xb-probe-agent 一键安装脚本（文档 12.3）
 #
 # 安全说明（12.8）：
 #   - 本脚本与下载文件只是静态内容，不含任何节点秘密。
@@ -18,17 +18,24 @@ SPKI="${PROBE_SPKI_SHA256:-__SPKI__}"
 MINISIGN_PUB="${PROBE_MINISIGN_PUB:-__MINISIGN_PUB__}"
 DIR="${PROBE_DIR:-}"
 CODE="${PROBE_CODE:-}"
+PUBIP="${PROBE_PUBLIC_IP_URL:-}"
 PLATFORM=""
 
 usage() {
   cat <<'EOF'
-probe-agent 安装脚本
+xb-probe-agent 安装脚本
   --code <注册码>       一次性注册码（必需）
   --master <URL>        Master 地址（默认内置）
   --spki-sha256 <指纹>  自签证书时固定 Master 公钥指纹（可重复）
   --minisign-pub <公钥> minisign 公钥（校验 SHA256SUMS；默认内置，留空则跳过）
   --dir <目录>          自定义配置目录
+  --public-ip-url <URL> 公网地址探测服务（默认关闭），见下方说明
   -h, --help            显示帮助
+
+关于 --public-ip-url：Master 与 Agent 同机部署时，Master 看到的来源地址是
+127.0.0.1，节点地址栏里就永远是回环地址；此时只有节点自己出网问一句才能拿到
+真正的公网地址。打开它会**定期访问第三方服务**（默认 15 分钟一次），
+因此需要你显式给出地址，例如 --public-ip-url https://api.ipify.org
 EOF
 }
 
@@ -39,6 +46,7 @@ while [ $# -gt 0 ]; do
     --spki-sha256) SPKI="${2:-}"; shift 2 ;;
     --minisign-pub) MINISIGN_PUB="${2:-}"; shift 2 ;;
     --dir)    DIR="${2:-}"; shift 2 ;;
+    --public-ip-url) PUBIP="${2:-}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "未知参数：$1" >&2; usage; exit 2 ;;
   esac
@@ -100,14 +108,14 @@ if [ -z "$TMP" ] || [ ! -d "$TMP" ]; then
   TMP="/tmp/probe-install.$$"
   mkdir -p "$TMP" || { echo "错误：无法创建临时目录。" >&2; exit 1; }
 fi
-BIN="$TMP/probe-agent"
+BIN="$TMP/xb-probe-agent"
 trap 'rm -rf "$TMP"' EXIT INT TERM
 
 # 3) 下载二进制与校验和
 if [ "$OS" = "windows" ]; then
-  NAME="probe-agent_${OS}_${OS_ARCH}.exe"
+  NAME="xb-probe-agent_${OS}_${OS_ARCH}.exe"
 else
-  NAME="probe-agent_${OS}_${OS_ARCH}"
+  NAME="xb-probe-agent_${OS}_${OS_ARCH}"
 fi
 echo "==> 下载 $NAME"
 $DOWNLOAD "$DIST_BASE/$NAME" > "$BIN" || { echo "错误：下载失败。" >&2; exit 1; }
@@ -182,53 +190,51 @@ if [ "$EXPECTED" != "$ACTUAL" ]; then
 fi
 chmod 0755 "$BIN"
 
-# 5) 安装到 /usr/local/bin（只读根文件系统改用 /opt/probe-agent）
+# 5) 安装到 /usr/local/bin（只读根文件系统改用 /opt/xb-probe-agent）
 #
 # 注意：Alpine / BusyBox 的精简镜像里**没有 `install` 命令**（那是 coreutils 的），
 # 只有 cp。因此优先用 install，没有就退回 cp + chmod。同理 /usr/local/bin
 # 在部分只读 rootfs（如 LXC 的只读模板、distroless）上不可写，需要退到 /opt。
 TARGET_DIR="/usr/local/bin"
 if ! mkdir -p "$TARGET_DIR" 2>/dev/null || [ ! -w "$TARGET_DIR" ]; then
-  TARGET_DIR="/opt/probe-agent"
+  TARGET_DIR="/opt/xb-probe-agent"
   mkdir -p "$TARGET_DIR" || { echo "错误：无法创建安装目录 $TARGET_DIR。" >&2; exit 1; }
 fi
 if command -v install >/dev/null 2>&1; then
-  install -m 0755 "$BIN" "$TARGET_DIR/probe-agent"
+  install -m 0755 "$BIN" "$TARGET_DIR/xb-probe-agent"
 else
-  cp -f "$BIN" "$TARGET_DIR/probe-agent" && chmod 0755 "$TARGET_DIR/probe-agent"
+  cp -f "$BIN" "$TARGET_DIR/xb-probe-agent" && chmod 0755 "$TARGET_DIR/xb-probe-agent"
 fi
-echo "==> 已安装到 $TARGET_DIR/probe-agent"
+echo "==> 已安装到 $TARGET_DIR/xb-probe-agent"
 
-# 6) 注册并注册服务
+# 6) 注册系统服务
 #
-# 容器内（LXC/Docker）没有 init 系统时，注册服务会失败。这里先探测：
-# 若 /proc/1/comm 不是 init/systemd/openrc-init，就自动加 --no-service，
-# 避免安装流程在容器里半途失败（用户仍可手动前台运行或写 Supervisor 配置）。
+# **不再用 `cat /proc/1/comm` 去猜**。这条启发式在 Alpine 上恰好错在最常见的情况上：
+# PID 1 是 busybox 的 `init`（Alpine 默认），而 OpenRC 是被 inittab 拉起来的 ——
+# "PID 1 叫什么"与"本机能不能注册服务"根本不是一回事。原来那版把不在白名单里的
+# 一律塞 `--no-service`，于是在有完整 OpenRC 的 Alpine 上用户拿到一个
+# "装好了、但没有服务"的节点，只能自己前台 `run`；他还以为是自己权限不够。
+#
+# 判断权交还给 **xb-probe-agent 自己**（service.Detect()）：它认得出来就注册服务；
+# 认不出来（真正的精简容器镜像）会打印可照做的前台/容器托管命令并**照常完成安装**
+# （退出码 0）。这样"能不能装服务"只有一个实现，不会两边漂移。
+#
+# 确实想只写配置不注册服务时，用显式开关：PROBE_NO_SERVICE=1
 NO_SVC=""
-if [ "$OS" = "linux" ]; then
-  INIT_COMM="$(cat /proc/1/comm 2>/dev/null || echo unknown)"
-  case "$INIT_COMM" in
-    systemd|init|openrc-init|procd) : ;;
-    *)
-      echo "==> 检测到非标准 init（PID 1 = $INIT_COMM，典型于 LXC/Docker 容器），"
-      echo "    跳过系统服务注册；请自行前台运行或用你的进程管理器托管："
-      echo "      $TARGET_DIR/probe-agent run"
-      NO_SVC="--no-service"
-      ;;
-  esac
-fi
+[ "${PROBE_NO_SERVICE:-}" = "1" ] && NO_SVC="--no-service"
 
 set -- install --master "$MASTER_URL" --code "$CODE"
 [ -n "$DIR" ] && set -- "$@" --dir "$DIR"
 [ -n "$SPKI" ] && set -- "$@" --spki-sha256 "$SPKI"
+[ -n "$PUBIP" ] && set -- "$@" --public-ip-url "$PUBIP"
 [ -n "$NO_SVC" ] && set -- "$@" "$NO_SVC"
-"$TARGET_DIR/probe-agent" "$@"
+"$TARGET_DIR/xb-probe-agent" "$@"
 
 # 7) 等待首次上报（最多 15 秒）
 echo "==> 等待首次上报…"
 i=0
 while [ $i -lt 15 ]; do
-  if "$TARGET_DIR/probe-agent" version >/dev/null 2>&1; then break; fi
+  if "$TARGET_DIR/xb-probe-agent" version >/dev/null 2>&1; then break; fi
   i=$((i+1)); sleep 1
 done
-echo "==> 安装完成。若页面未显示节点，请查看服务日志（journalctl -u probe-agent 或 /var/log 下的 init 日志）。"
+echo "==> 安装完成。若页面未显示节点，请查看服务日志（systemd：journalctl -u xb-probe-agent；OpenRC：rc-service xb-probe-agent status 与 /var/log/xb-probe-agent.log）。"

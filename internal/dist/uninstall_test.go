@@ -69,8 +69,8 @@ func posixPath(t *testing.T, p string) string {
 // dry-run 只说不做：一条命令把要删的东西列出来，而系统一个字节都不动。
 func TestUninstallDryRunDeletesNothing(t *testing.T) {
 	base := t.TempDir()
-	data := filepath.Join(base, "probe-master-data")
-	conf := filepath.Join(base, "probe-master-conf")
+	data := filepath.Join(base, "xb-probe-master-data")
+	conf := filepath.Join(base, "xb-probe-master-conf")
 	if err := os.MkdirAll(filepath.Join(data, "themes"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +135,7 @@ func TestUninstallRefusesPathsThatAreNotOurs(t *testing.T) {
 // ——那种用例不是护栏，是"看起来有护栏"。真正需要断言的是那个被
 // `/*probe*`（两个 `*` 都能匹配空）顺带放过的单段路径。
 func TestUninstallRefusesSystemRoots(t *testing.T) {
-	for _, p := range []string{"/", "/etc", "/usr", "/var", "/probe", "/probe-master"} {
+	for _, p := range []string{"/", "/etc", "/usr", "/var", "/probe", "/xb-probe-master"} {
 		out, code := runDeployScript(t, "--uninstall", "--dry-run", "--data", p)
 		if code == 0 {
 			t.Errorf("必须拒绝 %q，实得 rc=0\n%s", p, out)

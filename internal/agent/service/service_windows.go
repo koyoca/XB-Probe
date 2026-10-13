@@ -22,7 +22,7 @@ import (
 //
 // 关键约束：正在运行的 exe 无法直接删除（Windows 会锁住文件），
 // 所以卸载流程是「停服务 → 删服务 → 派生子进程延迟删除二进制」。
-const windowsServiceName = "probe-agent"
+const windowsServiceName = "xb-probe-agent"
 
 type windowsManager struct{}
 
@@ -104,7 +104,7 @@ func (m *windowsManager) Install(binPath, cfgPath, user string) error {
 	}
 
 	s, err := mg.CreateService(windowsServiceName, exePath, mgr.Config{
-		DisplayName:  "Server Probe Agent",
+		DisplayName:  "XB-Probe Agent",
 		Description:  "自用轻量级服务器探针 Agent（纯外联，不监听端口）",
 		StartType:    mgr.StartAutomatic,
 		ErrorControl: mgr.ErrorNormal,
@@ -124,7 +124,7 @@ func (m *windowsManager) Install(binPath, cfgPath, user string) error {
 
 	if err := s.Start(); err != nil {
 		// 启动失败不是致命错误：可能只是还没配好网络。把服务留在"已注册"状态即可。
-		fmt.Fprintln(os.Stderr, "警告：服务已注册但启动失败（可稍后 `sc start probe-agent`）：", err)
+		fmt.Fprintln(os.Stderr, "警告：服务已注册但启动失败（可稍后 `sc start xb-probe-agent`）：", err)
 	}
 	fmt.Printf("Windows 服务 %s 已注册（自动启动 + 崩溃重启）。\n", windowsServiceName)
 	return nil
@@ -185,7 +185,7 @@ func delayDeleteFile(path string) error {
 	return cmd.Process.Release()
 }
 
-// RunWindowsService 由 cmd/probe-agent 在检测到以服务方式启动时调用。
+// RunWindowsService 由 cmd/xb-probe-agent 在检测到以服务方式启动时调用。
 // cfgPath 只用于日志/排障，run 收到 stop channel 后应优雅退出。
 func RunWindowsService(cfgPath string, run func(cfgPath string, stop <-chan struct{}) error, _ <-chan struct{}) error {
 	return svc.Run(windowsServiceName, &probeServiceHandler{cfgPath: cfgPath, run: run})

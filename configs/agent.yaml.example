@@ -1,6 +1,6 @@
-# probe-agent 配置示例（对应文档 3.1 / 7.1 GET /config）
-# 默认路径：Linux /etc/probe-agent/agent.yaml ；权限必须 0600。
-# 注意：本文件由 `probe-agent install` 自动写入，通常无需手工编辑。
+# xb-probe-agent 配置示例（对应文档 3.1 / 7.1 GET /config）
+# 默认路径：Linux /etc/xb-probe-agent/agent.yaml ；权限必须 0600。
+# 注意：本文件由 `xb-probe-agent install` 自动写入，通常无需手工编辑。
 # 仅包含声明式数据，Agent 不解析也不执行任何脚本（3.1 安全边界）。
 
 master_url: "https://m.example.com"

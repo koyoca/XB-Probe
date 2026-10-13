@@ -3,8 +3,8 @@
 //
 // 为什么要单独一个包：这套约定同时被两端使用——
 //
-//   - Master 的 `probe-master dist pull`（把一整个版本的发布文件拉进 data_dir/dist）
-//   - Agent 的 `probe-agent upgrade`（只取自己那一个二进制）
+//   - Master 的 `xb-probe-master dist pull`（把一整个版本的发布文件拉进 data_dir/dist）
+//   - Agent 的 `xb-probe-agent upgrade`（只取自己那一个二进制）
 //
 // 两端各自写一遍解析的话，必然出现"一边收紧了规则、另一边没有"的漂移，
 // 而这类漂移的表现恰好是"校验通过"的假象（比如把非十六进制的行也当成校验和）。
@@ -23,7 +23,7 @@ import (
 // PlatformTag 是本机构件的"发布标签"，形如 linux_amd64 / windows_amd64 /
 // linux_armv7。由 Makefile 在交叉编译时用
 //
-//	-ldflags "-X github.com/yourorg/probe/internal/dist.PlatformTag=<os>_<tag>"
+//	-ldflags "-X github.com/koyoca/xb-probe/internal/dist.PlatformTag=<os>_<tag>"
 //
 // 注入。
 //
@@ -45,11 +45,11 @@ func CurrentTag() string {
 	return runtime.GOOS + "_" + runtime.GOARCH
 }
 
-// ArtifactName 返回构件文件名，形如 probe-agent_linux_amd64（Windows 带 .exe）。
+// ArtifactName 返回构件文件名，形如 xb-probe-agent_linux_amd64（Windows 带 .exe）。
 //
-// 与 Makefile 的 dist 目标保持一致：probe-agent_<os>_<tag>[.exe]。
+// 与 Makefile 的 dist 目标保持一致：xb-probe-agent_<os>_<tag>[.exe]。
 func ArtifactName(osName, tag string) string {
-	name := "probe-agent_" + osName + "_" + tag
+	name := "xb-probe-agent_" + osName + "_" + tag
 	if osName == "windows" {
 		name += ".exe"
 	}
@@ -73,7 +73,7 @@ func SelfArtifactName() string {
 //     （比如注释忘了加 `#`、或源站塞了别的内容）都会被当成一条有效校验和，
 //     结果是"校验通过"的假象——而它其实什么都没校验。
 //   - **文件名走 filepath.Base**。SHA256SUMS 正常只有裸文件名，但若上游写成
-//     `./probe-agent_linux_amd64` 或带目录前缀，不归一化就会匹配不上任何下载文件。
+//     `./xb-probe-agent_linux_amd64` 或带目录前缀，不归一化就会匹配不上任何下载文件。
 func ParseSums(body []byte) map[string]string {
 	out := map[string]string{}
 	for _, line := range strings.Split(string(body), "\n") {

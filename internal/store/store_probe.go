@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/yourorg/probe/internal/model"
+	"github.com/koyoca/xb-probe/internal/model"
 )
 
 // 探测目标读写（6.3 / A4 / 13.4.6）。

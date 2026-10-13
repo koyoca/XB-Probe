@@ -11,12 +11,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/yourorg/probe/internal/alert"
-	"github.com/yourorg/probe/internal/model"
-	"github.com/yourorg/probe/internal/pipeline"
-	"github.com/yourorg/probe/internal/state"
-	"github.com/yourorg/probe/internal/store"
-	"github.com/yourorg/probe/internal/traffic"
+	"github.com/koyoca/xb-probe/internal/alert"
+	"github.com/koyoca/xb-probe/internal/model"
+	"github.com/koyoca/xb-probe/internal/pipeline"
+	"github.com/koyoca/xb-probe/internal/state"
+	"github.com/koyoca/xb-probe/internal/store"
+	"github.com/koyoca/xb-probe/internal/traffic"
 )
 
 // Scheduler 驱动状态机、告警扫描、计费刷新与数据清理（文档 4.1 / 4.5 / 4.2 清理 / 13.4.8）。
@@ -307,7 +307,7 @@ func (s *Scheduler) sendHeartbeat(ctx context.Context) {
 		return
 	}
 	// 明确声明不缓存：外部监控服务（healthchecks.io / uptime-kuma 等）依赖真实到达。
-	req.Header.Set("User-Agent", "probe-master/heartbeat")
+	req.Header.Set("User-Agent", "xb-probe-master/heartbeat")
 	req.Header.Set("Cache-Control", "no-store")
 
 	client := s.heartbeatClient()
@@ -865,20 +865,14 @@ func (s *Scheduler) refreshRuntimeBilling() {
 			n.PriceMinor = b.PriceMinor
 			n.Currency = b.Currency
 			n.Cycle = b.Cycle
-			if b.TrafficQuota > 0 {
-				pct := int(used * 10000 / b.TrafficQuota)
-				if pct > 10000 {
-					pct = 10000
-				}
-				n.TrafficUsedPct = pct
-			} else {
-				n.TrafficUsedPct = 0
-			}
 			if b.Cycle == model.CycleLifetime {
 				n.ExpireAt = 0
 			} else {
 				n.ExpireAt = b.ExpireAt
 			}
+			// 百分比与"保存计费后立即重算"那条路共用 state.Percent，
+			// 否则同一个节点在两处会显示两个不同的百分比。
+			n.TrafficUsedPct = state.Percent(used, b.TrafficQuota)
 		})
 	}
 }

@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"sort"
 
-	"github.com/yourorg/probe/internal/model"
+	"github.com/koyoca/xb-probe/internal/model"
 )
 
 // EffectiveConfig 是某节点的“有效配置”——用于计算 config_version 的规范化输入。

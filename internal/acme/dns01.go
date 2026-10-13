@@ -169,7 +169,7 @@ func (c *Cloudflare) do(ctx context.Context, method, path string, body any) (*cf
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "probe-master-acme/1")
+	req.Header.Set("User-Agent", "xb-probe-master-acme/1")
 
 	resp, err := c.hc.Do(req)
 	if err != nil {
@@ -250,7 +250,7 @@ func (c *Cloudflare) Present(ctx context.Context, recordName, recordValue string
 		// 120 秒是最短常规 TTL：挑战存在的时间以分钟计，设长一点没有好处，
 		// 反而会让"上一次失败留下的旧记录"缓存更久。
 		"ttl":     120,
-		"comment": "probe-master ACME dns-01（校验完成后自动删除）",
+		"comment": "xb-probe-master ACME dns-01（校验完成后自动删除）",
 	})
 	if err != nil {
 		return nil, err

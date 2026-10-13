@@ -10,8 +10,8 @@ import (
 
 // /dist/ 的两套路径语义：**带版本**是权威存放位置，**扁平**是"最新版本"的别名。
 //
-// 为什么要有别名：安装脚本不知道版本号，取的是 `${DIST_BASE}/probe-agent_linux_amd64`
-// 与 `${MASTER_URL}/dist/SHA256SUMS`（12.8）；而 `probe-master dist pull`、后台
+// 为什么要有别名：安装脚本不知道版本号，取的是 `${DIST_BASE}/xb-probe-agent_linux_amd64`
+// 与 `${MASTER_URL}/dist/SHA256SUMS`（12.8）；而 `xb-probe-master dist pull`、后台
 // "发布文件"页、README 用的是 `data/dist/<版本>/`。两者对不上时，一键安装会在
 // "无法获取校验和"那里中止——而这台 Master 上一切看起来都正常。
 //
@@ -53,26 +53,26 @@ func distGet(t *testing.T, h *Handler, path string) (int, string) {
 // 排在 9.9.9 之后，若别名解析少做一次 isVersionName 过滤，就会取到它。
 func TestDistFlatPathResolvesToNewestVersion(t *testing.T) {
 	h, dir := newDistTestHandler(t)
-	seedDistFile(t, dir, "1.0.0/probe-agent_linux_amd64", "OLD-BINARY")
-	seedDistFile(t, dir, "1.0.0/SHA256SUMS", "aaaa  probe-agent_linux_amd64\n")
-	seedDistFile(t, dir, "9.9.9/probe-agent_linux_amd64", "NEW-BINARY")
-	seedDistFile(t, dir, "9.9.9/SHA256SUMS", "bbbb  probe-agent_linux_amd64\n")
+	seedDistFile(t, dir, "1.0.0/xb-probe-agent_linux_amd64", "OLD-BINARY")
+	seedDistFile(t, dir, "1.0.0/SHA256SUMS", "aaaa  xb-probe-agent_linux_amd64\n")
+	seedDistFile(t, dir, "9.9.9/xb-probe-agent_linux_amd64", "NEW-BINARY")
+	seedDistFile(t, dir, "9.9.9/SHA256SUMS", "bbbb  xb-probe-agent_linux_amd64\n")
 	seedDistFile(t, dir, "9.9.9/SHA256SUMS.minisig", "NEW-SIG")
 	// 非点分目录：不是合法版本，必须被忽略。
-	seedDistFile(t, dir, "nightly-20260101/probe-agent_linux_amd64", "NIGHTLY-BINARY")
-	seedDistFile(t, dir, "nightly-20260101/SHA256SUMS", "cccc  probe-agent_linux_amd64\n")
+	seedDistFile(t, dir, "nightly-20260101/xb-probe-agent_linux_amd64", "NIGHTLY-BINARY")
+	seedDistFile(t, dir, "nightly-20260101/SHA256SUMS", "cccc  xb-probe-agent_linux_amd64\n")
 
-	if code, body := distGet(t, h, "/dist/SHA256SUMS"); code != 200 || body != "bbbb  probe-agent_linux_amd64\n" {
+	if code, body := distGet(t, h, "/dist/SHA256SUMS"); code != 200 || body != "bbbb  xb-probe-agent_linux_amd64\n" {
 		t.Errorf("扁平 SHA256SUMS 未指向最新版本：%d %q", code, body)
 	}
-	if code, body := distGet(t, h, "/dist/probe-agent_linux_amd64"); code != 200 || body != "NEW-BINARY" {
+	if code, body := distGet(t, h, "/dist/xb-probe-agent_linux_amd64"); code != 200 || body != "NEW-BINARY" {
 		t.Errorf("扁平构件名未指向最新版本：%d %q", code, body)
 	}
 	if code, body := distGet(t, h, "/dist/SHA256SUMS.minisig"); code != 200 || body != "NEW-SIG" {
 		t.Errorf("扁平签名文件未指向最新版本：%d %q", code, body)
 	}
 	// 带版本的原路径必须**照旧**可用（别名不能把权威路径改道）。
-	if code, body := distGet(t, h, "/dist/1.0.0/probe-agent_linux_amd64"); code != 200 || body != "OLD-BINARY" {
+	if code, body := distGet(t, h, "/dist/1.0.0/xb-probe-agent_linux_amd64"); code != 200 || body != "OLD-BINARY" {
 		t.Errorf("带版本的路径被别名改道了：%d %q", code, body)
 	}
 }
@@ -80,10 +80,10 @@ func TestDistFlatPathResolvesToNewestVersion(t *testing.T) {
 // 根目录下的显式文件优先于别名：运维手工放了一份就用那份，不去猜。
 func TestDistExplicitFlatFileWinsOverAlias(t *testing.T) {
 	h, dir := newDistTestHandler(t)
-	seedDistFile(t, dir, "9.9.9/probe-agent_linux_amd64", "NEW-BINARY")
-	seedDistFile(t, dir, "probe-agent_linux_amd64", "PINNED-BINARY")
+	seedDistFile(t, dir, "9.9.9/xb-probe-agent_linux_amd64", "NEW-BINARY")
+	seedDistFile(t, dir, "xb-probe-agent_linux_amd64", "PINNED-BINARY")
 
-	if code, body := distGet(t, h, "/dist/probe-agent_linux_amd64"); code != 200 || body != "PINNED-BINARY" {
+	if code, body := distGet(t, h, "/dist/xb-probe-agent_linux_amd64"); code != 200 || body != "PINNED-BINARY" {
 		t.Errorf("根目录的显式文件应优先：%d %q", code, body)
 	}
 }
@@ -92,12 +92,12 @@ func TestDistExplicitFlatFileWinsOverAlias(t *testing.T) {
 // 不能被改写成 /dist/<最新版本>/<原路径>（那会把"没有这个文件"变成谜之 404）。
 func TestDistAliasDoesNotApplyToSubPaths(t *testing.T) {
 	h, dir := newDistTestHandler(t)
-	seedDistFile(t, dir, "9.9.9/probe-agent_linux_amd64", "NEW-BINARY")
+	seedDistFile(t, dir, "9.9.9/xb-probe-agent_linux_amd64", "NEW-BINARY")
 
 	for _, p := range []string{
-		"/dist/nope/probe-agent_linux_amd64",
-		"/dist/1.0.0/probe-agent_linux_amd64", // 存在 9.9.9，但 1.0.0 下确实没有
-		"/dist/9.9.9/",                        // 目录
+		"/dist/nope/xb-probe-agent_linux_amd64",
+		"/dist/1.0.0/xb-probe-agent_linux_amd64", // 存在 9.9.9，但 1.0.0 下确实没有
+		"/dist/9.9.9/",                           // 目录
 	} {
 		if code, _ := distGet(t, h, p); code != 404 {
 			t.Errorf("%s 应为 404，实得 %d", p, code)
@@ -119,7 +119,7 @@ func TestDistAliasDoesNotApplyToSubPaths(t *testing.T) {
 // 一个版本都没有时，扁平路径仍是 404（别名不能凭空造出内容）。
 func TestDistAliasWithoutAnyVersion(t *testing.T) {
 	h, dir := newDistTestHandler(t)
-	seedDistFile(t, dir, "not-a-version/probe-agent_linux_amd64", "X")
+	seedDistFile(t, dir, "not-a-version/xb-probe-agent_linux_amd64", "X")
 	if code, _ := distGet(t, h, "/dist/SHA256SUMS"); code != 404 {
 		t.Errorf("没有任何合法版本时应 404，实得 %d", code)
 	}

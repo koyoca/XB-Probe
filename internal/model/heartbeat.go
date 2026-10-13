@@ -2,7 +2,7 @@ package model
 
 // 外部心跳（A5）的可观测性 DTO。
 //
-// 背景：心跳的**发送**逻辑在 cmd/probe-master（调度器）里，而**展示**要在
+// 背景：心跳的**发送**逻辑在 cmd/xb-probe-master（调度器）里，而**展示**要在
 // 管理后台。两者分属不同的包，且 api 不能 import main。因此这里放两个东西：
 //   - AdminHeartbeat：跨包传输的普通结构体（无方法，无依赖）；
 //   - HeartbeatReader：api 侧的窄接口，由调度器实现并注入 Deps。
@@ -48,7 +48,7 @@ type AdminHeartbeat struct {
 	Healthy bool `json:"healthy"`
 }
 
-// HeartbeatReader 由 cmd/probe-master 的调度器实现，注入 api.Deps 供后台读取。
+// HeartbeatReader 由 cmd/xb-probe-master 的调度器实现，注入 api.Deps 供后台读取。
 //
 // 只暴露一个方法：api 层不需要知道心跳是怎么发的，
 // 只需要"给我一份当前状态的快照"。

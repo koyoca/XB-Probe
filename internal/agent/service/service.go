@@ -23,7 +23,7 @@ type Manager interface {
 	// **不含启动**。定义的内容由**当前二进制里的模板**渲染。
 	//
 	// 为什么它必须与 Install 分开（而不是叫 install 的一个参数）：
-	// `probe-agent upgrade` 只换二进制，而节点上的服务定义与配置属主是**更早那次安装**
+	// `xb-probe-agent upgrade` 只换二进制，而节点上的服务定义与配置属主是**更早那次安装**
 	// 留下的——老版本的 unit 里没有 ReadWritePaths=<配置目录>（ProtectSystem=strict 下
 	// 配置写不回去），更老的那次安装也没有把 0600 root:root 的配置交给服务用户
 	// （unit 里 User=probe 一启动就是 permission denied）。升级流程要把这两样补齐，
@@ -45,6 +45,17 @@ type Manager interface {
 // 真正的风险是"创建"这个动作，不是"覆盖"。
 var ErrNotInstalled = errors.New("本机没有把 Agent 注册成系统服务")
 
+// ErrNoManager 表示"这台机器上根本认不出可用的服务管理器"。
+//
+// 与 ErrNotInstalled 的区别：ErrNotInstalled 是"本机有 init 系统，但这个 Agent 当初
+// 没注册进去"（升级路径该跳过修复）；ErrNoManager 是"本机压根没有可用的服务管理器"
+// （容器精简镜像），这时**不是错误**——安装本身是成功的，只是没有东西可以托管它。
+//
+// 为什么需要单独一个哨兵：调用方（cli 的 install 分支、分发给节点的 install.sh）
+// 要能区分"装服务失败了"与"这里没有 init 系统，本来就该前台跑"，前者要报错退出，
+// 后者要打印出可直接照做的前台/进程管理器命令后**照常完成安装**。
+var ErrNoManager = errors.New("本机没有可用的服务管理器")
+
 // ---------------------------------------------------------------------------
 // 未实现的平台
 // ---------------------------------------------------------------------------
@@ -58,11 +69,12 @@ type unsupportedManager struct {
 func (m *unsupportedManager) Name() string { return m.name }
 
 func (m *unsupportedManager) Install(binPath, cfgPath, user string) error {
-	return fmt.Errorf("当前平台的服务管理器 %s 尚未实现：%s", m.name, m.hint)
+	return fmt.Errorf("%w（%s）：%s", ErrNoManager, m.name, m.hint)
 }
 
 func (m *unsupportedManager) RewriteDefinition(binPath, cfgPath, user string) error {
-	return fmt.Errorf("当前平台的服务管理器 %s 尚未实现：%s", m.name, m.hint)
+	// 没有服务定义可改 —— 与 ErrNotInstalled 同义（容器节点升级时不该被警告）。
+	return fmt.Errorf("%w：%s", ErrNotInstalled, m.hint)
 }
 
 func (m *unsupportedManager) Uninstall(binPath, cfgPath string) error {

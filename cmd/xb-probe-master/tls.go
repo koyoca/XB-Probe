@@ -8,12 +8,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yourorg/probe/internal/acme"
-	"github.com/yourorg/probe/internal/config"
-	"github.com/yourorg/probe/internal/tlsconf"
+	"github.com/koyoca/xb-probe/internal/acme"
+	"github.com/koyoca/xb-probe/internal/config"
+	"github.com/koyoca/xb-probe/internal/tlsconf"
 )
 
-// probe-master tls status —— 报告证书现在是"有了"还是"还在申请/为什么失败"。
+// xb-probe-master tls status —— 报告证书现在是"有了"还是"还在申请/为什么失败"。
 //
 // 为什么需要这条命令：ACME 的首次申请发生在后台（这是刻意的——一个 DNS 或
 // 网络问题不该让整个 Master 起不来），于是"服务已经启动"与"证书已经就绪"
@@ -39,7 +39,7 @@ func runTLS(args []string) error {
 
 	fs := flag.NewFlagSet("tls status", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	cfgPath := fs.String("config", "/etc/probe-master/master.yaml", "配置文件路径")
+	cfgPath := fs.String("config", "/etc/xb-probe-master/master.yaml", "配置文件路径")
 	waitSec := fs.Int("wait", 0, "等待证书就绪的秒数（0 = 只报告当前状态）")
 	asJSON := fs.Bool("json", false, "以 JSON 输出原始状态")
 	fs.Usage = func() { fmt.Fprint(os.Stderr, tlsUsage) }
@@ -124,9 +124,9 @@ var (
 	errCertPending = fmt.Errorf("证书尚未就绪")
 )
 
-const tlsUsage = `probe-master tls status —— 查看证书状态
+const tlsUsage = `xb-probe-master tls status —— 查看证书状态
 
-  -config <路径>   配置文件路径（默认 /etc/probe-master/master.yaml）
+  -config <路径>   配置文件路径（默认 /etc/xb-probe-master/master.yaml）
   -wait <秒>       等待证书就绪的秒数（0 = 只报告当前状态）
   -json            以 JSON 输出原始状态
 
@@ -211,7 +211,7 @@ func printRetryHints(cfg *config.MasterConfig, statusPath string) {
 	fmt.Println("    排查：")
 	switch {
 	case cfg.TLS.Mode != "acme":
-		fmt.Printf("      · 检查证书文件与权限；systemctl restart probe-master 会立即重试\n")
+		fmt.Printf("      · 检查证书文件与权限；systemctl restart xb-probe-master 会立即重试\n")
 	case cfg.TLS.ACME.Challenge == acme.ChallengeHTTP01:
 		fmt.Printf("      · 域名是否已解析到本机：dig +short %s\n", firstDomain(cfg))
 		fmt.Printf("      · 80 端口是否空闲且可达：ss -ltnp | grep ':80'\n")
@@ -223,8 +223,8 @@ func printRetryHints(cfg *config.MasterConfig, statusPath string) {
 		fmt.Printf("      · DNS API Token 是否有该域名的 Zone:DNS:Edit 权限\n")
 		fmt.Printf("      · 域名是否托管在同一个 DNS 服务商账户下\n")
 	}
-	fmt.Printf("      · 完整状态：cat %s；详细日志：journalctl -u probe-master -n 80\n", statusPath)
-	fmt.Println("      · 服务每 2 分钟自动重试；改完配置后 systemctl restart probe-master 可立即重试")
+	fmt.Printf("      · 完整状态：cat %s；详细日志：journalctl -u xb-probe-master -n 80\n", statusPath)
+	fmt.Println("      · 服务每 2 分钟自动重试；改完配置后 systemctl restart xb-probe-master 可立即重试")
 }
 
 func firstDomain(cfg *config.MasterConfig) string {

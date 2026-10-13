@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yourorg/probe/internal/auth"
-	"github.com/yourorg/probe/internal/db"
-	"github.com/yourorg/probe/internal/state"
-	"github.com/yourorg/probe/internal/store"
+	"github.com/koyoca/xb-probe/internal/auth"
+	"github.com/koyoca/xb-probe/internal/db"
+	"github.com/koyoca/xb-probe/internal/state"
+	"github.com/koyoca/xb-probe/internal/store"
 )
 
 // 6.2 的端到端校验：TOTP 启用流程 + 恢复码登录。

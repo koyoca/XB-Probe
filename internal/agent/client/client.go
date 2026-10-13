@@ -24,7 +24,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yourorg/probe/internal/model"
+	"github.com/koyoca/xb-probe/internal/model"
 )
 
 // Client 是 Master 的 API 客户端。
@@ -226,7 +226,7 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any, auth 
 func (c *Client) setHeaders(r *http.Request, auth bool) {
 	r.Header.Set("Accept", "application/json")
 	r.Header.Set("Accept-Encoding", "gzip")
-	r.Header.Set("User-Agent", "probe-agent")
+	r.Header.Set("User-Agent", "xb-probe-agent")
 	if r.Body != nil {
 		r.Header.Set("Content-Type", "application/json")
 	}

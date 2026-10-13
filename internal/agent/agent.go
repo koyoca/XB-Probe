@@ -15,11 +15,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/yourorg/probe/internal/agent/agentconfig"
-	"github.com/yourorg/probe/internal/agent/client"
-	"github.com/yourorg/probe/internal/agent/collector"
-	"github.com/yourorg/probe/internal/agent/prober"
-	"github.com/yourorg/probe/internal/model"
+	"github.com/koyoca/xb-probe/internal/agent/agentconfig"
+	"github.com/koyoca/xb-probe/internal/agent/client"
+	"github.com/koyoca/xb-probe/internal/agent/collector"
+	"github.com/koyoca/xb-probe/internal/agent/prober"
+	"github.com/koyoca/xb-probe/internal/model"
 )
 
 // 退避与轮询参数（3.1 / 7.1）。
@@ -58,6 +58,7 @@ type Daemon struct {
 	curEtcd     string
 	version     string
 	staticDirty bool
+	pubIP       string // 最近一次探测到的公网地址（空=未配置或尚未成功）
 }
 
 // New 创建守护进程。
@@ -83,6 +84,8 @@ func New(cfgPath string, cfg *agentconfig.Config, cli *client.Client, version st
 // Run 启动主循环，直到 ctx 取消。
 func (d *Daemon) Run(ctx context.Context) error {
 	go d.probeLoop(ctx)
+	// 公网地址探测：独立 goroutine，未配置 public_ip_url 时它只定期重读配置。
+	go d.publicIPLoop(ctx)
 
 	// 首次上报：携带 static（3.1）
 	backoff := minBackoff
@@ -168,7 +171,7 @@ func (d *Daemon) tick(ctx context.Context) (time.Duration, error) {
 		Latency: d.takeLatency(),
 	}
 
-	req := model.ReportRequest{AgentVersion: d.version}
+	req := model.ReportRequest{AgentVersion: d.version, PublicIP: d.observedPublicIP()}
 	d.mu.Lock()
 	req.Samples = append(req.Samples, d.buffer...)
 	d.buffer = nil
@@ -319,6 +322,11 @@ func (d *Daemon) Reload() error {
 		return err
 	}
 	d.mu.Lock()
+	if cfg.PublicIPURL != d.cfg.PublicIPURL {
+		// 换了探测服务，旧值不再可信。清掉而不是留着：留着的话，改配置之后
+		// 地址栏还会继续显示上一个服务给的地址，而日志里没有任何线索。
+		d.pubIP = ""
+	}
 	d.cfg = cfg
 	d.probe = prober.New(cfg.AllowPrivateTargets)
 	// 采集器也要重建：磁盘路径与网卡过滤项是"建实例时读取"的，不重建就不生效。

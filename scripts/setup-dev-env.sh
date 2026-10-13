@@ -1,5 +1,5 @@
 #!/bin/sh
-# Server Probe —— Linux / macOS / FreeBSD 开发环境一键搭建
+# XB-Probe —— Linux / macOS / FreeBSD 开发环境一键搭建
 #
 # 做三件事：安装 Go 工具链（用户级，不覆盖系统目录）、配置 Go 环境变量、
 # 可选安装辅助工具并构建本项目。官方站 go.dev 不可达时自动回退国内镜像。
@@ -299,9 +299,9 @@ if [ "$SKIP_BUILD" = "0" ]; then
     "$GO_BIN/go" mod download || c_warn "go mod download 失败（依赖未全部落入 GOMODCACHE，构建时可能仍需联网）"
     "$GO_BIN/go" vet ./... || c_warn "go vet 有告警"
     mkdir -p bin
-    if CGO_ENABLED=0 "$GO_BIN/go" build -trimpath -ldflags "-s -w" -o bin/probe-master ./cmd/probe-master \
-       && CGO_ENABLED=0 "$GO_BIN/go" build -trimpath -ldflags "-s -w" -o bin/probe-agent ./cmd/probe-agent; then
-      c_ok "构建完成：bin/probe-master、bin/probe-agent"
+    if CGO_ENABLED=0 "$GO_BIN/go" build -trimpath -ldflags "-s -w" -o bin/xb-probe-master ./cmd/xb-probe-master \
+       && CGO_ENABLED=0 "$GO_BIN/go" build -trimpath -ldflags "-s -w" -o bin/xb-probe-agent ./cmd/xb-probe-agent; then
+      c_ok "构建完成：bin/xb-probe-master、bin/xb-probe-agent"
       ls -lh bin/
     else
       c_err "构建失败，请查看上方编译错误"
@@ -316,6 +316,6 @@ cat <<'EOF'
 下一步：
   1) 新终端执行 go version（或先 export PATH）
   2) cp configs/master.yaml.example master.yaml 并修改 data_dir / 监听地址
-  3) ./bin/probe-master init-admin --config ./master.yaml
-  4) ./bin/probe-master --config ./master.yaml
+  3) ./bin/xb-probe-master init-admin --config ./master.yaml
+  4) ./bin/xb-probe-master --config ./master.yaml
 EOF

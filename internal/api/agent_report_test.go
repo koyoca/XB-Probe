@@ -4,9 +4,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yourorg/probe/internal/model"
-	"github.com/yourorg/probe/internal/pipeline"
-	"github.com/yourorg/probe/internal/state"
+	"github.com/koyoca/xb-probe/internal/model"
+	"github.com/koyoca/xb-probe/internal/pipeline"
+	"github.com/koyoca/xb-probe/internal/state"
 )
 
 // 写侧准入回归：节点上报的延迟里若混入"不属于本节点、也不是全局目标"的

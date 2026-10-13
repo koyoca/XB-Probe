@@ -18,7 +18,7 @@ func Detect() Manager { return &freebsdManager{} }
 
 const (
 	// FreeBSD 的本地服务脚本目录（base system 的 rc.d 在 /etc/rc.d）。
-	freebsdRcPath = "/usr/local/etc/rc.d/probe-agent"
+	freebsdRcPath = "/usr/local/etc/rc.d/xb-probe-agent"
 )
 
 type freebsdManager struct{}
@@ -63,21 +63,21 @@ func (m *freebsdManager) Install(binPath, cfgPath, user string) error {
 		return err
 	}
 	// enable：写入 rc.conf.d 而不是直接改 /etc/rc.conf（后者容易被手动编辑搞乱）。
-	if err := os.WriteFile("/etc/rc.conf.d/probe_agent", []byte("probe_agent_enable=\"YES\"\n"), 0o644); err != nil {
+	if err := os.WriteFile("/etc/rc.conf.d/xb_probe_agent", []byte("xb_probe_agent_enable=\"YES\"\n"), 0o644); err != nil {
 		// 有些套件没有 /etc/rc.conf.d 目录，此时用 sysrc。
-		if err2 := run("sysrc", "probe_agent_enable=YES"); err2 != nil {
-			fmt.Fprintln(os.Stderr, "警告：设置开机自启失败（可手动 sysrc probe_agent_enable=YES）：", err2)
+		if err2 := run("sysrc", "xb_probe_agent_enable=YES"); err2 != nil {
+			fmt.Fprintln(os.Stderr, "警告：设置开机自启失败（可手动 sysrc xb_probe_agent_enable=YES）：", err2)
 		}
 	}
-	return run("service", "probe_agent", "start")
+	return run("service", "xb_probe_agent", "start")
 }
 
 func (m *freebsdManager) Uninstall(binPath, cfgPath string) error {
-	_ = run("service", "probe_agent", "stop")
+	_ = run("service", "xb_probe_agent", "stop")
 	if err := os.Remove(freebsdRcPath); err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	_ = os.Remove("/etc/rc.conf.d/probe_agent")
+	_ = os.Remove("/etc/rc.conf.d/xb_probe_agent")
 	return nil
 }
 
@@ -94,6 +94,6 @@ func ensureFreeBSDUser(user string) error {
 	return run("pw", "useradd", user,
 		"-d", "/nonexistent",
 		"-s", "/usr/sbin/nologin",
-		"-c", "Server Probe Agent",
+		"-c", "XB-Probe Agent",
 		"-u", "1001")
 }

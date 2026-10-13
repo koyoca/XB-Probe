@@ -6,14 +6,15 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/yourorg/probe/internal/model"
+	"github.com/koyoca/xb-probe/internal/model"
+	"github.com/koyoca/xb-probe/internal/netutil"
 )
 
 // 节点读写（6.3 / 5.2）。
 
 const nodeCols = `id, public_id, name, group_name, sort_order, status, public_visible,
 	COALESCE(ip_v4,''), COALESCE(ip_v6,''), COALESCE(provider,''), COALESCE(location,''), COALESCE(note,''),
-	COALESCE(country,''),
+	COALESCE(country,''), COALESCE(ip_auto,1),
 	COALESCE(hostname,''), COALESCE(os,''), COALESCE(kernel,''), COALESCE(arch,''), COALESCE(cpu_model,''),
 	COALESCE(cpu_cores,0), COALESCE(mem_total,0), COALESCE(swap_total,0), COALESCE(disk_total,0),
 	COALESCE(boot_time,0), COALESCE(agent_version,''),
@@ -24,7 +25,7 @@ func scanNode(sc interface{ Scan(...any) error }) (*model.Node, error) {
 	n := &model.Node{}
 	err := sc.Scan(&n.ID, &n.PublicID, &n.Name, &n.GroupName, &n.SortOrder, &n.Status, &n.PublicVisible,
 		&n.IPv4, &n.IPv6, &n.Provider, &n.Location, &n.Note,
-		&n.Country,
+		&n.Country, &n.IPAuto,
 		&n.Hostname, &n.OS, &n.Kernel, &n.Arch, &n.CPUModel,
 		&n.CPUCores, &n.MemTotal, &n.SwapTotal, &n.DiskTotal, &n.BootTime, &n.AgentVersion,
 		&n.OSFamily, &n.Virt, &n.ServiceManager, &n.CounterBits,
@@ -105,11 +106,129 @@ func (r *Repo) UpdateNodeMeta(id int64, name, group string, sortOrder int, publi
 // 它与 provider/location 同类，都属于"管理员手工维护、与 Agent 上报无关"的字段，
 // 因此共用同一个写入口而不是单开一个 UPDATE —— 单开口子容易出现
 // "改了国家却把机房写回旧值"这类部分更新事故。
+//
+// ip_auto（"这个地址是手填的还是自动探测的"）由这里推导，规则三条：
+//  1. 两个地址都留空 → 恢复自动（1）。"清空"就是"我不想指定了"的自然表达，
+//     也给了管理员一条"把自动探测重新打开"的路。
+//  2. 提交的值与库里**不同** → 管理员确实改过 → 锁定（0）。
+//     这就是面板上「覆盖自动探测」四个字的字面兑现。
+//  3. 提交的值与库里**相同** → 只是编辑面板的回填（打开面板会把当前值带出来）
+//     → 保持原值。少了这一条，打开节点面板点一次保存就会**永久关掉自动探测**，
+//     而界面上不会有任何提示 —— 典型的"点一下什么都没变，但功能没了"。
 func (r *Repo) UpdateNodeAssets(id int64, ipv4, ipv6, provider, location, country, note string) error {
+	cur4, cur6 := "", ""
+	_ = r.db.Read.QueryRow(
+		`SELECT COALESCE(ip_v4,''), COALESCE(ip_v6,'') FROM nodes WHERE id=?`, id).Scan(&cur4, &cur6)
+
+	ipAuto := 1
+	switch {
+	case ipv4 == "" && ipv6 == "":
+		ipAuto = 1
+	case ipv4 == cur4 && ipv6 == cur6:
+		// 保持原值：只读了 ip_v4/ip_v6，ip_auto 原样不动。
+		_, err := r.db.Write.Exec(
+			`UPDATE nodes SET ip_v4=?, ip_v6=?, provider=?, location=?, country=?, note=? WHERE id=?`,
+			nullIfEmpty(ipv4), nullIfEmpty(ipv6), provider, location, nullIfEmpty(country), note, id)
+		return err
+	default:
+		ipAuto = 0
+	}
 	_, err := r.db.Write.Exec(
-		`UPDATE nodes SET ip_v4=?, ip_v6=?, provider=?, location=?, country=?, note=? WHERE id=?`,
-		nullIfEmpty(ipv4), nullIfEmpty(ipv6), provider, location, nullIfEmpty(country), note, id)
+		`UPDATE nodes SET ip_v4=?, ip_v6=?, provider=?, location=?, country=?, note=?, ip_auto=? WHERE id=?`,
+		nullIfEmpty(ipv4), nullIfEmpty(ipv6), provider, location, nullIfEmpty(country), note, ipAuto, id)
 	return err
+}
+
+// UpdateNodeObservedIP 用"观测到的地址"更新节点地址，返回是否真的改动了。
+//
+// 列名按地址族选（`:` ⇒ ip_v6，否则 ip_v4），与前端展示的两个字段一致。
+// 这一点不能省：公网 IPv6 节点如果被写进 ip_v4，界面上会变成一个谁也连不上的地址。
+//
+// 两个前置条件都写在 SQL 的 WHERE 里，而不是先读后判：
+//   - `ip_auto=1`：管理员手工填过就不再动它（见 UpdateNodeAssets）；
+//   - 与当前值不同：避免每次上报都写一次库（上报是几秒一次的高频路径）。
+//
+// **调用方必须自己保证 ip 是公网可路由地址**（回环/私网/链路本地不写）：
+// 那条判断属于"地址语义"，不属于"节点存储"，实现在 internal/netutil 里
+// （Master 与 Agent 共用同一份）。真机上"地址栏恒显示 127.0.0.1"就是这么来的 ——
+// Master 与 Agent 同机时来源地址本来就是回环地址，而它照样被写进了
+// "这是节点的公网地址"这一栏。
+func (r *Repo) UpdateNodeObservedIP(id int64, ip string) (bool, error) {
+	if ip == "" {
+		return false, nil
+	}
+	// 列名只能拼字符串（`?` 绑不了标识符）；输入是对端地址，不含引号，没有注入面。
+	col := "ip_v4"
+	if strings.Contains(ip, ":") {
+		col = "ip_v6"
+	}
+	res, err := r.db.Write.Exec(
+		`UPDATE nodes SET `+col+`=? WHERE id=? AND COALESCE(ip_auto,1)=1 AND COALESCE(`+col+`,'')<>?`,
+		ip, id, ip)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// ClearNonPublicObservedIPs 清掉"自动"节点上那些不是公网地址的历史值，返回改动的行数。
+//
+// 为什么必须有这一步：老实现把上报连接的对端地址无条件写进 ip_v4，同机部署的节点
+// 因此存着 127.0.0.1。新规则不再写这种值，于是**也就没人会去覆盖它** ——
+// 用户升级后会看到"地址栏还是 127.0.0.1"，然后合理地认为改动没生效。
+//
+// 判定复用 internal/netutil（与写入路径同一份实现）：在 SQL 里用 LIKE 枚举私网段
+// 看着更"一次搞定"，但那是把同一套地址语义写第二遍 —— 172.16/12 与 100.64/10
+// 这两段用 LIKE 根本写不干净，而两处漂移的症状是"有的私网地址被清了、有的没清"。
+//
+// 只动 ip_auto=1 的行：管理员手工填的地址（哪怕他不小心填了个内网地址）
+// 是**他的**决定，不该被一次静默的启动清理抹掉。
+func (r *Repo) ClearNonPublicObservedIPs() (int64, error) {
+	rows, err := r.db.Read.Query(
+		`SELECT id, COALESCE(ip_v4,''), COALESCE(ip_v6,'') FROM nodes WHERE COALESCE(ip_auto,1)=1`)
+	if err != nil {
+		return 0, err
+	}
+	type fix struct {
+		id  int64
+		col string
+	}
+	var fixes []fix
+	for rows.Next() {
+		var id int64
+		var v4, v6 string
+		if err := rows.Scan(&id, &v4, &v6); err != nil {
+			_ = rows.Close()
+			return 0, err
+		}
+		if v4 != "" && !netutil.IsPublicIP(v4) {
+			fixes = append(fixes, fix{id, "ip_v4"})
+		}
+		if v6 != "" && !netutil.IsPublicIP(v6) {
+			fixes = append(fixes, fix{id, "ip_v6"})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return 0, err
+	}
+	_ = rows.Close()
+
+	var n int64
+	for _, f := range fixes {
+		res, err := r.db.Write.Exec(`UPDATE nodes SET `+f.col+`=NULL WHERE id=?`, f.id)
+		if err != nil {
+			return n, err
+		}
+		if got, err := res.RowsAffected(); err == nil {
+			n += got
+		}
+	}
+	return n, nil
 }
 
 func nullIfEmpty(s string) any {
@@ -233,21 +352,6 @@ func (r *Repo) UpdateNodeEnv(id int64, hostname, osName, osFamily, arch, virt, s
 		 service_manager=?, agent_version=?, counter_bits=?
 		 WHERE id=?`,
 		hostname, osName, osFamily, arch, virt, serviceManager, agentVersion, counterBits, id)
-	return err
-}
-
-// UpdateNodeIPs 更新来源地址（默认取上报连接的对端地址，可手动覆盖）。
-func (r *Repo) UpdateNodeIPs(id int64, ip string) error {
-	if ip == "" {
-		return nil
-	}
-	var col string
-	if strings.Contains(ip, ":") {
-		col = "ip_v6"
-	} else {
-		col = "ip_v4"
-	}
-	_, err := r.db.Write.Exec(`UPDATE nodes SET `+col+`=? WHERE id=? AND (`+col+` IS NULL OR `+col+`='')`, ip, id)
 	return err
 }
 

@@ -16,10 +16,10 @@ func TestParseSumsRejectsNonHex(t *testing.T) {
 	body := []byte(strings.Join([]string{
 		"# 注释行",
 		"",
-		"not-a-hash  probe-agent_linux_amd64",
-		"zz" + strings.Repeat("z", 62) + "  probe-agent_windows_amd64.exe", // 长度够但不是十六进制
-		strings.Repeat("a", 63) + "  probe-agent_freebsd_amd64",            // 十六进制但只有 63 位
-		"deadbeef  probe-agent_linux_arm64",                                // 太短
+		"not-a-hash  xb-probe-agent_linux_amd64",
+		"zz" + strings.Repeat("z", 62) + "  xb-probe-agent_windows_amd64.exe", // 长度够但不是十六进制
+		strings.Repeat("a", 63) + "  xb-probe-agent_freebsd_amd64",            // 十六进制但只有 63 位
+		"deadbeef  xb-probe-agent_linux_arm64",                                // 太短
 		"onlyonefield",
 	}, "\n"))
 	if got := ParseSums(body); len(got) != 0 {
@@ -30,15 +30,15 @@ func TestParseSumsRejectsNonHex(t *testing.T) {
 func TestParseSumsNormalizesNamesAndModes(t *testing.T) {
 	want := sha256.Sum256([]byte("x"))
 	hashHex := hex.EncodeToString(want[:])
-	body := hashHex + "  ./probe-agent_linux_amd64\n" +
-		strings.ToUpper(hashHex) + " *probe-agent_windows_amd64.exe\n" +
-		hashHex + "  probe-agent_freebsd_amd64\n"
+	body := hashHex + "  ./xb-probe-agent_linux_amd64\n" +
+		strings.ToUpper(hashHex) + " *xb-probe-agent_windows_amd64.exe\n" +
+		hashHex + "  xb-probe-agent_freebsd_amd64\n"
 
 	got := ParseSums([]byte(body))
-	if got["probe-agent_linux_amd64"] != hashHex {
+	if got["xb-probe-agent_linux_amd64"] != hashHex {
 		t.Errorf("带 ./ 前缀的文件名应归一化，实得 %+v", got)
 	}
-	if got["probe-agent_windows_amd64.exe"] != hashHex {
+	if got["xb-probe-agent_windows_amd64.exe"] != hashHex {
 		t.Errorf("binary 模式（* 前缀）与大写哈希都应接受，实得 %+v", got)
 	}
 	if len(got) != 3 {
@@ -50,12 +50,12 @@ func TestParseSumsNormalizesNamesAndModes(t *testing.T) {
 // Agent 却去下载另一个名字"会变成上线当天才暴露的 404。
 func TestArtifactNameMatchesReleaseNaming(t *testing.T) {
 	cases := map[string]string{
-		"linux_amd64":   "probe-agent_linux_amd64",
-		"windows_amd64": "probe-agent_windows_amd64.exe",
-		"linux_armv7":   "probe-agent_linux_armv7",
-		"freebsd_arm":   "probe-agent_freebsd_arm",
-		"windows_386":   "probe-agent_windows_386.exe",
-		"linux_riscv64": "probe-agent_linux_riscv64",
+		"linux_amd64":   "xb-probe-agent_linux_amd64",
+		"windows_amd64": "xb-probe-agent_windows_amd64.exe",
+		"linux_armv7":   "xb-probe-agent_linux_armv7",
+		"freebsd_arm":   "xb-probe-agent_freebsd_arm",
+		"windows_386":   "xb-probe-agent_windows_386.exe",
+		"linux_riscv64": "xb-probe-agent_linux_riscv64",
 	}
 	for tag, want := range cases {
 		osName := tag[:strings.Index(tag, "_")]
@@ -75,7 +75,7 @@ func TestCurrentTagFallsBackToRuntime(t *testing.T) {
 	if got := CurrentTag(); got != "linux_armv6" {
 		t.Errorf("注入值应优先生效，实得 %q", got)
 	}
-	if got := SelfArtifactName(); got != "probe-agent_linux_armv6" {
+	if got := SelfArtifactName(); got != "xb-probe-agent_linux_armv6" {
 		t.Errorf("SelfArtifactName = %q", got)
 	}
 

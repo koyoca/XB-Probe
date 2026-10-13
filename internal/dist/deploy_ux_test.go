@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -78,7 +79,7 @@ func TestAdminURLIsNotDerivedFromListenAddress(t *testing.T) {
 // 这里只需一个能过 -f 的文件——dry-run 不会执行它。
 func fakeBin(t *testing.T) string {
 	t.Helper()
-	p := filepath.Join(t.TempDir(), "probe-master")
+	p := filepath.Join(t.TempDir(), "xb-probe-master")
 	if err := os.WriteFile(p, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatalf("造临时二进制失败：%v", err)
 	}
@@ -347,7 +348,7 @@ func TestConfigKeysAreProbedBeforeWriting(t *testing.T) {
 	// 探测必须先证明"自己真的读到了我们给它的那份文件"——这就是哨兵的作用。
 	//
 	// 没有哨兵时，探测在**旧二进制**上会恒回答"认识"（假阳性，用户撞到的正是这个）：
-	//   `probe-master tls status -config X` 在没有 tls 子命令的二进制上会 fall through
+	//   `xb-probe-master tls status -config X` 在没有 tls 子命令的二进制上会 fall through
 	//   到服务启动，而 flag.Parse 遇到非 flag 参数 `tls` 就停止解析 → `-config X`
 	//   被忽略 → 于是"基线"与"待测"两次调用读的是**同一份**真实配置 → 恒"认识"。
 	// 哨兵一次覆盖"子命令不存在"与"-config 被忽略"两种失效——它们症状相同，
@@ -583,9 +584,9 @@ func TestUninstallStopsAndCleansCaddy(t *testing.T) {
 			"  dry-run 的意义就是把会做的事列全，漏一项就少一次预演。")
 	}
 
-	// ② 只删**我们写的**单元。判据是 Description 里的 "Server Probe"——
+	// ② 只删**我们写的**单元。判据是 Description 里的 "XB-Probe"——
 	// 官方包那份写的是 "Caddy web server"。用"文件存在"当判据会把别人的删掉。
-	if !strings.Contains(body, `grep -q 'Server Probe' "$CADDY_SVC"`) {
+	if !strings.Contains(body, `grep -q 'XB-Probe' "$CADDY_SVC"`) {
 		t.Error("没有用 Description 标记分辨 caddy.service 是不是本脚本写的：\n" +
 			"  只看「文件存在」会把用户自己的 Caddy 单元删掉——那比没卸载干净严重得多。")
 	}
@@ -817,7 +818,7 @@ func TestAccessModeQuestionDecidesTerminator(t *testing.T) {
 	}
 }
 
-// 用户原话："probe-master 启动，由于公开和后台是同一个域名，caddy 好像只反代了
+// 用户原话："xb-probe-master 启动，由于公开和后台是同一个域名，caddy 好像只反代了
 // 8080 端口，并没有反代 8081 导致访问管理端 404 page not found"，
 // 并附上了机器上的 Caddyfile —— 那是**上一版脚本**写的，里面没有分流规则。
 //
@@ -919,7 +920,7 @@ func TestMasterTerminatorChecksForCaddyPortConflict(t *testing.T) {
 		t.Error("预检没有真的去看 Caddy 在不在跑。")
 	}
 	// 只许动"本脚本自己装的 Caddy"。停掉别人装的服务比"装不上"严重得多。
-	if !strings.Contains(region, "grep -q 'Server Probe' /etc/systemd/system/caddy.service") {
+	if !strings.Contains(region, "grep -q 'XB-Probe' /etc/systemd/system/caddy.service") {
 		t.Error("预检没有区分「Caddy 是不是本脚本装的」：\n" +
 			"  无条件停掉 caddy 会把别人（发行版包、x-ui）的服务也停掉。")
 	}
@@ -931,14 +932,14 @@ func TestMasterTerminatorChecksForCaddyPortConflict(t *testing.T) {
 //
 // 就死在
 //
-//	==> 下载 probe-agent_linux_amd64
+//	==> 下载 xb-probe-agent_linux_amd64
 //	curl: (22) The requested URL returned error: 404
 //	错误：下载失败。
 //
 // 根因不在安装脚本，而在**部署脚本没把发布文件放进 data_dir/dist/**：
 // `/install.sh` 是内嵌在二进制里的（所以那一步取得到、看起来一切正常），
-// 它接下来要的 `$DIST_BASE/probe-agent_<os>_<arch>` 与 `/dist/SHA256SUMS`
-// 才是发布文件；而部署流程只在收尾清单里把 `probe-master dist pull` 当成
+// 它接下来要的 `$DIST_BASE/xb-probe-agent_<os>_<arch>` 与 `/dist/SHA256SUMS`
+// 才是发布文件；而部署流程只在收尾清单里把 `xb-probe-master dist pull` 当成
 // **事后手工步骤**提了一句。于是一键部署出来的 Master 开箱就没有装机通道。
 //
 // 这条钉三件事：①部署流程必须自己拉发布文件；②拉失败不许回滚整个部署；
@@ -1031,7 +1032,7 @@ func TestDeployPullsReleaseFilesForNodeBootstrap(t *testing.T) {
 	}
 	ver := verArg[1]
 	if !strings.Contains(pull, `dist pull --config "$CFG" --version "$`+ver+`"`) {
-		t.Errorf("取件函数没有用**它自己的版本参数**去调用 probe-master dist pull（应为 --version \"$%s\"）：\n"+
+		t.Errorf("取件函数没有用**它自己的版本参数**去调用 xb-probe-master dist pull（应为 --version \"$%s\"）：\n"+
 			"  只打印一句「请自己跑 dist pull」等于没修——用户按收尾清单装第一个 Agent 时照样 404；\n"+
 			"  改用别的变量当版本号，等于忽略了调用方传进来的版本。", ver)
 	}
@@ -1165,9 +1166,44 @@ func TestReleaseOnlyModeUpdatesAgentReleaseWithoutTouchingMaster(t *testing.T) {
 	}
 	// 菜单加了项、提示语没跟着改，是这类改动最典型的半成品：用户盯着
 	// 「请输入 1 或 2」根本不会去试 3。
-	if !strings.Contains(body, `read_line _mode "请输入 1、2 或 3 [1]: "`) {
-		t.Error("菜单提示语没有跟着改成三个选项：\n" +
-			"  用户看到「请输入 1 或 2」就不会去试第 3 项，这个入口等于不存在。")
+	//
+	// 判据不写死"1、2、3"这种字面量：菜单项数是会长的（第 4、5 项就是后来加的），
+	// 写死一次就得跟着改一次，改漏了谁也不知道。这里改成从 ask_mode_menu 自己
+	// **数出来**有几项，再要求提示语把每一项都念到——菜单加到 6 项而提示语还停在
+	// 5 项，会立刻变红。
+	menu := shFuncBody(t, "scripts/deploy-master.sh", body, "ask_mode_menu")
+	reItem := regexp.MustCompile(`(?m)^[ \t]+([0-9])\) `)
+	nItems := 0
+	for _, m := range reItem.FindAllStringSubmatch(menu, -1) {
+		if n, _ := strconv.Atoi(m[1]); n > nItems {
+			nItems = n
+		}
+	}
+	if nItems < 2 {
+		t.Fatalf("从菜单里数出 %d 项——判据已与脚本写法脱节", nItems)
+	}
+	// 每一项（第 1 项除外——它就是兜底分支本身）都必须有一条 `\tN | 别名… )`
+	// 的取值臂。少了它，用户看见第 N 项、敲 N 进去，却被最后一个 `*) echo "1"`
+	// 接走——**静默去装 Master**。这比"提示语没改"恶劣得多：提示语没改只是看不见，
+	// 这条是会做错事。
+	for i := 2; i <= nItems; i++ {
+		arm := regexp.MustCompile(`(?m)^\t` + strconv.Itoa(i) + ` \| `)
+		if !arm.MatchString(menu) {
+			t.Errorf("菜单里画了第 %d 项，却没有 `%d |` 这条取值臂：\n"+
+				"  用户看得见、答进去不被认，而兜底分支会把它当成「安装/升级」——\n"+
+				"  选了 A 却做了 B，还是破坏性的那一个。", i, i)
+		}
+	}
+	nums := make([]string, 0, nItems)
+	for i := 1; i <= nItems; i++ {
+		nums = append(nums, strconv.Itoa(i))
+	}
+	wantPrompt := "read_line _mode \"请输入 " +
+		strings.Join(nums[:nItems-1], "、") + " 或 " + nums[nItems-1] + " [1]: \""
+	if !strings.Contains(body, wantPrompt) {
+		t.Errorf("菜单提示语没有跟着改成 %d 个选项（期望 %q）：\n"+
+			"  用户看到「请输入 1 或 2」就不会去试后面的项，那些入口等于不存在。",
+			nItems, wantPrompt)
 	}
 	// 第 3 项的"菜单 → 变量"映射现在落在 ask_mode_menu 里——菜单**只有那一份**
 	// （入口脚本也靠它问，见 --ask-mode），0b 只负责把答案接过去。所以判据要分两半，
@@ -1185,8 +1221,13 @@ func TestReleaseOnlyModeUpdatesAgentReleaseWithoutTouchingMaster(t *testing.T) {
 	}
 
 	// ---- ② 模式分支：切区间，别处的 resolve/pull 不许替它作证 ----
+	//
+	// 结束标记跟着结构走：0c 后面现在紧跟着 0d（只升级本体），而 0d 里**有**
+	// `install -m 0755`——它是本模式最该被排除的动作。早先这里用的是"# 卸载：
+	// --uninstall"（更靠后的一个标题），于是 0d/0e 整段被算进 0c 的区间，
+	// 下面第 ⑦ 条会报出一个**根本没在 0c 里发生**的"违规"。
 	region := shRegion(t, "scripts/deploy-master.sh", body,
-		"# 0c) 只更新 Agent 发布文件", "# 卸载：--uninstall")
+		"# 0c) 只更新 Agent 发布文件", "# 0d) 只升级 Master 本体")
 
 	if !strings.Contains(region, `if [ -n "$RELEASE_ONLY" ]; then`) {
 		t.Fatal("找不到 0c 的模式分支：判据与脚本结构脱节了。")
@@ -1285,9 +1326,20 @@ func TestReleaseOnlyModeUpdatesAgentReleaseWithoutTouchingMaster(t *testing.T) {
 	}
 
 	// ---- ⑨ 互斥：两个模式同时给必须被拒绝，而不是让其中一个悄悄赢 ----
-	if !strings.Contains(body, `if [ -n "$UNINSTALL" ] && [ -n "$RELEASE_ONLY" ]; then`) {
-		t.Error("--uninstall 与 --release-only 同时给没有被拒绝：\n" +
-			"  悄悄让其中一个赢，用户以为做了 A、实际做了 B，而两条路都不报错。")
+	//
+	// 判据**不**写"某两个标志两两与一下"：那种写法盖不住新加的模式（4 个单次模式
+	// 有 C(4,2)=6 对，写全很啰嗦、漏一对也没人发现）。所以这里钉的是"数一数"
+	// 这个机制本身，并逐个要求每个单次模式都被数进去——少计一个，那一对又会
+	// 静默通过，而症状是"用户以为做了 A、实际做了 B，两条路都不报错"。
+	for _, fl := range []string{"--uninstall", "--release-only", "--upgrade-only", "--reset-password"} {
+		if !strings.Contains(body, "_oneshot_note "+fl) {
+			t.Errorf("%s 没有被计入「只做一件事」的互斥判断：\n"+
+				"  不数它，它与别的单次模式同时给出时就会静默通过——\n"+
+				"  用户以为做了 A、实际做了 B，而两条路都不报错。", fl)
+		}
+	}
+	if !strings.Contains(body, `if [ "$_oneshot_count" -gt 1 ]; then`) {
+		t.Error("「只做一件事」的互斥没有按个数判断（退回两两列举就会漏掉新组合）。")
 	}
 
 	// ---- ⑩ 查询函数本身：两个来源 + 形态闸 + set -eu 下的失败处理 ----
@@ -1342,9 +1394,23 @@ func TestReleaseOnlyModeUpdatesAgentReleaseWithoutTouchingMaster(t *testing.T) {
 		t.Error("install-master.sh 解析了 --release-only 却没有转给部署脚本：\n" +
 			"  参数被读走之后什么也不做，是最难发现的一种失效。")
 	}
-	if !strings.Contains(inst, `if [ -n "$UNINSTALL" ] || [ -n "$RELEASE_ONLY" ]; then`) {
-		t.Error("install-master.sh 的 --release-only 没有走「排在依赖检查与编译之前」那条早退路径：\n" +
-			"  它不需要源码、不需要 Go。走正常路径就等于「更新个发布文件先装一套工具链」，\n" +
+	if !strings.Contains(inst, `if [ -n "$UNINSTALL" ] || [ -n "$RELEASE_ONLY" ] || [ -n "$RESET_PASSWORD" ]; then`) {
+		t.Error("install-master.sh 的 --release-only / --reset-password 没有走「排在依赖检查与编译之前」那条早退路径：\n" +
+			"  它们不需要源码、不需要 Go。走正常路径就等于「更新个发布文件先装一套工具链」，\n" +
 			"  而且工具链装不上就更新不了。")
+	}
+	// --upgrade-only 是这条规矩的**例外**，而例外也要钉住，否则"忘了把它加进早退
+	// 通路"和"故意让它去编译"这两种状态在仓库里长得一样：前者会让本模式彻底失效
+	// （升级本体靠的就是现场编译出来的那个二进制）。
+	if !strings.Contains(inst, `set -- --bin "$SRC/bin/xb-probe-master" --upgrade-only`) {
+		t.Error("install-master.sh 没有把 --upgrade-only 连编译产物一起交给部署脚本：\n" +
+			"  这个模式的二进制只能来自现场编译，不带 --bin 过去它必然以「需要指定新二进制」收场。")
+	}
+	// 只升级本体时**绝不能**把站点/证书那一串拼进参数：它们在那个模式下全是空的，
+	// 而其中 `--tls-mode "$TLS_MODE"` 是无条件拼的——空值会被部署脚本判成非法取值。
+	if !regexp.MustCompile(`(?m)^if \[ -n "\$UPGRADE_ONLY" \]; then\n\tset -- --bin .* --upgrade-only\n`).MatchString(inst) {
+		t.Error("install-master.sh 没有按 --upgrade-only 分成两支拼参数：\n" +
+			"  那些变量在那个模式下全是空的，无条件拼进去会把空值当成非法取值（如 --tls-mode \"\"），\n" +
+			"  结果是「只升级本体」连部署脚本都进不去。")
 	}
 }

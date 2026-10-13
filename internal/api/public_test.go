@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/yourorg/probe/internal/model"
+	"github.com/koyoca/xb-probe/internal/model"
 )
 
 // 公开延迟接口的两条行为契约，都是踩过坑之后补的。

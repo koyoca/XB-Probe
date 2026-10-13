@@ -4,7 +4,7 @@ import (
 	"database/sql"
 	"errors"
 
-	"github.com/yourorg/probe/internal/alert"
+	"github.com/koyoca/xb-probe/internal/alert"
 )
 
 // 实现 alert.Store，并提供规则与渠道的读写（4.5 / 6.5）。

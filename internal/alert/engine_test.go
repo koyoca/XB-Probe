@@ -894,3 +894,70 @@ func TestParseParams(t *testing.T) {
 		})
 	}
 }
+
+// TestChannelsAreReadFreshOnEveryDispatch 钉住"渠道清单每次现取"。
+//
+// 真机故障：后台点"测试发送"能收到 Tg 消息，但真出事时一条告警都没有，
+// 告警事件表里 delivered=0、日志里没有任何报错。原因是引擎在构造时就把渠道列表
+// **拍成了快照**（那时用户还没配 Tg，快照是空的）；而测试按钮走的是另一条路
+// ——现读设置、现建渠道——所以只有它通。
+//
+// 判据挑的是"构造之后新增的渠道能不能收到"，而不是"provider 被调用过几次"：
+// 后者在"调了但结果被缓存"的实现里同样成立。这里必须**在构造之后**往清单里加渠道，
+// 因为快照式实现正是在那一刻固定下来的。
+func TestChannelsAreReadFreshOnEveryDispatch(t *testing.T) {
+	store := newFakeStore()
+	ctx := context.Background()
+
+	// 构造时清单是**空的**（用户还没配渠道），之后才加进去。
+	var current []Channel
+	providerCalls := 0
+	e := NewDynamic(nil, store, func() []Channel {
+		providerCalls++
+		return current
+	})
+
+	// 第一轮：没有渠道 → 落库但未送达。
+	if err := e.Fire(ctx, 1, KindOffline, KindOffline, LevelWarn, "离线", 1000); err != nil {
+		t.Fatalf("Fire 报错: %v", err)
+	}
+	if len(store.events) != 1 || store.events[0].Delivered {
+		t.Fatalf("空渠道时应落库且未送达，实得 %+v", store.events)
+	}
+
+	// 管理员这时在后台配好了 Tg。
+	tg := &recChannel{name: "tg"}
+	current = []Channel{tg}
+
+	// 第二轮：**换一个 stateKind** 以绕开同一 (节点, 状态) 的冷却窗口。
+	if err := e.Fire(ctx, 1, KindOffline, KindOffline, LevelWarn, "还是离线", 1000+7200); err != nil {
+		t.Fatalf("Fire 报错: %v", err)
+	}
+	if tg.calls == 0 {
+		t.Fatalf("构造之后新增的渠道没有收到告警：\n"+
+			"  引擎把渠道清单在构造时拍成了快照 —— 后台新建的渠道对告警永远不可见，\n"+
+			"  而「测试发送」走另一条路（现读设置）所以是通的，看起来完全不合理。\n"+
+			"  provider 被调用次数 = %d", providerCalls)
+	}
+	if !store.events[1].Delivered {
+		t.Errorf("渠道投递成功却没有标记 delivered：%+v", store.events[1])
+	}
+}
+
+// TestNewStaticIsStillPerCallProvider 钉住 New 的兼容包装没有把快照语义带回来。
+//
+// New 收的是一个切片，但它必须包成"每次都返回同一份切片"的 provider，
+// 而不是在引擎里另存一份字段——否则 SetChannelProvider 就管不到它，
+// 两条构造路径的行为会分叉。
+func TestNewStaticIsStillPerCallProvider(t *testing.T) {
+	store := newFakeStore()
+	e := New(nil, store, nil)
+	ch := &recChannel{name: "later"}
+	e.SetChannelProvider(func() []Channel { return []Channel{ch} })
+	if err := e.Fire(context.Background(), 1, KindOffline, KindOffline, LevelWarn, "x", 1000); err != nil {
+		t.Fatalf("Fire 报错: %v", err)
+	}
+	if ch.calls == 0 {
+		t.Error("SetChannelProvider 之后仍然没投递：渠道走的是另一份字段，不是 provider")
+	}
+}

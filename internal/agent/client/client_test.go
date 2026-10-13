@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yourorg/probe/internal/model"
+	"github.com/koyoca/xb-probe/internal/model"
 )
 
 // Agent 与 Master 之间这条链路的测试。
@@ -237,7 +237,7 @@ func TestTokenTravelsOnlyInAuthorizationHeader(t *testing.T) {
 		if seen[i].rawQuery != "" {
 			t.Errorf("第 %d 个请求带了查询串 %q：令牌/参数不得进 URL", i+1, seen[i].rawQuery)
 		}
-		if seen[i].ua != "probe-agent" {
+		if seen[i].ua != "xb-probe-agent" {
 			t.Errorf("User-Agent = %q", seen[i].ua)
 		}
 		if seen[i].accept != "application/json" {

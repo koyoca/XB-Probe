@@ -1,4 +1,4 @@
-// Server Probe 管理后台前端（固定界面，5.2）。
+// XB-Probe 管理后台前端（固定界面，5.2）。
 //
 // 约束（13.4.5）：CSP 为 script-src 'self'; style-src 'self'，因此：
 //   - 不加载任何 CDN 资源，图表用手绘 Canvas；
@@ -244,7 +244,7 @@
     'channel.create': '创建告警渠道', 'channel.update': '更新告警渠道', 'channel.delete': '删除告警渠道',
     'rule.create': '创建告警规则', 'rule.update': '更新告警规则', 'rule.delete': '删除告警规则',
     'settings.update': '更新系统设置', 'billing.update': '更新计费信息',
-    'billing.renew': '续费',
+    'billing.renew': '续费', 'traffic.override': '矫正本周期已用流量',
     'auth.login': '登录', 'auth.logout': '登出', 'auth.password': '修改密码',
     'auth.login_fail': '登录失败',
     'auth.totp_enable': '启用 TOTP',
@@ -371,6 +371,98 @@
   }
 
   // -------------------------------------------------------------------------
+  // 站内对话框（#ask-modal）
+  //
+  // 为什么不用原生 confirm/alert：
+  //   · 浏览器可以"阻止此页面再显示对话框"，此后 confirm 静默返回 false、
+  //     alert 什么都不显示 —— 界面看上去毫无反应，管理员只会以为按钮坏了；
+  //   · 深色主题下原生弹窗是刺眼的白底，风格与整站不一致；
+  //   · 注册码这类内容要能选中/一键复制，原生 alert 做不到。
+  //
+  // 一个组件承担两种用法：二次确认（只给按钮）与结果展示（多一段可复制的值）。
+  // 每次调用都会**重置**所有字段，避免上一次的注册码留在界面上（那是凭据，
+  // 不该在对话框关掉之后还留在 DOM 里等下一双眼睛）。
+  // -------------------------------------------------------------------------
+
+  var askResolve = null;
+
+  // askDialog 打开对话框，返回 Promise：
+  //   确认 → true；取消 / 点遮罩 / 按 Esc → false。
+  function askDialog(opts) {
+    opts = opts || {};
+    setText($('ask-title'), opts.title || '确认');
+    setText($('ask-desc'), opts.desc || '');
+    $('ask-desc').hidden = !opts.desc;
+
+    var vw = $('ask-value-wrap');
+    if (opts.value) {
+      setText($('ask-value'), opts.value);
+      vw.hidden = false;
+      $('ask-copy').hidden = false;
+    } else {
+      setText($('ask-value'), '');
+      vw.hidden = true;
+      $('ask-copy').hidden = true;
+    }
+
+    setText($('ask-extra'), opts.extra || '');
+    $('ask-extra').hidden = !opts.extra;
+    setText($('ask-ok'), opts.okText || '确定');
+    // 结果展示型（只读）：没有可取消的东西，收起"取消"按钮免得两个按钮都像出口。
+    $('ask-cancel').hidden = !!opts.hideCancel;
+
+    $('ask-modal').hidden = false;
+    if ($('ask-ok').focus) $('ask-ok').focus();
+
+    return new Promise(function (resolve) { askResolve = resolve; });
+  }
+
+  function closeAskDialog(result) {
+    $('ask-modal').hidden = true;
+    setText($('ask-value'), ''); // 凭据不留 DOM
+    var r = askResolve;
+    askResolve = null;
+    if (r) r(!!result);
+  }
+
+  $('ask-ok').addEventListener('click', function () { closeAskDialog(true); });
+  $('ask-cancel').addEventListener('click', function () { closeAskDialog(false); });
+  $('ask-modal').addEventListener('click', function (ev) {
+    // 点遮罩关闭 = 取消（点卡片内部不关：那里可能正在选中注册码）。
+    if (ev.target === $('ask-modal')) closeAskDialog(false);
+  });
+  document.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Escape' && !$('ask-modal').hidden) closeAskDialog(false);
+  });
+
+  $('ask-copy').addEventListener('click', function () {
+    var text = $('ask-value').textContent || '';
+    if (!text) return;
+    // 剪贴板 API 只在安全上下文（https / localhost）可用；纯 HTTP 的部署
+    // （内网用 IP 直连后台）会走到降级分支，此时把内容选中并提示手动复制——
+    // 直接失败会让用户以为"复制按钮没用"。
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () { toast('已复制'); },
+        function () { selectAskValue(); });
+    } else {
+      selectAskValue();
+    }
+  });
+
+  function selectAskValue() {
+    try {
+      var r = document.createRange();
+      r.selectNodeContents($('ask-value'));
+      var sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(r);
+      toast('已选中，请按 Ctrl+C / ⌘C 复制');
+    } catch (e) {
+      toast('请手动选中后复制', true);
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // API
   // -------------------------------------------------------------------------
 
@@ -423,7 +515,7 @@
   }
 
   function applySiteTitle(all) {
-    var title = (all && all['site.title']) || 'Server Probe';
+    var title = (all && all['site.title']) || 'XB-Probe';
     document.title = title + ' 管理后台';
     var loginTitle = $('login-title');
     var brand = $('brand-title');
@@ -1103,7 +1195,7 @@
       body.appendChild(renderHistoryCard(n));
       loadRuntime(n.id, body.firstChild);
       loadTokens(n.id);
-      loadTraffic(n.id);
+      loadTraffic(n);
       loadNodeTargets(n.id);
     }).catch(function (e) {
       clear(body);
@@ -1296,8 +1388,21 @@
     panel.appendChild(field('名称', 'n-name', n.name));
     panel.appendChild(field('分组', 'n-group', n.group));
     panel.appendChild(field('排序（越小越靠前）', 'n-sort', n.sort_order));
-    panel.appendChild(field('IPv4（覆盖自动探测）', 'n-ip4', n.ip_v4));
-    panel.appendChild(field('IPv6', 'n-ip6', n.ip_v6));
+    // 地址是"自动探测 + 手动覆盖"两态，标签必须把当前状态说清楚：
+    //   - 自动态下若不明说，用户看到空值会以为坏了，于是手填一个 —— 那正好把
+    //     自动探测永久关掉（UpdateNodeAssets 的三态规则：值与库里不同 = 锁定）；
+    //   - 手动态下若不明说，用户改了服务器地址却发现地址栏不变，无从排查。
+    // n.ip_auto 缺省视为 true（老数据/接口未升级时不吓唬人）。
+    var ipAuto = n.ip_auto !== false;
+    panel.appendChild(field(
+      ipAuto ? 'IPv4（自动探测中，填写即覆盖）' : 'IPv4（已锁定为手动值，清空两栏并保存可恢复自动）',
+      'n-ip4', n.ip_v4));
+    panel.appendChild(field('IPv6（与 IPv4 共用同一个"自动/手动"开关）', 'n-ip6', n.ip_v6));
+    panel.appendChild(el('p', 'muted',
+      ipAuto
+        ? '自动探测记录的是上报来源地址。Master 与节点同机部署（或节点在 NAT 后）时来源不是公网地址，'
+          + '需要在节点上启用自助探测：sudo xb-probe-agent install --public-ip-url https://api.ipify.org'
+        : '这两个地址已被手动指定，自动探测不会再改写它们。把两栏都清空并保存即可恢复自动探测。'));
     panel.appendChild(field('服务商', 'n-provider', n.provider));
     panel.appendChild(field('机房/位置', 'n-location', n.location));
     panel.appendChild(field('备注', 'n-note', n.note));
@@ -1416,12 +1521,40 @@
     return wrap;
   }
 
+  // reenroll 重新签发令牌。
+  //
+  // 两步走，都在站内对话框里（以前是"点了就发"再弹一个原生 alert 显示注册码）：
+  //   1. 先说清楚会发生什么 —— 尤其是"旧令牌不会自动吊销"，
+  //      因为用这个按钮的人往往正是怀疑令牌泄漏的那一个；
+  //   2. 把注册码与要照抄的命令一起给出来，可一键复制。
+  // 原来那个写法有两个实际问题：没有任何前置说明（点一下就已经签发了），
+  // 而结果弹窗一旦被浏览器"阻止此页面再显示对话框"吞掉，界面上**毫无反应**，
+  // 管理员只会以为按钮坏了 —— 注册码也因此拿不到。
   function reenroll(id) {
-    guard(api('/nodes/' + id + '/enroll-codes', { method: 'POST' })).then(function (r) {
-      if (!r) return;
-      alert('新注册码：' + r.code + '\n有效期至 ' + fmtTime(r.expires_at)
-        + '\n\n到节点执行：probe-agent reenroll --code ' + r.code);
-      loadTokens(id);
+    var n = null;
+    (state.nodes || []).forEach(function (x) { if (x.id === id) n = x; });
+    var who = n && n.name ? ('「' + n.name + '」') : ('#' + id);
+
+    askDialog({
+      title: '重新签发令牌',
+      desc: '为节点 ' + who + ' 签发一个新的注册码。节点用它到本地换一个新令牌。' +
+        '旧令牌不会被自动吊销 —— 若你怀疑它已经泄漏，请在下面的令牌列表里手动吊销。',
+      extra: '在你到节点上执行命令之前，节点仍用旧令牌正常上报。',
+      okText: '签发注册码'
+    }).then(function (ok) {
+      if (!ok) return;
+      guard(api('/nodes/' + id + '/enroll-codes', { method: 'POST' })).then(function (r) {
+        if (!r) return;
+        askDialog({
+          title: '注册码已签发',
+          desc: '到节点上执行下面这条命令完成重新注册：',
+          value: 'xb-probe-agent reenroll --code ' + r.code,
+          extra: '有效期至 ' + fmtTime(r.expires_at) + '。注册码是一次性的，过期后需重新签发。',
+          okText: '知道了',
+          hideCancel: true
+        });
+        loadTokens(id);
+      });
     });
   }
 
@@ -1802,7 +1935,7 @@
           t2.appendChild(tb);
           wrap2.appendChild(t2);
           // 返回入口：明细视图替换了总览内容，没有它管理员只能重进详情页。
-          var back = btn('返回总览', 'ghost mini', function () { loadTraffic(n.id); });
+          var back = btn('返回总览', 'ghost mini', function () { loadTraffic(n); });
           box.appendChild(back);
           box.appendChild(wrap2);
         }).catch(function (e) { toast(e.message, true); });
@@ -1812,12 +1945,22 @@
     return wrap;
   }
 
-  function loadTraffic(id) {
+  // loadTraffic 渲染「流量」面板：本周期已用量 + 手工矫正入口。
+  //
+  // 需要整个节点对象（不只是 id）才能拿到 n.billing：矫正框里要按当前节点
+  // 的计量口径与倍率实时显示"折合计费流量"，否则管理员填完数字无从判断
+  // 这个值到底对应页面上哪个百分比。
+  function loadTraffic(n) {
+    var id = n.id;
     api('/nodes/' + id + '/traffic?period=current').then(function (st) {
       var box = $('traffic-box');
       if (!box) return;
       clear(box);
-      if (!st) { box.appendChild(el('p', 'muted', '尚无流量记录。')); return; }
+      if (!st) {
+        box.appendChild(el('p', 'muted', '尚无流量记录。'));
+        renderTrafficOverride(box, n, 0, 0);
+        return;
+      }
       var dl = el('dl', 'kv');
       [['周期起点', fmtTime(st.period_start)], ['已用下行', fmtBytes(st.period_rx)],
         ['已用上行', fmtBytes(st.period_tx)], ['合计', fmtBytes((st.period_rx || 0) + (st.period_tx || 0))],
@@ -1826,10 +1969,111 @@
         dl.appendChild(el('dd', null, kv[1]));
       });
       box.appendChild(dl);
+      renderTrafficOverride(box, n, st.period_rx || 0, st.period_tx || 0);
     }).catch(function () {
       var box = $('traffic-box');
       if (box) { clear(box); box.appendChild(el('p', 'muted', '尚无流量记录。')); }
     });
+  }
+
+  // renderTrafficOverride 渲染「矫正本周期已用流量」表单。
+  //
+  // 为什么矫正的是**原始计量值**（period_rx / period_tx）而不是页面上那个
+  // 折算后的计费流量：反推要先解一遍 ApplyMode + ApplyMultiplier，而
+  // `取较大方向` 这类口径根本反推不出唯一解（把目标值给哪一向都成立）。
+  // 直接编辑原始值只需要"看到什么就改什么"——输入框里的数字就是
+  // 上面 dl 里显示的两个数字，改完下方立刻给出折算结果。
+  function renderTrafficOverride(box, n, rx, tx) {
+    var b = n.billing || {};
+    var mode = b.traffic_mode || 'both';
+    var mult = b.traffic_multiplier > 0 ? b.traffic_multiplier : 1;
+
+    box.appendChild(el('h3', null, '手工矫正本周期用量'));
+    box.appendChild(el('p', 'muted',
+      '用途：Agent 重装后累计值从零开始、或运营商侧已计入的流量需要在面板上对齐。' +
+      '两栏都填 0 即清零本周期用量；只改本周期合计，不会改写按日明细（历史事实）。'));
+
+    var pair = el('div', 'field-pair');
+    function unitInput(label, id, bytes) {
+      var wrap = el('label');
+      wrap.title = label + '的原始计量值（未折算、未乘倍率）';
+      wrap.appendChild(el('span', 'lbl', label));
+      var row = el('div', 'field-pair');
+      var q = quotaToUnit(bytes || 0);
+      var val = el('input');
+      val.id = id;
+      val.type = 'number';
+      val.step = 'any';
+      val.min = '0';
+      val.value = q.value;
+      var unit = el('select');
+      unit.id = id + '-unit';
+      QUOTA_UNITS.forEach(function (o) {
+        var op = el('option', null, o[1]);
+        op.value = String(o[0]);
+        unit.appendChild(op);
+      });
+      unit.value = String(q.multiplier);
+      row.appendChild(val);
+      row.appendChild(unit);
+      wrap.appendChild(row);
+      return wrap;
+    }
+    pair.appendChild(unitInput('已用下行', 't-rx', rx));
+    pair.appendChild(unitInput('已用上行', 't-tx', tx));
+    box.appendChild(pair);
+
+    var hint = el('p', 'muted');
+    box.appendChild(hint);
+    function current() {
+      return {
+        rx: quotaToBytes(parseFloat($('t-rx').value) || 0, parseInt($('t-rx-unit').value, 10)),
+        tx: quotaToBytes(parseFloat($('t-tx').value) || 0, parseInt($('t-tx-unit').value, 10))
+      };
+    }
+    // 折算提示：让"口径 + 倍率"这个乘法在矫正现场可见。否则管理员填完
+    // 100 GB 完全不知道进度条会跳到哪。
+    function refreshHint() {
+      var v = current();
+      var used = billable(v.rx, v.tx, mode, mult);
+      var quota = b.traffic_quota || 0;
+      var s = '折合计费流量 = ' + fmtBytes(used) + '（口径' + modeLabel(mode) + ' × 倍率 ' + mult + '）';
+      if (quota > 0) {
+        s += '；额度 ' + fmtBytes(quota) + '，约占 ' + (trafficPct(used, quota) / 100).toFixed(2) + '%';
+      }
+      hint.textContent = s;
+    }
+    ['t-rx', 't-tx'].forEach(function (id) {
+      $(id).addEventListener('input', refreshHint);
+      $(id + '-unit').addEventListener('change', refreshHint);
+    });
+    refreshHint();
+
+    var row = el('div', 'row');
+    row.appendChild(btn('保存矫正', 'primary', function () {
+      var v = current();
+      guard(api('/nodes/' + n.id + '/traffic', { method: 'PUT', body: { period_rx: v.rx, period_tx: v.tx } }),
+        '已矫正本周期用量')
+        .then(function () { loadTraffic(n); });
+    }));
+    box.appendChild(row);
+  }
+
+  function modeLabel(mode) {
+    return { both: '上下行相加', up: '仅上行', down: '仅下行', max: '取较大方向' }[mode] || mode;
+  }
+
+  // trafficPct 与后端 traffic.Percent 同口径：万分比，0~10000，额度不限时 0。
+  function trafficPct(used, quota) {
+    if (quota <= 0 || used <= 0) return 0;
+    if (used >= quota) return 10000;
+    return Math.floor((used / quota) * 10000);
+  }
+
+  // billable 与后端 traffic.Billable 同口径：先按计量口径取一个数值，再乘倍率。
+  function billable(rx, tx, mode, mult) {
+    var used = mode === 'up' ? tx : mode === 'down' ? rx : mode === 'max' ? Math.max(rx, tx) : rx + tx;
+    return Math.round(used * mult);
   }
 
   function renderHistoryCard(n) {
@@ -3176,10 +3420,13 @@
       });
   });
 
-  var RULE_LABEL = {
-    offline: '离线', cpu: 'CPU 越阈值', mem: '内存越阈值', disk: '磁盘越阈值',
-    traffic: '流量梯级', expire: '到期提醒', probe_fail: '探测连续失败'
-  };
+  // 规则与事件的"类型"中文名由**服务端**下发（Go 侧的 alert.KindLabel 是唯一来源），
+  // 这里不再自己维护一份 kind→中文 的映射：
+  //   - 规则      → /alert-rules 的每条带 label
+  //   - 告警事件  → /alert-events 的每条带 kind_label
+  // 曾经这里有一份 RULE_LABEL，而事件表用的是 `RULE_LABEL[kind] || kind`：
+  // 事件落库的是**状态键**（expire:30、traffic:80、probe_fail:12），
+  // 映射里只有不带后缀的基础名，于是永远走 fallback，表里显示的是 `expire:30`。
 
   function loadRules() {
     api('/alert-rules').then(function (rules) {
@@ -3190,7 +3437,8 @@
         var r = state.rules[kind];
         var p = r.params || {};
         var tr = el('tr');
-        tr.appendChild(td(RULE_LABEL[kind] || kind));
+        // r.label 缺失时退回 kind（后端老版本/接口异常时仍然能用，不至于空一格）。
+        tr.appendChild(td(r.label || kind));
 
         var e = el('td');
         var chk = el('input');
@@ -3341,7 +3589,9 @@
         var tr = el('tr');
         tr.appendChild(td(fmtTime(e.created_at)));
         tr.appendChild(td(e.node_id ? ('#' + e.node_id) : '-'));
-        tr.appendChild(td(RULE_LABEL[e.kind] || e.kind));
+        // kind_label 由服务端出（见 alert.KindLabel）：`expire:30` → "到期提醒（剩余 ≤ 30 天）"。
+        // 没拿到就退回原始键——显示一个看不懂的键，也好过显示一格空白。
+        tr.appendChild(td(e.kind_label || e.kind));
         tr.appendChild(td(e.level));
         tr.appendChild(td(e.message, 'wrap'));
         tr.appendChild(td(e.delivered ? '是' : '否'));
@@ -4157,7 +4407,7 @@
       (r.missing || []).forEach(function () { /* 缺失项在下方统一展示 */ });
       var rels = r.releases || [];
       if (!rels.length) {
-        box.appendChild(el('p', 'muted', 'dist 目录下还没有发布文件。把 probe-agent_<os>_<arch> 与 SHA256SUMS 放到 data_dir/dist/<version>/ 即可。'));
+        box.appendChild(el('p', 'muted', 'dist 目录下还没有发布文件。把 xb-probe-agent_<os>_<arch> 与 SHA256SUMS 放到 data_dir/dist/<version>/ 即可。'));
       }
       rels.forEach(function (rel) {
         var card = el('div', 'panel');

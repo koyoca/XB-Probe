@@ -33,6 +33,8 @@
 #   --dry-run           只打印将要执行的步骤，不改动系统
 #   --uninstall         卸载（连数据一起清；加 --keep-data 保留数据目录）
 #   --keep-data         与 --uninstall 同用
+#   --upgrade-only      只升级 Master 本体（编译之后只换二进制，不问站点/证书/账号）
+#   --reset-password    只重置管理员密码（不编译、不卸载、不清数据）
 #   -h, --help          显示本帮助
 #
 # 其余参数原样透传给 scripts/deploy-master.sh（--public-origin、--admin-origin、
@@ -94,6 +96,11 @@ FORCE_CONFIG=""
 UNINSTALL=""
 # 只更新 Agent 发布文件（不动 Master 的二进制、配置与服务）。
 RELEASE_ONLY=""
+# 只升级 Master 本体：照旧取源码 + 编译（本脚本的意义就在这），但**不再问**
+# 站点/证书/管理员那一套，编译完只把二进制换上去。
+UPGRADE_ONLY=""
+# 只重置管理员密码：不需要源码、不需要 Go，所以和卸载一样走"编译之前"的早退通路。
+RESET_PASSWORD=""
 KEEP_DATA=""
 
 # go.mod 声明的最低 Go 版本。低于它构建会直接失败，所以先在依赖检查时拦下，
@@ -117,6 +124,12 @@ install-master.sh —— XB-Probe Master 整机一键部署
   --release-only       只更新 Agent 发布文件（查 GitHub 最新 Release 拉进
                        data_dir/dist/，不动 Master 的二进制/配置/服务）。
                        同样不需要源码与 Go，与 --uninstall 互斥。
+  --upgrade-only       只升级 Master 本体：照旧取源码 + 编译，但**不再问**站点
+                       地址、证书、监听端口、管理员账号那一套，编译完只把新二进制
+                       换上去并重启服务（配置、证书、管理员、data_dir/dist 都不动）。
+  --reset-password     只重置管理员密码（不需要源码与 Go，不卸载、不清数据）。
+                       口令按 PROBE_ADMIN_PASSWORD / --admin-password / 交互的
+                       顺序取；用户名默认 ops，可用 --admin-user 指定。
   -h, --help           显示本帮助
 
   其余参数透传给 scripts/deploy-master.sh：
@@ -178,6 +191,8 @@ while [ $# -gt 0 ]; do
 	--force-config) FORCE_CONFIG="1"; shift ;;
 	--uninstall) UNINSTALL="1"; shift ;;
 	--release-only) RELEASE_ONLY="1"; shift ;;
+	--upgrade-only) UPGRADE_ONLY="1"; shift ;;
+	--reset-password) RESET_PASSWORD="1"; shift ;;
 	--keep-data) KEEP_DATA="1"; shift ;;
 	-h | --help) usage; exit 0 ;;
 	*) err "未知参数：$1"; usage; exit 2 ;;
@@ -369,9 +384,12 @@ Darwin)
 	;;
 esac
 
-# 卸载有它自己的一小段检查（下面）。这里把它排除在外，否则非 root 卸载会先撞上
-# 这段"要写 $BIN_DIR 与注册 systemd 服务"的提示——那段话描述的完全不是在做的事。
-if [ "$(id -u)" -ne 0 ] && [ -z "$NO_SERVICE" ] && [ -z "$UNINSTALL" ]; then
+# 卸载与"重置密码"各有自己的一小段检查（下面）。这里把它们排除在外，否则非 root
+# 卸载会先撞上这段"要写 $BIN_DIR 与注册 systemd 服务"的提示——那段话描述的完全
+# 不是在做的事（重置密码要的是写数据库的权限，跟 $BIN_DIR、systemd 都无关）。
+# --upgrade-only **不在**排除之列：它同样要写 $BIN_DIR、同样要重启 systemd 服务，
+# 而且这里挡住是对的——不然用户要先白装一套 Go 工具链、白编译几分钟才被告知没权限。
+if [ "$(id -u)" -ne 0 ] && [ -z "$NO_SERVICE" ] && [ -z "$UNINSTALL" ] && [ -z "$RESET_PASSWORD" ]; then
 	cat >&2 <<EOF
 错误：需要 root（要写 $BIN_DIR 与注册 systemd 服务）。
 
@@ -381,7 +399,7 @@ if [ "$(id -u)" -ne 0 ] && [ -z "$NO_SERVICE" ] && [ -z "$UNINSTALL" ]; then
     curl -fsSL <本脚本的 URL> -o install-master.sh && sudo sh install-master.sh
 
 容器 / 无 systemd / 只读根文件系统的场景，可以不用 root：
-    sh install-master.sh --no-service --dir ./probe-master --data ./probe-master/data --bin-dir ./probe-master/bin
+    sh install-master.sh --no-service --dir ./xb-probe-master --data ./xb-probe-master/data --bin-dir ./xb-probe-master/bin
 EOF
 	exit 1
 fi
@@ -396,9 +414,13 @@ fi
 # 而这两件事**根本不需要源码，也不需要 Go**。
 #
 # 菜单只有一份（在 scripts/deploy-master.sh 的 0a-3），这里用 --ask-mode 把答案
-# 取回来。取回来之后：
-#   · 2 / 3 → 折成 --uninstall / --release-only，交给下面那段早退通路（它本来
-#     就是为这两个模式准备的，不走源码与 Go）；
+# 取回来。取回来之后分三类：
+#   · 2 / 5 → 折成 --uninstall / --reset-password，交给下面那段早退通路（卸载本来就
+#     是为它准备的，重置密码同理：两者都不走源码、不走 Go）；
+#   · 4 → 置 UPGRADE_ONLY。这条**要编译**（本脚本的意义就是"从源码装"），所以它不
+#     走早退通路，而是跳过下面整段 TLS/地址/管理员问答，编译完只把二进制换上去。
+#     它也不需要 __ASKED_MODE：下面把 --upgrade-only 显式传下去，部署脚本见到这个
+#     标志就不会再问第二遍。
 #   · 1 → 记下 __ASKED_MODE，最后交给部署脚本时带上 --mode 1，免得用户被问第二遍。
 #
 # 问不到就**什么都不做**，退回原来的行为（由 deploy-master.sh 稍后再问）：网络不通、
@@ -406,6 +428,7 @@ fi
 # 让安装直接失败，因为"多问一次"只是体验差一点，而"因此装不上"是真损失。
 __ASKED_MODE=""
 if [ -z "$UNINSTALL" ] && [ -z "$RELEASE_ONLY" ] &&
+	[ -z "$UPGRADE_ONLY" ] && [ -z "$RESET_PASSWORD" ] &&
 	[ -z "$NON_INTERACTIVE" ] && [ -z "$DRY_RUN" ] && [ -t 0 ]; then
 	_base="$(raw_base "$REPO" "$REF")"
 	if [ -n "$_base" ]; then
@@ -413,11 +436,13 @@ if [ -z "$UNINSTALL" ] && [ -z "$RELEASE_ONLY" ] &&
 		mkdir -p "$_tmpq"
 		if download "$_base/scripts/deploy-master.sh" >"$_tmpq/deploy-master.sh" 2>/dev/null &&
 			[ -s "$_tmpq/deploy-master.sh" ]; then
-			# 菜单与提示走它的 stderr（直接显示给用户），答案只可能是 1/2/3。
+			# 菜单与提示走它的 stderr（直接显示给用户），答案只可能是 1/2/3/4/5。
 			case "$(sh "$_tmpq/deploy-master.sh" --ask-mode 2>/dev/null || true)" in
 			1) __ASKED_MODE="1" ;;
 			2) UNINSTALL="1" ;;
 			3) RELEASE_ONLY="1" ;;
+			4) UPGRADE_ONLY="1" ;;
+			5) RESET_PASSWORD="1" ;;
 			esac
 		fi
 		rm -rf "$_tmpq" 2>/dev/null || true
@@ -427,17 +452,40 @@ fi
 # ---------------------------------------------------------------------------
 # 卸载 / 只更新 Agent 发布文件（排在依赖检查与编译之前）
 # ---------------------------------------------------------------------------
-# 这两个模式都不需要源码、不需要 Go，所以必须排在
+# 这几个模式都不需要源码、不需要 Go，所以必须排在
 # "装依赖 / clone / 编译"**之前**——否则"更新个 Agent 发布文件"要先装一套工具链，
 # 是本末倒置，而且一旦工具链装不上就更新不了。
 #
-# 两者的取件/删除逻辑都只有一份（scripts/deploy-master.sh 的 --uninstall /
-# --release-only），这里从仓库把它取回来执行。**刻意不自己实现一遍**：
-# 两份逻辑迟早漂移，而这里赌的是用户的系统。
-if [ -n "$UNINSTALL" ] || [ -n "$RELEASE_ONLY" ]; then
+# 三者的取件/删除/改口令逻辑都只有一份（scripts/deploy-master.sh 的 --uninstall /
+# --release-only / --reset-password），这里从仓库把它取回来执行。**刻意不自己实现
+# 一遍**：两份逻辑迟早漂移，而这里赌的是用户的系统。
+#
+# --upgrade-only **不在**这一段里：它要编译，所以走不了早退通路（见下面第 6 步）。
+#
+# 三个单次模式在入口这里**也必须互斥**：下面那段早退通路是"用一串新的参数顶掉原来
+# 的（set --）"，所以一旦同时给了两个，被顶掉的那个**永远不会到达部署脚本**——
+# 而部署脚本的互斥判断（0-0 段）本来是能抓住这种组合的。少了这一段判断，
+# `--upgrade-only --uninstall` 会安安静静地卸载，用户以为自己在升级本体。
+#
+# 判据同样写成"数一数"，而不是两两列举。
+_im_oneshot=""
+_im_count=0
+if [ -n "$UNINSTALL" ]; then _im_count=$((_im_count + 1)); _im_oneshot="$_im_oneshot --uninstall"; fi
+if [ -n "$RELEASE_ONLY" ]; then _im_count=$((_im_count + 1)); _im_oneshot="$_im_oneshot --release-only"; fi
+if [ -n "$UPGRADE_ONLY" ]; then _im_count=$((_im_count + 1)); _im_oneshot="$_im_oneshot --upgrade-only"; fi
+if [ -n "$RESET_PASSWORD" ]; then _im_count=$((_im_count + 1)); _im_oneshot="$_im_oneshot --reset-password"; fi
+if [ "$_im_count" -gt 1 ]; then
+	err "这几项都只做一件事，不能同时使用：$_im_oneshot"
+	err "  「卸载」「只更新发布文件」「只升级本体」「重置密码」一次只能选一个。"
+	exit 2
+fi
+
+if [ -n "$UNINSTALL" ] || [ -n "$RELEASE_ONLY" ] || [ -n "$RESET_PASSWORD" ]; then
 	if [ -z "$DRY_RUN" ] && [ "$(id -u)" -ne 0 ]; then
 		if [ -n "$UNINSTALL" ]; then
 			err "卸载需要 root 或 sudo（--dry-run 不需要）。"
+		elif [ -n "$RESET_PASSWORD" ]; then
+			err "重置口令要写 $DATA 里的数据库，需要 root 或 sudo（--dry-run 不需要）。"
 		else
 			err "更新发布文件要往 data_dir/dist 里写，需要 root 或 sudo（--dry-run 不需要）。"
 		fi
@@ -453,6 +501,10 @@ if [ -n "$UNINSTALL" ] || [ -n "$RELEASE_ONLY" ]; then
 		_early_what="卸载"
 		set -- --uninstall
 		[ -n "$KEEP_DATA" ] && set -- "$@" --keep-data
+	elif [ -n "$RESET_PASSWORD" ]; then
+		_early_what="重置管理员密码"
+		set -- --reset-password
+		[ -n "$ADMIN_USER" ] && set -- "$@" --admin-user "$ADMIN_USER"
 	else
 		# 措辞要能被套进下面那两句（"取部署脚本…以执行X" / "开始X…"），
 		# 所以不要再带"只"字：那会读成"开始只更新…"，像是漏了一个词。
@@ -498,6 +550,18 @@ fi
 # ---------------------------------------------------------------------------
 # 1) 交互问答（放在装依赖之前：答案是错的就没必要动系统）
 # ---------------------------------------------------------------------------
+#
+# --upgrade-only 把这一整段（TLS 方式、对外地址、管理员账号）连同下面的"2) 确认"
+# 一起跳过：它只换二进制，站点、证书、端口、管理员**一个都不动**，所以问这些
+# 既是白问、又容易让人以为"改了什么"。用户原话：
+#   「他会全部走一遍流程，包括站点设置、证书申请、管理员账号设置等全部流程，
+#     但是这些我不想做，我仅仅只想升级 master 本体」。
+#
+# 这段体量太大（两百来行），包进 if 之后**刻意不整体缩进一格**：那会让本次改动
+# 看起来动了全文每一行，日后 diff 再也读不出"这次到底改了哪几处"。首尾各留一条
+# 显眼的分隔注释，靠它定位块边界。
+# ==== 站点/证书/管理员问答 开始（upgrade-only 时整段跳过）====
+if [ -z "$UPGRADE_ONLY" ]; then
 
 PUBIP="$(detect_public_ip)"
 
@@ -694,7 +758,7 @@ if [ -z "$NON_INTERACTIVE" ]; then
 	if [ -n "$NO_SERVICE" ]; then
 		printf '  %-10s %s\n' "服务" "不注册（--no-service）" >&2
 	else
-		printf '  %-10s %s\n' "服务" "systemd（probe-master，开机自启）" >&2
+		printf '  %-10s %s\n' "服务" "systemd（xb-probe-master，开机自启）" >&2
 	fi
 	echo >&2
 	if ! confirm "继续？"; then
@@ -702,6 +766,13 @@ if [ -z "$NON_INTERACTIVE" ]; then
 		exit 0
 	fi
 fi
+fi
+# ==== 站点/证书/管理员问答 结束（upgrade-only 时整段跳过）====
+
+# upgrade-only 不问上面那些，但下面第 6 步要把 ADMIN_USER 透传下去（--admin-user），
+# 而它在那条路上一直是空的。这里补上同一个默认值——默认值只能有一份来源，
+# 所以取自部署脚本一致的那一个（ops），不另立一个。
+[ -n "$ADMIN_USER" ] || ADMIN_USER="ops"
 
 # ---------------------------------------------------------------------------
 # 3) 依赖
@@ -762,8 +833,13 @@ fi
 
 if [ "$DRY_RUN" = "1" ]; then
 	say "（dry-run）取源码：$REPO（$REF）→ $SRC"
-	say "（dry-run）编译：cd $SRC && CGO_ENABLED=0 go build -trimpath -o bin/probe-master ./cmd/probe-master"
-	say "（dry-run）部署：sh $SRC/scripts/deploy-master.sh --bin $SRC/bin/probe-master …"
+	say "（dry-run）编译：cd $SRC && CGO_ENABLED=0 go build -trimpath -o bin/xb-probe-master ./cmd/xb-probe-master"
+	if [ -n "$UPGRADE_ONLY" ]; then
+		say "（dry-run）部署：sh $SRC/scripts/deploy-master.sh --bin $SRC/bin/xb-probe-master --upgrade-only"
+		say "（dry-run）只换 Master 二进制并重启服务；配置、证书、管理员账号、data_dir/dist 都不动。"
+	else
+		say "（dry-run）部署：sh $SRC/scripts/deploy-master.sh --bin $SRC/bin/xb-probe-master …"
+	fi
 	say "（dry-run）以上为计划，未改动系统。"
 	exit 0
 fi
@@ -798,28 +874,40 @@ fi
 
 VER="$(git -C "$SRC" describe --tags --always 2>/dev/null || echo dev)"
 [ -n "$VER" ] || VER="dev"
-say "编译 probe-master（版本 $VER）"
+say "编译 xb-probe-master（版本 $VER）"
 if ! (
 	cd "$SRC" &&
 		CGO_ENABLED=0 "$GO_BIN" build -trimpath -ldflags "-s -w -X main.version=$VER" \
-			-o bin/probe-master ./cmd/probe-master
+			-o bin/xb-probe-master ./cmd/xb-probe-master
 ); then
 	err "编译失败。若是拉依赖超时/被墙，试：--goproxy https://goproxy.cn,direct"
 	err "若是 Go 版本问题，试：--go-version 1.27.2（或先卸载旧 Go）"
 	exit 1
 fi
-say "已生成 $SRC/bin/probe-master"
+say "已生成 $SRC/bin/xb-probe-master"
 
 # ---------------------------------------------------------------------------
 # 6) 交给 deploy-master.sh 完成落盘、服务与健康检查
 # ---------------------------------------------------------------------------
 
-set -- --bin "$SRC/bin/probe-master"
 # 0b 已经问过"做什么"且答案是 1，把答案带下去，免得用户被问第二遍。
 # **只在真的问出来过的时候才传**：--mode 是新加的，老版本的部署脚本对未知参数
 # 是硬失败（exit 2）。而"上面那次 --ask-mode 成功了"正好等价于"这个脚本认识
 # --mode"（同一个文件），所以这个条件本身就把兼容性判断做完了。
-[ -n "$__ASKED_MODE" ] && set -- "$@" --mode 1
+#
+# --upgrade-only 走的是**另一套参数**：上面那些站点/证书/账号/地址全都没问过，
+# 变量也都是空的，这时候**绝不能**把它们拼进去。最典型的是 `--tls-mode "$TLS_MODE"`
+# 那一行——它是无条件拼的，空值会被部署脚本判成"非法取值"直接 exit 2。所以这里
+# 分成两支，upgrade-only 那一支只带"从哪来、往哪去"。
+if [ -n "$UPGRADE_ONLY" ]; then
+	set -- --bin "$SRC/bin/xb-probe-master" --upgrade-only
+	# 路径类参数照旧转发：它们决定"升级的是哪一份安装"，与本模式直接相关。
+	[ -n "$DIR" ] && set -- "$@" --dir "$DIR"
+	[ -n "$DATA" ] && set -- "$@" --data "$DATA"
+	[ -n "$BIN_DIR" ] && set -- "$@" --bin-dir "$BIN_DIR"
+else
+set -- --bin "$SRC/bin/xb-probe-master"
+[ -n "$__ASKED_MODE" ] && set -- "$@" --mode "$__ASKED_MODE"
 [ -n "$PUBLIC_ORIGIN" ] && set -- "$@" --public-origin "$PUBLIC_ORIGIN"
 [ -n "$ADMIN_ORIGIN" ] && set -- "$@" --admin-origin "$ADMIN_ORIGIN"
 [ -n "$ADMIN_USER" ] && set -- "$@" --admin-user "$ADMIN_USER"
@@ -850,6 +938,7 @@ set -- "$@" --tls-mode "$TLS_MODE"
 # 用户在安装脚本里做的选择会被静默丢弃。
 [ -n "$TLS_TERMINATOR" ] && set -- "$@" --tls-terminator "$TLS_TERMINATOR"
 [ -n "$PROXY_DOMAINS" ] && set -- "$@" --proxy-domain "$PROXY_DOMAINS"
+fi
 
 say "开始部署（接下来的输出来自 scripts/deploy-master.sh）"
 # 与 install-master-bin.sh 同一个机制：告诉部署脚本"用户是怎么把这一串叫起来的"，
@@ -864,5 +953,5 @@ cat <<EOF
 ==> 完成。
   · 管理端：${ADMIN_ORIGIN:-$PUBLIC_ORIGIN}/admin/
   · 源码留在 $SRC：要升级就再跑一次本脚本（会自动 fetch + 重编译 + 换二进制），
-    或者只重跑部署：sudo sh $SRC/scripts/deploy-master.sh --bin $SRC/bin/probe-master
+    或者只重跑部署：sudo sh $SRC/scripts/deploy-master.sh --bin $SRC/bin/xb-probe-master
 EOF

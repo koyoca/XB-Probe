@@ -1,4 +1,4 @@
-module github.com/yourorg/probe
+module github.com/koyoca/xb-probe
 
 go 1.26.0
 

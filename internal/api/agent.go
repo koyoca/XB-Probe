@@ -9,11 +9,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yourorg/probe/internal/auth"
-	"github.com/yourorg/probe/internal/config"
-	"github.com/yourorg/probe/internal/model"
-	"github.com/yourorg/probe/internal/pipeline"
-	"github.com/yourorg/probe/internal/state"
+	"github.com/koyoca/xb-probe/internal/auth"
+	"github.com/koyoca/xb-probe/internal/config"
+	"github.com/koyoca/xb-probe/internal/model"
+	"github.com/koyoca/xb-probe/internal/netutil"
+	"github.com/koyoca/xb-probe/internal/pipeline"
+	"github.com/koyoca/xb-probe/internal/state"
 )
 
 // Agent API（文档 7.1）：/api/agent/v1。
@@ -59,7 +60,7 @@ func (h *Handler) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = h.Repo.Audit(now.Unix(), fmt.Sprintf("node:%d", nodeID), "token.issue", hint, RealIP(r))
-	_ = h.Repo.UpdateNodeIPs(nodeID, RealIP(r))
+	h.recordObservedIP(nodeID, r, "")
 
 	// 记录运行环境（12.2 新增字段）。
 	//
@@ -187,7 +188,7 @@ func (h *Handler) handleReport(w http.ResponseWriter, r *http.Request) {
 	if dropped > 0 {
 		h.logErr("report", fmt.Errorf("节点 %d 丢弃 %d 条越界样本", nodeID, dropped))
 	}
-	_ = h.Repo.UpdateNodeIPs(nodeID, RealIP(r))
+	h.recordObservedIP(nodeID, r, req.PublicIP)
 
 	// 状态由调度器按 4.1 的判定逻辑推进；这里只刷新 last_seen。
 	_ = h.Registry.Update(nodeID, func(n *state.NodeRuntime) {
@@ -206,6 +207,34 @@ func (h *Handler) handleReport(w http.ResponseWriter, r *http.Request) {
 		ServerTime:    nowUnix,
 		ConfigVersion: version,
 	})
+}
+
+// recordObservedIP 把"我们观测到的这个节点的公网地址"写进 nodes.ip_v4。
+//
+// 两个候选值，按可信度排序，取第一个**确实是公网可路由**的：
+//
+//  1. reported —— Agent 自己探测到的公网地址（agent.yaml 的 public_ip_url）。
+//     它比来源地址更可信：来源地址在 Master 与 Agent 同机部署时是 127.0.0.1，
+//     在反向代理后面是代理的地址，在 NAT 后面是出口地址。
+//  2. RealIP(r) —— 上报连接的对端地址。它在"Master 与 Agent 不同机、且没有中间代理"
+//     时就是我们能拿到的最好的答案，而且不需要 Agent 做任何额外配置（默认路径）。
+//
+// 关键的一步是 netutil.IsPublicIP：早先的实现是**无条件**把 RealIP 写进 ip_v4，
+// 于是同机部署的节点地址栏里恒显示 127.0.0.1；而且因为老实现只在"列为空"时才写，
+// 这个错值一旦进去就再也改不掉（用户的实际反馈正是这个）。
+//
+// 两个候选都不合法时**什么都不写**（保持原值），而不是写一个空串：
+// "暂时不知道"与"我知道它没有公网地址"是两件事，清空会把管理员手工填的值也抹掉。
+func (h *Handler) recordObservedIP(nodeID int64, r *http.Request, reported string) {
+	for _, cand := range []string{reported, RealIP(r)} {
+		if !netutil.IsPublicIP(cand) {
+			continue
+		}
+		if _, err := h.Repo.UpdateNodeObservedIP(nodeID, cand); err != nil {
+			h.logErr("update node observed ip", err)
+		}
+		return
+	}
 }
 
 // applySample 把一条样本写入内存运行态、聚合桶与流量跟踪器。
@@ -243,11 +272,13 @@ func (h *Handler) applySample(nodeID int64, s *model.Sample, now time.Time, stat
 		}
 		_ = diskPct
 		n.Ring.Push(state.RingPoint{
-			TS:     s.TS,
-			CPU:    deref(m.CPU),
-			MemPct: state.Percent(deref(m.MemUsed), n.MemTotal),
-			RxBps:  deref(m.RxBps),
-			TxBps:  deref(m.TxBps),
+			TS:       s.TS,
+			CPU:      deref(m.CPU),
+			MemPct:   state.Percent(deref(m.MemUsed), n.MemTotal),
+			MemUsed:  deref(m.MemUsed),
+			DiskUsed: deref(m.DiskUsed),
+			RxBps:    deref(m.RxBps),
+			TxBps:    deref(m.TxBps),
 		})
 	})
 

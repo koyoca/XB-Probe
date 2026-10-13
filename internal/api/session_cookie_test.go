@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/yourorg/probe/internal/auth"
+	"github.com/koyoca/xb-probe/internal/auth"
 )
 
 // 会话 Cookie 的协议感知（本次修复的核心回归测试）。

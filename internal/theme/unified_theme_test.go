@@ -176,7 +176,7 @@ func TestTopbarUsesIconButtons(t *testing.T) {
 }
 
 // TestTopbarTitleComesFirst 站名必须在 DOM 里排在时间与图标**之前**。
-// 早期把 <h1> 写在按钮组之后，屏幕上就成了"更新于… [月亮] Server Probe"，
+// 早期把 <h1> 写在按钮组之后，屏幕上就成了"更新于… [月亮] XB-Probe"，
 // 站名落在最右、像是按钮的附属；靠 flex order 兜回来只是把问题藏起来。
 func TestTopbarTitleComesFirst(t *testing.T) {
 	html := stripHTMLComments(readFrontend(t, "internal/theme/builtin/index.html"))

@@ -35,7 +35,7 @@ Agent 13 个平台与 Master 的发布产物均由 CI 构建。
 sudo sh -c "$(curl -fsSL https://raw.githubusercontent.com/koyoca/XB-Probe/main/install-master-bin.sh)"
 ```
 
-下载对应架构的 `probe-master`、用 `SHA256SUMS.master` 校验、真跑一次 `version` 自检，然后交给部署脚本
+下载对应架构的 `xb-probe-master`、用 `SHA256SUMS.master` 校验、真跑一次 `version` 自检，然后交给部署脚本
 完成配置、初始化管理员、注册服务并做健康检查。机器上只需要 `curl`（或 `wget`）。
 
 ```bash
@@ -72,7 +72,7 @@ sudo sh -c "$(curl -fsSL https://raw.githubusercontent.com/koyoca/XB-Probe/main/
 | 选项 | 对外 | 证书谁办 |
 |---|---|---|
 | `1) auto`（默认） | HTTPS | 脚本自动装好 Caddy，证书由 Caddy 申请与续期 |
-| `2) acme` | HTTPS | `probe-master` 自己申请（内置 ACME 客户端） |
+| `2) acme` | HTTPS | `xb-probe-master` 自己申请（内置 ACME 客户端） |
 | `3) selfsigned` | HTTPS（浏览器会提示不受信任） | 自签，适合只能用纯 IP 访问的场景 |
 | `4) files` | HTTPS | 用你已有的证书与私钥 |
 | `5) plain` | 纯 HTTP | ——不涉及，脚本**不装任何反代** |
@@ -86,7 +86,7 @@ sudo sh -c "$(curl -fsSL https://raw.githubusercontent.com/koyoca/XB-Probe/main/
 也就是说：**不需要事后手改 `master.yaml`**。想先看看会写成什么样，用部署脚本自己的预览：
 
 ```bash
-sudo sh /path/to/deploy-master.sh --bin ./probe-master --dry-run    # 打印将要写入的 master.yaml
+sudo sh /path/to/deploy-master.sh --bin ./xb-probe-master --dry-run    # 打印将要写入的 master.yaml
 ```
 
 全程幂等——**再执行一次就是升级**（不会重建数据目录，也不会覆盖已有 `master.yaml`）。
@@ -97,8 +97,8 @@ sudo sh /path/to/deploy-master.sh --bin ./probe-master --dry-run    # 打印将�
 同样的信息随时可查：
 
 ```bash
-probe-master tls status --config /etc/probe-master/master.yaml            # 等待并报告（rc 0=就绪 1=失败 2=进行中）
-probe-master tls status --config /etc/probe-master/master.yaml --json     # 给监控/脚本用
+xb-probe-master tls status --config /etc/xb-probe-master/master.yaml            # 等待并报告（rc 0=就绪 1=失败 2=进行中）
+xb-probe-master tls status --config /etc/xb-probe-master/master.yaml --json     # 给监控/脚本用
 ```
 
 > **为什么不是 `curl … | sudo sh`**：管道会把 stdin 占掉，脚本里的 `read` 立刻拿到 EOF，
@@ -114,7 +114,7 @@ probe-master tls status --config /etc/probe-master/master.yaml --json     # 给�
 
 ```bash
 sudo sh -c "$(curl -fsSL https://raw.githubusercontent.com/koyoca/XB-Probe/main/install-master-bin.sh)" xb \
-  --no-service --dir ./probe-master --data ./probe-master/data --bin-dir ./probe-master/bin
+  --no-service --dir ./xb-probe-master --data ./xb-probe-master/data --bin-dir ./xb-probe-master/bin
 ```
 
 若写成 `…"$(curl …)" --yes`，`--yes` 会被拼进脚本正文而不是当作参数，表现为莫名其妙的"需要 root"报错。
@@ -122,7 +122,7 @@ sudo sh -c "$(curl -fsSL https://raw.githubusercontent.com/koyoca/XB-Probe/main/
 容器或没有 systemd、没有 root 时可以完全不用 root（两个脚本都支持 `--no-service`）：
 
 ```bash
-sh install-master-bin.sh --no-service --dir ./probe-master --data ./probe-master/data --bin-dir ./probe-master/bin
+sh install-master-bin.sh --no-service --dir ./xb-probe-master --data ./xb-probe-master/data --bin-dir ./xb-probe-master/bin
 ```
 
 完全非交互（CI / 批量部署）：
@@ -153,7 +153,7 @@ sudo sh install-master-bin.sh --yes \
 
 ### 交给 Caddy 代管（一个端口也能直接上 https）
 
-`probe-master` 可以只监听任意端口（甚至纯回环），由部署脚本**自动装好 Caddy、生成 Caddyfile、
+`xb-probe-master` 可以只监听任意端口（甚至纯回环），由部署脚本**自动装好 Caddy、生成 Caddyfile、
 注册 `caddy.service`**——证书申请与续期都交给 Caddy，不用自己再装 Caddy/Nginx 手工配置：
 
 ```bash
@@ -271,7 +271,7 @@ tls:
   "已经加固"的错觉。判定与会话 Cookie 的 `Secure` **共用同一逻辑**，不会出现"Cookie 已降级、HSTS 还在发"。
 
 首张证书在后台申请，**不阻塞启动**；证书运行态（SAN / 到期 / SPKI 指纹 / 最近失败原因）见
-`GET /api/admin/v1/tls/status`，也可以用 `probe-master tls status` 在命令行看同一份；
+`GET /api/admin/v1/tls/status`，也可以用 `xb-probe-master tls status` 在命令行看同一份；
 自签指纹会同时以 base64 与冒号十六进制两种写法打印，可直接填给 Agent。
 
 ## 公开看板与后台：两个域名，还是一个站点
@@ -324,16 +324,16 @@ Windows 节点用后台给出的 PowerShell 命令。Agent 装好后纯外联上
 sudo sh -c "$(curl -fsSL https://raw.githubusercontent.com/koyoca/XB-Probe/main/install-master-bin.sh)"
 
 # Agent 自升级（取件走节点令牌鉴权，不依赖公开的 /dist/）
-sudo probe-agent upgrade --check && sudo probe-agent upgrade
+sudo xb-probe-agent upgrade --check && sudo xb-probe-agent upgrade
 # 服务定义（systemd unit / init 脚本）或配置目录属主有更新时，用它重写并重启：
 # 不联系 Master、不重新注册、不换令牌，所以不需要注册码
-sudo probe-agent install --service-only
-sudo systemctl restart probe-agent     # 升级不会自行重启，输出里会给出该执行的命令
+sudo xb-probe-agent install --service-only
+sudo systemctl restart xb-probe-agent     # 升级不会自行重启，输出里会给出该执行的命令
 ```
 
 升级的三条硬保证：**先校验后落地**（校验和不对就什么都不做）、**绝不主动降级**
 （"比最新还新"也算无需动作；降级要显式 `--version`）、**替换失败必须还原**（不留半套状态）。
-替换前的二进制留在 `<目标>.old`，`probe-agent upgrade --rollback` 一键换回，被换下的那份留成
+替换前的二进制留在 `<目标>.old`，`xb-probe-agent upgrade --rollback` 一键换回，被换下的那份留成
 `.broken` 供复盘。
 
 备份在管理端「系统设置 → 数据库备份」手动触发或按日自动（`VACUUM INTO` 在线一致快照 + `keep` 轮转）。
@@ -343,7 +343,7 @@ sudo systemctl restart probe-agent     # 升级不会自行重启，输出里会
 ### 如果 Agent 报「读取配置失败: permission denied」
 
 ```
-probe-agent[558816]: 错误： 读取配置失败: open /etc/probe-agent/agent.yaml: permission denied
+xb-probe-agent[558816]: 错误： 读取配置失败: open /etc/xb-probe-agent/agent.yaml: permission denied
 ```
 
 `v0.1.2` 之前装出来的节点会遇到这个：服务以专用低权限用户 `probe` 运行，而配置文件是
@@ -354,11 +354,11 @@ probe-agent[558816]: 错误： 读取配置失败: open /etc/probe-agent/agent.y
 只想**立刻**把这台机器拉起来（不升级也行）：
 
 ```sh
-sudo chown -R probe:probe /etc/probe-agent && sudo chmod 750 /etc/probe-agent
-sudo mkdir -p /etc/systemd/system/probe-agent.service.d
-printf '[Service]\nReadWritePaths=/etc/probe-agent\n' |
-  sudo tee /etc/systemd/system/probe-agent.service.d/override.conf
-sudo systemctl daemon-reload && sudo systemctl restart probe-agent
+sudo chown -R probe:probe /etc/xb-probe-agent && sudo chmod 750 /etc/xb-probe-agent
+sudo mkdir -p /etc/systemd/system/xb-probe-agent.service.d
+printf '[Service]\nReadWritePaths=/etc/xb-probe-agent\n' |
+  sudo tee /etc/systemd/system/xb-probe-agent.service.d/override.conf
+sudo systemctl daemon-reload && sudo systemctl restart xb-probe-agent
 ```
 
 那条 drop-in 补的是另一件事：unit 开了 `ProtectSystem=strict`，整个文件系统（含 `/etc`）对服务是
@@ -406,7 +406,7 @@ Windows 同理：`powershell -File install-master.ps1 -Uninstall -KeepData`。
 选了「交给 Caddy 代管」的部署，卸载时会**停掉 `caddy.service`**（否则它继续占着 80/443，
 听起来卸干净了、实际没有），并处理它的配置。但这里最要紧的是**分清哪些是我们的**：
 
-- **服务单元**：只有 `caddy.service` 里带 `Server Probe` 标记（我们自己写的那份）才禁用并删除。
+- **服务单元**：只有 `caddy.service` 里带 `XB-Probe` 标记（我们自己写的那份）才禁用并删除。
   发行版包或 x-ui 自带的那份会被**停掉但不删**，并明确告诉你"它开机仍会自启，需要的话手工
   `systemctl disable caddy`"——把别人的服务删掉比没卸载干净严重得多。
 - **Caddyfile**：有过追加就会留下 `Caddyfile.bak`，卸载时**从备份还原**；没有备份则按脚本写入的
@@ -438,7 +438,7 @@ Windows 同理：`powershell -File install-master.ps1 -Uninstall -KeepData`。
 ### 如果提示"配置里有二进制不认识的键"
 
 ```
-错误：/etc/probe-master/master.yaml 里有当前二进制不认识的键（sync_obtain）。
+错误：/etc/xb-probe-master/master.yaml 里有当前二进制不认识的键（sync_obtain）。
   这通常不是你填错了，而是**两边版本不一致**
 ```
 
@@ -451,7 +451,7 @@ Windows 同理：`powershell -File install-master.ps1 -Uninstall -KeepData`。
 1. 只删掉那一行，然后重跑（保留你其余的设置）：
 
    ```sh
-   sed -i "/^[[:space:]]*sync_obtain:/d" /etc/probe-master/master.yaml
+   sed -i "/^[[:space:]]*sync_obtain:/d" /etc/xb-probe-master/master.yaml
    ```
 
 2. 删掉整份配置重跑（脚本会按当前二进制的能力重写）。
@@ -471,8 +471,8 @@ make master agent               # 或 make dist 交叉编译全部平台
 # Windows 无 make：powershell -ExecutionPolicy Bypass -File .\scripts\build.ps1 -Dist
 
 cp configs/master.yaml.example master.yaml   # 先改 data_dir / master_key_file 为可写路径
-./bin/probe-master init-admin --config ./master.yaml -username admin
-./bin/probe-master --config ./master.yaml    # 打开 http://127.0.0.1:18281/admin/
+./bin/xb-probe-master init-admin --config ./master.yaml -username admin
+./bin/xb-probe-master --config ./master.yaml    # 打开 http://127.0.0.1:18281/admin/
 ```
 
 需要 Go ≥ 1.26（发布产物用 1.27.2 编），`CGO_ENABLED=0` 静态编译。仓库里**没有** `vendor/`，

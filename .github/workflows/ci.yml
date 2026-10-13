@@ -1,4 +1,4 @@
-# Server Probe —— 持续集成（对应文档 S12 / 13.4）
+# XB-Probe —— 持续集成（对应文档 S12 / 13.4）
 #
 # 设计取舍，先读这段再改：
 #
@@ -200,7 +200,7 @@ jobs:
       # Master 也要在宿主平台编一次并通过测试，否则"Agent 全平台能编、
       # Master 编不过"这种最尴尬的发布事故不会被拦住。
       - name: 构建 Master（宿主）
-        run: go build -trimpath -ldflags "-s -w" -o /tmp/probe-master ./cmd/probe-master
+        run: go build -trimpath -ldflags "-s -w" -o /tmp/xb-probe-master ./cmd/xb-probe-master
 
       - name: 交叉编译 Agent
         run: bash scripts/ci-cross.sh "${{ matrix.platform }}"
@@ -245,8 +245,8 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: probe-agent-ci
+          name: xb-probe-agent-ci
           path: |
-            dist/0.0.0-ci/probe-agent_*
+            dist/0.0.0-ci/xb-probe-agent_*
             dist/0.0.0-ci/SHA256SUMS
           if-no-files-found: error

@@ -4,8 +4,8 @@ import (
 	"sort"
 	"time"
 
-	"github.com/yourorg/probe/internal/model"
-	"github.com/yourorg/probe/internal/traffic"
+	"github.com/koyoca/xb-probe/internal/model"
+	"github.com/koyoca/xb-probe/internal/traffic"
 )
 
 // 公开 DTO 的唯一构建入口（5.1 / 7.3 / S1）。

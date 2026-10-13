@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/yourorg/probe/internal/auth"
+	"github.com/koyoca/xb-probe/internal/auth"
 )
 
 // 会话 Cookie 的协议感知下发（9.3 / S2）。

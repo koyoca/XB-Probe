@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yourorg/probe/internal/model"
+	"github.com/koyoca/xb-probe/internal/model"
 )
 
 // 13.4.1 的四条流量增量规则（A1 的核心修订）。

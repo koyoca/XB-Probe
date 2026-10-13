@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/yourorg/probe/internal/acme"
-	"github.com/yourorg/probe/internal/config"
+	"github.com/koyoca/xb-probe/internal/acme"
+	"github.com/koyoca/xb-probe/internal/config"
 )
 
 // TestSetupWritesReadableStatus 是"证书状态可见"这条链路的根：
@@ -105,7 +105,7 @@ func TestAcmeDNS01WithoutTokenFailsAtSetup(t *testing.T) {
 // 这里断言的是"CLI 用的推导与 Provider 实际写盘的位置相同"——
 // 两条路径各写一遍时，默认目录一改就会静默错位。
 func TestStatusPathSharedByBothSides(t *testing.T) {
-	dataDir := filepath.Join("var", "lib", "probe-master")
+	dataDir := filepath.Join("var", "lib", "xb-probe-master")
 	// 未指定 cache_dir：落到 data_dir/tls（与 applyDefaults 同一个常量）。
 	cfg := config.TLSConfig{Mode: "acme"}
 	want := filepath.Join(dataDir, config.DefaultACMECacheDir, statusFileName)

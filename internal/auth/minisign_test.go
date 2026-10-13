@@ -3,6 +3,8 @@ package auth
 import (
 	"strings"
 	"testing"
+
+	"github.com/koyoca/xb-probe/internal/testfixture"
 )
 
 // minisign 验签的回归测试（6.8）。
@@ -16,24 +18,14 @@ import (
 // 而公钥文件是 "Ed"(0x6445)。两边都按 0x6445 校验的话，
 // 单测（用自造数据）能过，真实签名 100% 被拒。
 //
-// 重新生成这组固定数据的方法（见 docs 的发布流程）：
-//
-//	minisign -G -p ms.pub -s ms.key -W
-//	printf 'aaa  probe-agent_linux_amd64\nbbb  probe-agent_windows_amd64.exe\n' > SHA256SUMS
-//	minisign -S -s ms.key -m SHA256SUMS -t "timestamp:1760000000 file:SHA256SUMS"
+// 固定数据本身住在 internal/testfixture：同一组字节串在
+// cmd/xb-probe-master 的 SHA256SUMS 验签单测里也要用，各写一份必然漂移——
+// 而且它是**签名过的**字节串，改一个字节就变成"看起来像安全事件"的假红。
+// 重新生成的方法见那个包的头注释。
 const (
-	realMinisignPub = `untrusted comment: minisign public key B56B8445221E5AEE
-RWTuWh4iRYRrtRxnZ4S2i+5JWAetk3dpGiNA3qnSUK2yX23mNzaLGZtv
-`
-
-	realMinisignSig = `untrusted comment: signature from minisign secret key
-RUTuWh4iRYRrtQJ80UjfRuItOPcFCinFlrs71EOoYfVFmKnY2Z68yRsg7Jy1ZFEzSq/oi5F3KTtLV49S7KQbJasfM2+Z1/hk8gI=
-trusted comment: timestamp:1760000000 file:SHA256SUMS
-2FKpRlaJSJobgpgklznVbZ4DuwoJn6S1+A0pAcbq9qk339/kmqyDKUwsYqpHSZCmJ1rgFyR78DrKne0Q1WH6Ag==
-`
-
-	// 被签名的原始内容，逐字节一致（含末尾换行）。
-	realMinisignData = "aaa  probe-agent_linux_amd64\nbbb  probe-agent_windows_amd64.exe\n"
+	realMinisignPub  = testfixture.MinisignPub
+	realMinisignSig  = testfixture.MinisignSig
+	realMinisignData = testfixture.MinisignSums // 被签名的原文，逐字节一致
 )
 
 // TestMinisignVerifyRealSignature 是核心用例：真实签名必须验得过。

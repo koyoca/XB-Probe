@@ -4,10 +4,10 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/yourorg/probe/internal/auth"
-	"github.com/yourorg/probe/internal/db"
-	"github.com/yourorg/probe/internal/model"
-	"github.com/yourorg/probe/internal/traffic"
+	"github.com/koyoca/xb-probe/internal/auth"
+	"github.com/koyoca/xb-probe/internal/db"
+	"github.com/koyoca/xb-probe/internal/model"
+	"github.com/koyoca/xb-probe/internal/traffic"
 )
 
 // newTestRepo 在临时目录建一个迁移完毕的库（每个测试独立，互不干扰）。

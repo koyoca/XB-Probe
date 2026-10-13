@@ -11,7 +11,7 @@
 // 设计上刻意保持"轻"：不引入任何新依赖（ACME 协议由 internal/acme 自实现），
 // 证书落盘复用同一把密钥（续期不换钥匙，否则已按 SPKI 指纹固定
 // 的 Agent 会全部掉线），并且启动不被网络阻塞——ACME 首次申请在后台进行，
-// 申请结果落进 status.json（见 status.go）供 `probe-master tls status` 查看。
+// 申请结果落进 status.json（见 status.go）供 `xb-probe-master tls status` 查看。
 package tlsconf
 
 import (
@@ -35,9 +35,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/yourorg/probe/internal/acme"
-	"github.com/yourorg/probe/internal/config"
-	"github.com/yourorg/probe/internal/model"
+	"github.com/koyoca/xb-probe/internal/acme"
+	"github.com/koyoca/xb-probe/internal/config"
+	"github.com/koyoca/xb-probe/internal/model"
 )
 
 const (
@@ -614,7 +614,7 @@ func (p *Provider) tick(ctx context.Context) {
 	case "selfsigned":
 		p.renewSelfSignedIfNeeded()
 	}
-	// 每轮之后落一次状态：`probe-master tls status` 与部署脚本读的就是它，
+	// 每轮之后落一次状态：`xb-probe-master tls status` 与部署脚本读的就是它，
 	// 放在 tick 的出口（而不是各分支里）能保证"无论走哪条分支，状态都是新的"。
 	p.writeStatus()
 }

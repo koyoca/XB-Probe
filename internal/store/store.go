@@ -13,8 +13,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/yourorg/probe/internal/db"
-	"github.com/yourorg/probe/internal/model"
+	"github.com/koyoca/xb-probe/internal/db"
+	"github.com/koyoca/xb-probe/internal/model"
 )
 
 // Repo 是仓储。

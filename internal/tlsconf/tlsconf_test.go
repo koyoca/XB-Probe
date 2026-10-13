@@ -17,8 +17,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yourorg/probe/internal/acme"
-	"github.com/yourorg/probe/internal/config"
+	"github.com/koyoca/xb-probe/internal/acme"
+	"github.com/koyoca/xb-probe/internal/config"
 )
 
 func quietLogger() *slog.Logger {

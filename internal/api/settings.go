@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yourorg/probe/internal/auth"
-	"github.com/yourorg/probe/internal/config"
-	"github.com/yourorg/probe/internal/model"
+	"github.com/koyoca/xb-probe/internal/auth"
+	"github.com/koyoca/xb-probe/internal/config"
+	"github.com/koyoca/xb-probe/internal/model"
 )
 
 // 设置项白名单与取值校验（6.2 / S8）。
@@ -38,7 +38,7 @@ var settingDefaults = map[string]string{
 	"disk_min_free_mb":    "200",
 	"timezone":            "", // 空 = 用 Master 所在系统时区
 	"theme.active":        "builtin",
-	"site.title":          "Server Probe",
+	"site.title":          "XB-Probe",
 	// site.layout 决定"公开看板与管理后台是在两个域名下、还是在同一个域名下"。
 	//
 	// 取值三态，默认 auto = **与升级前完全一致**（配了 host 白名单就分离，

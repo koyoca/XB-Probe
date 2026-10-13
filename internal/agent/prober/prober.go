@@ -20,7 +20,7 @@ import (
 	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
 
-	"github.com/yourorg/probe/internal/model"
+	"github.com/koyoca/xb-probe/internal/model"
 )
 
 // MaxTargetsPerNode 是单节点的目标数量上限（3.1 / 13.4.6）。

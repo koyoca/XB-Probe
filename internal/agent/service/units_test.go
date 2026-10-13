@@ -16,26 +16,31 @@ import (
 //
 // 背景是用户真机上的这个故障：
 //
-//	配置写入 /etc/probe-agent/agent.yaml（权限 0600）
-//	probe-agent[558816]: 错误： 读取配置失败: open /etc/probe-agent/agent.yaml: permission denied
+//	配置写入 /etc/xb-probe-agent/agent.yaml（权限 0600）
+//	xb-probe-agent[558816]: 错误： 读取配置失败: open /etc/xb-probe-agent/agent.yaml: permission denied
 //
 // 安装的每一步都打印"成功"，唯一失败的是服务本身 —— 因为 unit 里 `User=probe`
 // 而配置文件是 `0600 root:root`。
 
 const (
-	tBin  = "/opt/probe/probe-agent"
+	tBin  = "/opt/probe/xb-probe-agent"
 	tCfg  = "/opt/probe/agent.yaml"
 	tUser = "probe"
+	// tOpenrcLog 是渲染 OpenRC 脚本时传入的日志路径。
+	// 单独一个常量而不是写进模板：日志路径同时被"预建并交接属主"那一步使用，
+	// 两处各写一个字面量必然漂移（见 EnsureLogFile）。
+	tOpenrcLog = "/var/log/xb-probe-agent.log"
 
-	defBin = "/usr/local/bin/probe-agent"
-	defCfg = "/etc/probe-agent/agent.yaml"
+	defBin = "/usr/local/bin/xb-probe-agent"
+	defCfg = "/etc/xb-probe-agent/agent.yaml"
 )
 
-// serviceRenderers 把五个平台的服务定义都拿出来（FreeBSD 的签名少一个 user 参数，包一层）。
+// serviceRenderers 把五个平台的服务定义都拿出来
+// （OpenRC 多一个日志路径参数、FreeBSD 少一个 user 参数，各包一层）。
 func serviceRenderers() map[string]func(bin, cfg, user string) string {
 	return map[string]func(bin, cfg, user string) string{
 		"systemd": renderSystemdUnit,
-		"openrc":  renderOpenRCScript,
+		"openrc":  func(bin, cfg, user string) string { return renderOpenRCScript(bin, cfg, user, tOpenrcLog) },
 		"procd":   renderProcdScript,
 		"sysv":    renderSysVScript,
 		"freebsd": func(bin, cfg, _ string) string { return renderFreeBSDRcScript(bin, cfg) },
@@ -44,8 +49,8 @@ func serviceRenderers() map[string]func(bin, cfg, user string) string {
 
 // TestEveryServiceScriptUsesThePathsItWasGiven 钉住"三条路径只能来自参数"。
 //
-// 这些模板过去把二进制路径写死成 `/usr/local/bin/probe-agent`（openrc、sysv）或
-// `/usr/bin/probe-agent`（procd）。而 Install 是收 binPath 的：`--dir /opt/probe`
+// 这些模板过去把二进制路径写死成 `/usr/local/bin/xb-probe-agent`（openrc、sysv）或
+// `/usr/bin/xb-probe-agent`（procd）。而 Install 是收 binPath 的：`--dir /opt/probe`
 // 装出来的服务指向一个不存在的文件，症状是"服务起了就退出"，与真正的原因隔得很远。
 func TestEveryServiceScriptUsesThePathsItWasGiven(t *testing.T) {
 	// 每种方言里"这两件事"各自的写法，逐个点名，而不是只查一个公共子串。
@@ -69,14 +74,14 @@ func TestEveryServiceScriptUsesThePathsItWasGiven(t *testing.T) {
 			}
 			// 渲染残留：参数个数与模板里的 %s 不一致时，fmt 会把这些字面量拼进结果。
 			// FreeBSD 那份就是这么错的（3 个 %s 传了 4 个参数），而 `%!(EXTRA string=probe)`
-			// 会被 sh 当命令执行 —— `service probe_agent start` 的退出码来自一次
+			// 会被 sh 当命令执行 —— `service xb_probe_agent start` 的退出码来自一次
 			// "command not found"，看起来像服务起不来。
 			if strings.Contains(out, "%!") || strings.Contains(out, "%s") {
 				t.Errorf("渲染结果里有未替换的格式残留（参数个数与模板不匹配）:\n%s", out)
 			}
 			// 写死的默认路径：默认值只有一份来源（调用方传来的 binPath/cfgPath）。
 			for _, hard := range []string{
-				"/usr/local/bin/probe-agent", "/usr/bin/probe-agent", "/etc/probe-agent",
+				"/usr/local/bin/xb-probe-agent", "/usr/bin/xb-probe-agent", "/etc/xb-probe-agent",
 			} {
 				if strings.Contains(out, hard) {
 					t.Errorf("脚本里写死了 %q —— 它必须来自参数（--dir 装出来的服务会指向错的地方）:\n%s",
@@ -116,7 +121,7 @@ func TestSystemdUnitKeepsSandboxAndLetsAgentWriteItsConfig(t *testing.T) {
 		}
 	}
 
-	// 关键：ReadWritePaths 必须随配置目录走。写死 /etc/probe-agent 的话，
+	// 关键：ReadWritePaths 必须随配置目录走。写死 /etc/xb-probe-agent 的话，
 	// 所有 `--dir` 安装都会失去写回能力（读得到、写不回去）。
 	custom := renderSystemdUnit(tBin, tCfg, tUser)
 	if !strings.Contains(custom, "ReadWritePaths="+filepath.Dir(tCfg)) {
@@ -195,7 +200,10 @@ func TestLinuxManagersHandoverConfigRightAfterCreatingUser(t *testing.T) {
 		start string
 	}{
 		{"systemdManager", `"systemctl", "enable", "--now"`},
-		{"openrcManager", `"rc-service", "probe-agent", "start"`},
+		// 服务名走 openrcSvcName 常量（脚本路径、conf.d、pidfile 与日志都用同一份，
+		// 见 service_linux.go 的常量块）：锚点跟着实现改，但**不能**放宽成裸 "rc-service"——
+		// 那样 openrcRunning/Uninstall/openrcStartFailed 里的调用都会替它作证。
+		{"openrcManager", `"rc-service", openrcSvcName, "start"`},
 		{"procdManager", `run(procdInitPath, "start")`},
 		{"sysvManager", `run(sysvInitPath, "start")`},
 	}
@@ -302,7 +310,7 @@ func TestRewriteDefinitionNeverStartsTheService(t *testing.T) {
 			},
 			// rc.d 的启动命令，以及"设置开机自启"（它不属于"写定义"这一步：
 			// 升级路径不该顺手改开机自启，那是安装在做的事）。
-			forbid: []string{`"service", "probe_agent", "start"`, `run("sysrc"`},
+			forbid: []string{`"service", "xb_probe_agent", "start"`, `run("sysrc"`},
 		},
 		{
 			file: "service_windows.go",
@@ -438,4 +446,35 @@ func readSourceFile(t *testing.T, name string) string {
 		t.Fatalf("读取 %s 失败（测试的工作目录应为本包目录）：%v", name, err)
 	}
 	return string(raw)
+}
+
+// TestOpenRCScriptKeepsSoftNetDependencyAndNamedLog 钉住 OpenRC 里两处会让
+// "服务注册成功但根本起不来"的细节（Alpine 真机故障）。
+//
+//  1. `depend()` 里必须是 **use net 而不是 need net**。need 是硬依赖：容器/精简镜像里
+//     常常没有任何服务提供 `net`，此时 `rc-service <svc> start` 会**直接失败** ——
+//     而这台机器的网络明明是通的。用 use 保住"有 net 就先等它"的顺序语义，去掉失败条件。
+//  2. `output_log` / `error_log` 必须指向**调用方传进来的**路径。服务是以非 root 跑的，
+//     日志文件必须提前建好并交接属主（EnsureLogFile）；模板里写死一个字面量、
+//     调用方又按另一个字面量去建文件，两边一漂移，症状就是"装好了起不来"。
+func TestOpenRCScriptKeepsSoftNetDependencyAndNamedLog(t *testing.T) {
+	out := renderOpenRCScript(tBin, tCfg, tUser, tOpenrcLog)
+
+	for _, want := range []string{
+		"use net",
+		`output_log="` + tOpenrcLog + `"`,
+		`error_log="` + tOpenrcLog + `"`,
+		`command_user="` + tUser + `"`,
+		`command_background="true"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("OpenRC 脚本缺少 %q：\n%s", want, out)
+		}
+	}
+	// 反向断言：need net 是硬依赖，会让没有 net 服务的机器起不来。
+	// 这条断言挑的是"两种实现里只有一个能通过"的那一个——只查 use net 存在，
+	// 在 need net 与 use net 同时出现时也会通过。
+	if strings.Contains(out, "need net") {
+		t.Errorf("depend() 用了 need net（硬依赖）：没有服务提供 net 的机器上 start 会被直接拒绝：\n%s", out)
+	}
 }

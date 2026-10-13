@@ -24,7 +24,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/yourorg/probe/internal/agent/client"
+	"github.com/koyoca/xb-probe/internal/agent/client"
 )
 
 // 接口路径（与 internal/api 的 Agent 路由一一对应）。

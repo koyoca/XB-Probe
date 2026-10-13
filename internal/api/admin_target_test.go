@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yourorg/probe/internal/model"
-	"github.com/yourorg/probe/internal/store"
+	"github.com/koyoca/xb-probe/internal/model"
+	"github.com/koyoca/xb-probe/internal/store"
 )
 
 // 探测目标「范围」的回归护栏。

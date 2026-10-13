@@ -5,7 +5,7 @@ import (
 	"time"
 
 	// 空导入本包即把 IANA 时区库链进测试二进制；下面的断言才有意义。
-	_ "github.com/yourorg/probe/internal/tzdata"
+	_ "github.com/koyoca/xb-probe/internal/tzdata"
 )
 
 // TestIANAZonesResolveWithEmbeddedDatabase 验证内嵌时区库真的可用。

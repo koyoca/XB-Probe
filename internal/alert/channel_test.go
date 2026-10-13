@@ -90,7 +90,7 @@ func TestSanitizeHeaderNeutralisesInjection(t *testing.T) {
 		in   string
 		want string
 	}{
-		{"常规", "Server Probe 告警", "Server Probe 告警"},
+		{"常规", "XB-Probe 告警", "XB-Probe 告警"},
 		{"CRLF 折叠", "OK\r\nBcc: attacker@evil.com", "OK Bcc: attacker@evil.com"},
 		{"裸 LF", "OK\nX-Injected: 1", "OK X-Injected: 1"},
 		{"裸 CR", "OK\rX-Injected: 1", "OKX-Injected: 1"},
@@ -214,7 +214,7 @@ func TestTelegramSendPlainTextByDefault(t *testing.T) {
 		BotToken: testBotToken, ChatID: "-100123", APIBase: rec.URL,
 	})
 
-	title, body := "Server Probe 测试消息", "渠道配置正常。"
+	title, body := "XB-Probe 测试消息", "渠道配置正常。"
 	if err := ch.Send(context.Background(), Message{Title: title, Body: body}); err != nil {
 		t.Fatalf("发送失败: %v", err)
 	}

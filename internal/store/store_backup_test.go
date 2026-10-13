@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yourorg/probe/internal/auth"
+	"github.com/koyoca/xb-probe/internal/auth"
 )
 
 // 6.2：恢复码必须**原子消费**——同一个码并发使用只能成功一次。

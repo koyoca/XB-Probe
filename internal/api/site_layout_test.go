@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yourorg/probe/internal/acme"
-	"github.com/yourorg/probe/internal/config"
+	"github.com/koyoca/xb-probe/internal/acme"
+	"github.com/koyoca/xb-probe/internal/config"
 )
 
 // 站点形态（site.layout / site.public_hosts / site.admin_hosts）的门控测试。

@@ -280,7 +280,7 @@ func (c *Client) fetchDirectory(ctx context.Context) (directory, error) {
 	if err != nil {
 		return directory{}, err
 	}
-	req.Header.Set("User-Agent", "probe-master-acme/1")
+	req.Header.Set("User-Agent", "xb-probe-master-acme/1")
 	resp, err := c.hc.Do(req)
 	if err != nil {
 		return directory{}, fmt.Errorf("获取 ACME 目录失败: %w", err)
@@ -326,7 +326,7 @@ func (c *Client) takeNonce(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("User-Agent", "probe-master-acme/1")
+	req.Header.Set("User-Agent", "xb-probe-master-acme/1")
 	resp, err := c.hc.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("获取 nonce 失败: %w", err)
@@ -378,7 +378,7 @@ func (c *Client) roundTrip(ctx context.Context, url string, payload []byte, kid 
 			return nil, nil, err
 		}
 		req.Header.Set("Content-Type", "application/jose+json")
-		req.Header.Set("User-Agent", "probe-master-acme/1")
+		req.Header.Set("User-Agent", "xb-probe-master-acme/1")
 		req.Header.Set("Accept-Language", "en")
 
 		resp, err := c.hc.Do(req)

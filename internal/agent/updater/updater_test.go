@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/yourorg/probe/internal/agent/client"
+	"github.com/koyoca/xb-probe/internal/agent/client"
 )
 
 // 自升级的测试用一个真实起在本地回环上的 HTTP 服务。
@@ -43,7 +43,7 @@ type fakeMaster struct {
 
 func newFakeMaster(t *testing.T, body string) *fakeMaster {
 	t.Helper()
-	fm := &fakeMaster{version: "1.2.0", artifact: "probe-agent_linux_amd64", body: body}
+	fm := &fakeMaster{version: "1.2.0", artifact: "xb-probe-agent_linux_amd64", body: body}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/agent/v1/releases/latest", func(w http.ResponseWriter, r *http.Request) {
 		fm.gotReleaseQuery = r.URL.RawQuery
@@ -106,7 +106,7 @@ func boolStr(b bool) string {
 // target 造一个"当前正在运行的二进制"。
 func target(t *testing.T, content string) string {
 	t.Helper()
-	p := filepath.Join(t.TempDir(), "probe-agent")
+	p := filepath.Join(t.TempDir(), "xb-probe-agent")
 	if err := os.WriteFile(p, []byte(content), 0o755); err != nil {
 		t.Fatalf("写目标文件失败：%v", err)
 	}
@@ -133,7 +133,7 @@ func TestCheckReportsLatestAndPassesPlatform(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Check 失败：%v", err)
 	}
-	if rel.Version != "1.2.0" || rel.Artifact != "probe-agent_linux_amd64" || rel.SHA256 != fm.listSHA {
+	if rel.Version != "1.2.0" || rel.Artifact != "xb-probe-agent_linux_amd64" || rel.SHA256 != fm.listSHA {
 		t.Errorf("Release 不对：%+v", rel)
 	}
 	if rel.UpToDate {

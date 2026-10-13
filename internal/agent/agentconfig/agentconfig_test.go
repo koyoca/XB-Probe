@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/yourorg/probe/internal/model"
+	"github.com/koyoca/xb-probe/internal/model"
 )
 
 // Agent 本地配置的测试：默认值、落盘、远端配置的覆盖边界。
@@ -181,6 +181,7 @@ func TestApplyServerConfigOverwritesOnlyWhitelistedFields(t *testing.T) {
 		ServiceManager:      "systemd",
 		DiskPaths:           []string{"/data"},
 		ConfigVersion:       "old",
+		PublicIPURL:         "https://ip.example.invalid/",
 	}
 	remote := model.AgentConfig{
 		ConfigVersion:   "new",
@@ -224,6 +225,42 @@ func TestApplyServerConfigOverwritesOnlyWhitelistedFields(t *testing.T) {
 	}
 	if len(local.DiskPaths) != 1 {
 		t.Errorf("磁盘路径被远端改动：%v", local.DiskPaths)
+	}
+	// public_ip_url 同样只由本地决定：允许远端改它，等于后台一点保存就让
+	// 所有节点开始往第三方地址发请求（这是我们不想替用户做的决定）。
+	if local.PublicIPURL != "https://ip.example.invalid/" {
+		t.Errorf("public_ip_url 被远端改动：%q", local.PublicIPURL)
+	}
+}
+
+// TestPublicIPIntervalDefaultsAndClamp 钉住公网地址探测间隔的三个边界。
+//
+// 下限不是洁癖：这个探测打的是**外部**服务，把它设成几秒等于拿别人的公共服务
+// 当自己的探针。上界同理——设成几天不如关掉，而"关掉"有明确的表达方式（留空 URL）。
+func TestPublicIPIntervalDefaultsAndClamp(t *testing.T) {
+	if got := (&Config{}).PublicIPInterval(); got.Seconds() != float64(PublicIPDefaultIntervalS) {
+		t.Errorf("未配置时间的间隔 = %v，期望默认 %d 秒", got, PublicIPDefaultIntervalS)
+	}
+
+	low := &Config{PublicIPIntervalS: 5}
+	low.applyDefaults()
+	if low.PublicIPIntervalS != PublicIPMinIntervalS {
+		t.Errorf("过小的间隔 = %d，期望被抬到下限 %d", low.PublicIPIntervalS, PublicIPMinIntervalS)
+	}
+	if low.PublicIPInterval().Seconds() != float64(PublicIPMinIntervalS) {
+		t.Errorf("抬升后的 PublicIPInterval() = %v", low.PublicIPInterval())
+	}
+
+	high := &Config{PublicIPIntervalS: 30 * 24 * 3600}
+	high.applyDefaults()
+	if high.PublicIPIntervalS != PublicIPMaxIntervalS {
+		t.Errorf("过大的间隔 = %d，期望被压到上限 %d", high.PublicIPIntervalS, PublicIPMaxIntervalS)
+	}
+
+	ok := &Config{PublicIPIntervalS: 300}
+	ok.applyDefaults()
+	if ok.PublicIPIntervalS != 300 {
+		t.Errorf("合法间隔被改动了：%d", ok.PublicIPIntervalS)
 	}
 }
 
@@ -298,13 +335,13 @@ func TestDefaultPathsPerPlatform(t *testing.T) {
 	if !filepath.IsAbs(cfgPath) {
 		t.Errorf("配置路径应是绝对路径：%q", cfgPath)
 	}
-	if !strings.HasSuffix(filepath.ToSlash(cfgPath), "/probe-agent/agent.yaml") {
-		t.Errorf("配置路径应以 probe-agent/agent.yaml 结尾：%q", cfgPath)
+	if !strings.HasSuffix(filepath.ToSlash(cfgPath), "/xb-probe-agent/agent.yaml") {
+		t.Errorf("配置路径应以 xb-probe-agent/agent.yaml 结尾：%q", cfgPath)
 	}
 	if !filepath.IsAbs(binDir) {
 		t.Errorf("安装目录应是绝对路径：%q", binDir)
 	}
-	if !strings.Contains(filepath.ToSlash(binDir), "probe-agent") && binDir != "/usr/local/bin" {
+	if !strings.Contains(filepath.ToSlash(binDir), "xb-probe-agent") && binDir != "/usr/local/bin" {
 		t.Errorf("安装目录不对：%q", binDir)
 	}
 
@@ -313,15 +350,15 @@ func TestDefaultPathsPerPlatform(t *testing.T) {
 		// Windows 上必须以 ProgramData 为根：装到用户目录下的话，
 		// 换成另一个账号跑服务就找不到配置了。
 		t.Setenv("ProgramData", `D:\ProgramDataX`)
-		if got := DefaultPath(); got != filepath.Join(`D:\ProgramDataX`, "probe-agent", "agent.yaml") {
+		if got := DefaultPath(); got != filepath.Join(`D:\ProgramDataX`, "xb-probe-agent", "agent.yaml") {
 			t.Errorf("未遵循 ProgramData：%q", got)
 		}
 	case "freebsd":
-		if cfgPath != "/usr/local/etc/probe-agent/agent.yaml" {
+		if cfgPath != "/usr/local/etc/xb-probe-agent/agent.yaml" {
 			t.Errorf("FreeBSD 配置路径 = %q", cfgPath)
 		}
 	default:
-		if cfgPath != "/etc/probe-agent/agent.yaml" {
+		if cfgPath != "/etc/xb-probe-agent/agent.yaml" {
 			t.Errorf("Linux 配置路径 = %q", cfgPath)
 		}
 	}

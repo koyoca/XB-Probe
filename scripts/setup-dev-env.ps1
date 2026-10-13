@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    Server Probe —— Windows 开发环境一键搭建（用户级，无需管理员）。
+    XB-Probe —— Windows 开发环境一键搭建（用户级，无需管理员）。
 
 .DESCRIPTION
     做三件事：
@@ -291,10 +291,10 @@ if (-not $SkipBuild) {
             & $goExe mod download
             if ($LASTEXITCODE -ne 0) { Write-Warn2 "go mod download 失败（依赖未全部落入 GOMODCACHE，构建时可能仍需联网）" }
             & $goExe vet ./...
-            & $goExe build -trimpath -ldflags '-s -w' -o bin/probe-master.exe ./cmd/probe-master
-            & $goExe build -trimpath -ldflags '-s -w' -o bin/probe-agent.exe  ./cmd/probe-agent
+            & $goExe build -trimpath -ldflags '-s -w' -o bin/xb-probe-master.exe ./cmd/xb-probe-master
+            & $goExe build -trimpath -ldflags '-s -w' -o bin/xb-probe-agent.exe  ./cmd/xb-probe-agent
             if ($LASTEXITCODE -eq 0) {
-                Write-Ok "构建完成：bin\probe-master.exe、bin\probe-agent.exe"
+                Write-Ok "构建完成：bin\xb-probe-master.exe、bin\xb-probe-agent.exe"
             } else {
                 Write-Err2 "构建失败，请查看上方编译错误"
             }
@@ -311,7 +311,7 @@ Write-Host @"
 下一步：
   1) 新开一个终端（让持久化的 PATH 生效），执行：go version
   2) 复制配置：copy configs\master.yaml.example master.yaml（按需改 data_dir / 监听地址）
-  3) 初始化管理员：.\bin\probe-master.exe init-admin --config .\master.yaml
-  4) 启动：.\bin\probe-master.exe --config .\master.yaml
+  3) 初始化管理员：.\bin\xb-probe-master.exe init-admin --config .\master.yaml
+  4) 启动：.\bin\xb-probe-master.exe --config .\master.yaml
 详见 docs\03-工具链安装与环境搭建.md
 "@ -ForegroundColor Gray

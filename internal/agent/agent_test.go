@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yourorg/probe/internal/config"
+	"github.com/koyoca/xb-probe/internal/config"
 )
 
 // TestIntervalDurationGuardsNonPositive 锁定"非正间隔必须兜底"这条规则。

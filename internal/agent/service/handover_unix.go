@@ -57,3 +57,40 @@ func HandoverToUser(cfgPath, name string) error {
 	}
 	return nil
 }
+
+// EnsureLogFile 预建服务日志文件并把属主交给服务用户（不存在则创建，存在则只改属主）。
+//
+// 为什么必须有这一步（Alpine/OpenRC 真机故障）：
+// OpenRC 的 init 脚本里写了 output_log/error_log，而服务是以**非 root** 用户跑的。
+// 日志文件在 /var/log（root 属主、0755）下，服务用户自己创建不了它；
+// 于是 `rc-service xb-probe-agent start` 在重定向这一步就失败，表现为
+// "服务注册成功但起不来"，而错误只有一句 openrc-run 的模糊提示。
+//
+// 这里**不动已有文件的属主之外的东西**：日志可能是上次运行留下的，清空它等于
+// 把用户排查故障的现场擦掉。只在不存在时创建。
+func EnsureLogFile(path, name string) error {
+	if name == "" {
+		name = DefaultUser
+	}
+	u, err := lookupUser(name)
+	if err != nil {
+		return fmt.Errorf("查不到服务用户 %s，无法准备日志文件: %w", name, err)
+	}
+	uid, err := strconv.Atoi(u.Uid)
+	if err != nil {
+		return fmt.Errorf("服务用户 %s 的 UID 不是数字（%q）: %w", name, u.Uid, err)
+	}
+	gid, err := strconv.Atoi(u.Gid)
+	if err != nil {
+		return fmt.Errorf("服务用户 %s 的 GID 不是数字（%q）: %w", name, u.Gid, err)
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o640)
+	if err != nil {
+		return fmt.Errorf("创建服务日志 %s 失败: %w", path, err)
+	}
+	_ = f.Close()
+	if err := os.Chown(path, uid, gid); err != nil {
+		return fmt.Errorf("把日志 %s 的属主改为 %s 失败: %w", path, name, err)
+	}
+	return nil
+}

@@ -15,9 +15,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yourorg/probe/internal/alert"
-	"github.com/yourorg/probe/internal/auth"
-	"github.com/yourorg/probe/internal/model"
+	"github.com/koyoca/xb-probe/internal/alert"
+	"github.com/koyoca/xb-probe/internal/auth"
+	"github.com/koyoca/xb-probe/internal/model"
 )
 
 // 一键安装（文档 12.2 / 12.8）。
@@ -38,7 +38,7 @@ import (
 //go:embed scripts/install.sh scripts/install.ps1
 var installScripts embed.FS
 
-var releaseNameRe = regexp.MustCompile(`^probe-agent_[a-z0-9]+_(amd64|arm64|armv7|armv6|386|riscv64|mips|mipsle|ppc64le|s390x)(\.exe)?$`)
+var releaseNameRe = regexp.MustCompile(`^xb-probe-agent_[a-z0-9]+_(amd64|arm64|armv7|armv6|386|riscv64|mips|mipsle|ppc64le|s390x)(\.exe)?$`)
 
 // installAvailable 判断当前是否可以对外提供安装脚本与下载（12.8）。
 //   - off        → 关闭
@@ -150,11 +150,11 @@ func shellSingleQuote(s string) string {
 
 // handleDist 提供 /dist/ 下的发布文件（含 SHA256SUMS 与 SHA256SUMS.minisig）。
 //
-// 发布文件的**权威存放位置是** `data_dir/dist/<版本>/`（`probe-master dist pull`
+// 发布文件的**权威存放位置是** `data_dir/dist/<版本>/`（`xb-probe-master dist pull`
 // 写在这里，后台"发布文件"页也按这个结构读）。但安装脚本要的是"当前这一版"，
 // 它并不知道版本号，所以取的是扁平路径：
 //
-//	$DIST_BASE/probe-agent_linux_amd64      安装脚本下载构件
+//	$DIST_BASE/xb-probe-agent_linux_amd64      安装脚本下载构件
 //	$MASTER_URL/dist/SHA256SUMS             安装脚本取校验和（12.8）
 //
 // 于是这里把扁平路径当作**最新版本的别名**：先按字面找，找不到再落到最新版本目录里。

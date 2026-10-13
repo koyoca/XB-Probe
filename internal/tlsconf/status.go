@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yourorg/probe/internal/config"
+	"github.com/koyoca/xb-probe/internal/config"
 )
 
 // 本文件把"证书现在到底怎么样了"落成一份可读的文件。
@@ -16,7 +16,7 @@ import (
 // 为什么需要它：ACME 的首次申请是**后台**做的（不阻塞启动），于是
 // "部署脚本跑完了，证书到底签下来没有"在界面上没有任何答案——日志在
 // journald 里，进程内存里的失败原因没人看得见，用户只能靠反复刷新浏览器
-// 猜。把状态落盘之后，`probe-master tls status` 与部署脚本都能读它，
+// 猜。把状态落盘之后，`xb-probe-master tls status` 与部署脚本都能读它，
 // 把"没反馈"变成"有结果、有原因"。
 //
 // 它只是一份**展示用**快照，不参与任何决策：证书是否可用一律以内存中的
@@ -64,7 +64,7 @@ func cacheDirOf(cfg config.TLSConfig, dataDir string) string {
 
 // StatusPath 返回状态文件路径。
 //
-// 导出给 cmd/probe-master 用：命令行进程与服务进程必须算出**同一个**路径，
+// 导出给 cmd/xb-probe-master 用：命令行进程与服务进程必须算出**同一个**路径，
 // 各写一份推导规则的话，一旦哪天默认目录改了，CLI 会一直读到一个不存在的文件，
 // 报出来的现象是"状态永远是空的"——比报错更难查。
 func StatusPath(cfg config.TLSConfig, dataDir string) string {

@@ -112,6 +112,15 @@ type ReportRequest struct {
 	AgentVersion string   `json:"agent_version"`
 	Samples      []Sample `json:"samples"`
 	Static       *Static  `json:"static,omitempty"`
+	// PublicIP 是 Agent 自己探测到的公网地址（agent.public_ip_url，未配置时为空）。
+	//
+	// 为什么由 Agent 报而不是 Master 从连接里取：Master 看到的来源地址有两个
+	// 常见的失真场景 —— Agent 与 Master 同机（来源是 127.0.0.1）、前置了没有列入
+	// trusted_proxies 的反代（来源是代理地址）。这两种情况下 Master 记下来的
+	// 都是错的，而"我是谁"只有节点自己出网问一句才知道。
+	// Master 侧只把它当作**候选值**：只有当节点还没被手工指定过地址（ip_auto=1）
+	// 且这个值确实是公网地址时才会写进 nodes.ip_v4。
+	PublicIP string `json:"public_ip,omitempty"`
 }
 
 // ReportResponse 携带 config_version，Agent 据此判断是否需要拉取配置（3.1 / 8.1）。

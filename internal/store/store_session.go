@@ -4,7 +4,7 @@ import (
 	"database/sql"
 	"errors"
 
-	"github.com/yourorg/probe/internal/auth"
+	"github.com/koyoca/xb-probe/internal/auth"
 )
 
 // 实现 auth.SessionStore（9.3）。库内只存 SHA-256(会话 ID)，不存明文。

@@ -27,6 +27,10 @@ type Node struct {
 	IPv6     string `json:"ip_v6,omitempty"`
 	Provider string `json:"provider,omitempty"`
 	Location string `json:"location,omitempty"`
+	// IPAuto 为 true 表示 ip_v4/ip_v6 允许被自动探测（Agent 自报的公网 IP、
+	// 或 Master 看到的来源地址）改写；管理员手工填过之后会变成 false（"覆盖自动探测"）。
+	// 见 migrations/0007_node_ip_auto.sql。
+	IPAuto bool `json:"ip_auto"`
 	// Country 是节点的国家/地区代码（ISO 3166-1 alpha-2，如 "HK"/"JP"），
 	// 用于在节点卡片上显示国旗。与 Location（自由文本、仅管理端可见）不同，
 	// 它是**结构化**取值，并且会进入公开 DTO（可被 public.fields 关掉）。

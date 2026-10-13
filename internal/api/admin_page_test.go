@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/yourorg/probe/internal/alert"
+	"github.com/koyoca/xb-probe/internal/alert"
 )
 
 // 分页响应的信封形状回归。

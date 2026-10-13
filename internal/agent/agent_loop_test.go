@@ -15,10 +15,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yourorg/probe/internal/agent/agentconfig"
-	"github.com/yourorg/probe/internal/agent/client"
-	"github.com/yourorg/probe/internal/agent/prober"
-	"github.com/yourorg/probe/internal/model"
+	"github.com/koyoca/xb-probe/internal/agent/agentconfig"
+	"github.com/koyoca/xb-probe/internal/agent/client"
+	"github.com/koyoca/xb-probe/internal/agent/prober"
+	"github.com/koyoca/xb-probe/internal/model"
 )
 
 // Agent 主循环的测试。

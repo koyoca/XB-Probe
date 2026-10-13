@@ -1,4 +1,4 @@
-// probe-master 是 Server Probe 的中枢服务（文档第 4 章 / 第 10 章）。
+// xb-probe-master 是 XB-Probe 的中枢服务（文档第 4 章 / 第 10 章）。
 //
 // 启动顺序：加载配置 → 打开数据库并迁移 → 构建依赖 → 启动写协程与调度器
 //
@@ -22,22 +22,22 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/yourorg/probe/internal/alert"
-	"github.com/yourorg/probe/internal/api"
-	"github.com/yourorg/probe/internal/auth"
-	"github.com/yourorg/probe/internal/config"
-	"github.com/yourorg/probe/internal/db"
-	"github.com/yourorg/probe/internal/pipeline"
-	"github.com/yourorg/probe/internal/state"
-	"github.com/yourorg/probe/internal/store"
-	"github.com/yourorg/probe/internal/theme"
-	"github.com/yourorg/probe/internal/tlsconf"
-	"github.com/yourorg/probe/internal/traffic"
+	"github.com/koyoca/xb-probe/internal/alert"
+	"github.com/koyoca/xb-probe/internal/api"
+	"github.com/koyoca/xb-probe/internal/auth"
+	"github.com/koyoca/xb-probe/internal/config"
+	"github.com/koyoca/xb-probe/internal/db"
+	"github.com/koyoca/xb-probe/internal/pipeline"
+	"github.com/koyoca/xb-probe/internal/state"
+	"github.com/koyoca/xb-probe/internal/store"
+	"github.com/koyoca/xb-probe/internal/theme"
+	"github.com/koyoca/xb-probe/internal/tlsconf"
+	"github.com/koyoca/xb-probe/internal/traffic"
 
 	// 空导入：把 IANA 时区库编译进来。没有它时 time.LoadLocation 在
 	// Windows 与精简容器（Alpine/distroless）上会失败，直接导致计费的
 	// tz 校验 400、以及"今日流量"静默落到错误时区。详见包内注释。
-	_ "github.com/yourorg/probe/internal/tzdata"
+	_ "github.com/koyoca/xb-probe/internal/tzdata"
 )
 
 // version 由 -ldflags "-X main.version=..." 注入。
@@ -45,17 +45,17 @@ var version = "dev"
 
 // mainUsage：顶层用法。存在的理由见 main() 里 default 分支的注释——
 // 未知命令曾经会 fall through 去启动服务，这里至少要让"打错命令"看得见。
-const mainUsage = `probe-master —— Server Probe 中枢服务
+const mainUsage = `xb-probe-master —— XB-Probe 中枢服务
 
 用法：
-  probe-master -config <配置文件>        启动服务（默认 /etc/probe-master/master.yaml）
-  probe-master init-admin  -config <文件> -username <名> -password <口令>
-  probe-master reset-admin -config <文件> -username <名> -password <口令>
-  probe-master tls status  -config <文件> [-wait N] [-json]
-  probe-master dist <子命令>
-  probe-master version
+  xb-probe-master -config <配置文件>        启动服务（默认 /etc/xb-probe-master/master.yaml）
+  xb-probe-master init-admin  -config <文件> -username <名> -password <口令>
+  xb-probe-master reset-admin -config <文件> -username <名> -password <口令>
+  xb-probe-master tls status  -config <文件> [-wait N] [-json]
+  xb-probe-master dist <子命令>
+  xb-probe-master version
 
-无参数启动时按 -config 解析，配置文件路径缺省为 /etc/probe-master/master.yaml。
+无参数启动时按 -config 解析，配置文件路径缺省为 /etc/xb-probe-master/master.yaml。
 `
 
 func main() {
@@ -104,12 +104,12 @@ func runMain(args []string) int {
 			}
 			return 0
 		case "version", "-v", "--version":
-			fmt.Println("probe-master", version)
+			fmt.Println("xb-probe-master", version)
 			return 0
 		default:
 			// 未知命令必须**明确拒绝**，绝不能 fall through 到下面的服务启动。
 			//
-			// 曾经这里没有 default，于是 `probe-master tls status -config X` 这样的
+			// 曾经这里没有 default，于是 `xb-probe-master tls status -config X` 这样的
 			// 命令在**旧二进制**上（还没那个子命令时）会一路落到 flag.Parse + run()：
 			//   · flag.Parse 遇到第一个非 flag 参数（`tls`）就停止解析，
 			//     于是 `-config X` 被**整个忽略**，读的是默认路径的配置文件；
@@ -132,8 +132,8 @@ func runMain(args []string) int {
 	// 后者解析的是 os.Args，与这里分派用的 args 只是"恰好相同"。一旦不同
 	// （测试、或将来把分派嵌进别处），`-config` 就会被**整个忽略**而毫无征兆——
 	// 这正是"未知命令 fall through"那次事故里的第二种失效方式，别再留一个。
-	fs := flag.NewFlagSet("probe-master", flag.ContinueOnError)
-	cfgPath := fs.String("config", "/etc/probe-master/master.yaml", "配置文件路径")
+	fs := flag.NewFlagSet("xb-probe-master", flag.ContinueOnError)
+	cfgPath := fs.String("config", "/etc/xb-probe-master/master.yaml", "配置文件路径")
 	if err := fs.Parse(args[1:]); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -166,6 +166,18 @@ func run(cfgPath string) error {
 		return fmt.Errorf("数据库迁移失败: %w", err)
 	}
 	repo := store.New(credentials)
+
+	// 1.5) 一次性修复：清掉"自动"节点上那些从来不是公网地址的历史值。
+	//
+	// 老实现把上报连接的对端地址无条件写进 nodes.ip_v4，于是同机部署的节点
+	// 地址栏里存着 127.0.0.1 —— 而新规则不再写这种值，也就没人会去覆盖它，
+	// 它会**永远**留在那（用户看到的就是"改了还是 127.0.0.1"）。
+	// 这里用与写入路径同一份判定（internal/netutil）清一次；失败不阻塞启动。
+	if n, err := repo.ClearNonPublicObservedIPs(); err != nil {
+		logger.Warn("清理历史节点地址失败（不影响启动）", "err", err.Error())
+	} else if n > 0 {
+		logger.Info("已清理不是公网地址的历史节点地址", "rows", n)
+	}
 
 	// 2) 主密钥：加密告警渠道凭证（9.4）
 	keyring, err := auth.LoadOrCreateKeyring(cfg.MasterKeyFile)
@@ -221,7 +233,13 @@ func run(cfgPath string) error {
 	if err != nil {
 		return err
 	}
-	alerts := alert.New(rules, repo, loadChannels(repo, keyring, logger))
+	// 渠道提供者必须"每次分发现取"，不能在这里调一次 loadChannels 把结果拍下来：
+	// 用户在后台新建/修改 Tg 渠道后，冻结的那份清单里没有它，告警会一条都发不出去
+	// （事件照样落库、delivered=0、日志无报错），而"测试发送"按钮走的是另一条路、
+	// 现读设置，所以测试是通的 —— 故障现场因此看起来完全不合理。
+	alerts := alert.NewDynamic(rules, repo, func() []alert.Channel {
+		return loadChannels(repo, keyring, logger)
+	})
 	alerts.SetNodeNameResolver(func(nodeID int64) string {
 		if n, err := repo.GetNode(nodeID); err == nil && n != nil {
 			return n.Name
@@ -332,7 +350,7 @@ func run(cfgPath string) error {
 	if cfg.TLSActive() {
 		scheme = "https"
 	}
-	logger.Info("probe-master 已启动", "version", version,
+	logger.Info("xb-probe-master 已启动", "version", version,
 		"public", cfg.PublicListen, "admin", cfg.AdminListen, "data_dir", cfg.DataDir,
 		"tls_mode", cfg.TLS.Mode)
 	logTLSStatus(logger, tlsProvider)

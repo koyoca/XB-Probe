@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yourorg/probe/internal/auth"
+	"github.com/koyoca/xb-probe/internal/auth"
 )
 
 // Agent 自升级取件接口（12.6）的测试。
@@ -77,7 +77,7 @@ func get(t *testing.T, h *Handler, path, token string) *httptest.ResponseRecorde
 // 不能靠"路径没人知道"来保护。
 func TestAgentReleaseLatestRequiresToken(t *testing.T) {
 	h, dir, _ := newUpgradeEnv(t)
-	seedVersion(t, dir, "1.2.3", "probe-agent_linux_amd64", "binary")
+	seedVersion(t, dir, "1.2.3", "xb-probe-agent_linux_amd64", "binary")
 
 	if w := get(t, h, "/api/agent/v1/releases/latest?platform=linux_amd64", ""); w.Code != http.StatusUnauthorized {
 		t.Errorf("无令牌应 401，实得 %d", w.Code)
@@ -93,7 +93,7 @@ func TestAgentReleaseLatestRequiresToken(t *testing.T) {
 // platform 直接进路径拼接，必须挡住穿越。
 func TestAgentReleaseLatestRejectsBadPlatform(t *testing.T) {
 	h, dir, tok := newUpgradeEnv(t)
-	seedVersion(t, dir, "1.2.3", "probe-agent_linux_amd64", "binary")
+	seedVersion(t, dir, "1.2.3", "xb-probe-agent_linux_amd64", "binary")
 
 	for _, bad := range []string{"", "../../etc", "linux/../windows_amd64", `..\windows_amd64`} {
 		w := get(t, h, "/api/agent/v1/releases/latest?platform="+bad+"", tok)
@@ -105,9 +105,9 @@ func TestAgentReleaseLatestRejectsBadPlatform(t *testing.T) {
 
 func TestAgentReleaseLatestReportsVersionAndUpToDate(t *testing.T) {
 	h, dir, tok := newUpgradeEnv(t)
-	seedVersion(t, dir, "1.10.0", "probe-agent_linux_amd64", "new-binary")
+	seedVersion(t, dir, "1.10.0", "xb-probe-agent_linux_amd64", "new-binary")
 	// 顺手放一个旧版本：必须挑新的那个。
-	seedVersion(t, dir, "1.9.0", "probe-agent_linux_amd64", "old-binary")
+	seedVersion(t, dir, "1.9.0", "xb-probe-agent_linux_amd64", "old-binary")
 
 	w := get(t, h, "/api/agent/v1/releases/latest?platform=linux_amd64&current=1.9.0", tok)
 	if w.Code != http.StatusOK {
@@ -120,7 +120,7 @@ func TestAgentReleaseLatestReportsVersionAndUpToDate(t *testing.T) {
 	if rel.Version != "1.10.0" {
 		t.Errorf("应挑最新版本，实得 %q", rel.Version)
 	}
-	if rel.Artifact != "probe-agent_linux_amd64" || rel.SHA256 == "" || rel.Size != int64(len("new-binary")) {
+	if rel.Artifact != "xb-probe-agent_linux_amd64" || rel.SHA256 == "" || rel.Size != int64(len("new-binary")) {
 		t.Errorf("构件描述不对：%+v", rel)
 	}
 	if rel.UpToDate {
@@ -149,7 +149,7 @@ func TestAgentReleaseLatestDistinguishesMissingCases(t *testing.T) {
 	if w := get(t, h, "/api/agent/v1/releases/latest?platform=linux_amd64", tok); w.Code != http.StatusNotFound {
 		t.Errorf("没有任何已发布版本应 404，实得 %d", w.Code)
 	}
-	seedVersion(t, dir, "1.0.0", "probe-agent_linux_amd64", "x")
+	seedVersion(t, dir, "1.0.0", "xb-probe-agent_linux_amd64", "x")
 	w := get(t, h, "/api/agent/v1/releases/latest?platform=linux_armv6", tok)
 	if w.Code != http.StatusNotFound {
 		t.Errorf("该平台未发布应 404，实得 %d", w.Code)
@@ -163,7 +163,7 @@ func TestAgentReleaseLatestDistinguishesMissingCases(t *testing.T) {
 // 取构件：内容必须与文件一致，且响应头带校验和（用于快速失败）。
 func TestAgentArtifactServesBytesWithChecksum(t *testing.T) {
 	h, dir, tok := newUpgradeEnv(t)
-	seedVersion(t, dir, "1.2.3", "probe-agent_linux_amd64", "binary-bytes")
+	seedVersion(t, dir, "1.2.3", "xb-probe-agent_linux_amd64", "binary-bytes")
 
 	w := get(t, h, "/api/agent/v1/artifact?platform=linux_amd64", tok)
 	if w.Code != http.StatusOK {
@@ -181,7 +181,7 @@ func TestAgentArtifactServesBytesWithChecksum(t *testing.T) {
 	}
 
 	// 指定版本：拿到的是那个版本的文件。
-	seedVersion(t, dir, "1.0.0", "probe-agent_linux_amd64", "older-bytes")
+	seedVersion(t, dir, "1.0.0", "xb-probe-agent_linux_amd64", "older-bytes")
 	w = get(t, h, "/api/agent/v1/artifact?platform=linux_amd64&version=1.0.0", tok)
 	if w.Code != http.StatusOK || w.Body.String() != "older-bytes" {
 		t.Errorf("按版本取件失败：%d / %q", w.Code, w.Body.String())
@@ -225,9 +225,9 @@ func TestIsVersionNameRejectsNonNumeric(t *testing.T) {
 // 构件名必须与 Makefile 的发布命名一致（windows 带 .exe）。
 func TestArtifactForTag(t *testing.T) {
 	cases := map[string]string{
-		"linux_amd64":   "probe-agent_linux_amd64",
-		"windows_amd64": "probe-agent_windows_amd64.exe",
-		"linux_armv7":   "probe-agent_linux_armv7",
+		"linux_amd64":   "xb-probe-agent_linux_amd64",
+		"windows_amd64": "xb-probe-agent_windows_amd64.exe",
+		"linux_armv7":   "xb-probe-agent_linux_armv7",
 	}
 	for tag, want := range cases {
 		if got := artifactForTag(tag); got != want {

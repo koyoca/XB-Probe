@@ -1,12 +1,12 @@
 #!/bin/sh
-# Server Probe —— Master 一键部署（Linux / systemd）
+# XB-Probe —— Master 一键部署（Linux / systemd）
 #
 # 覆盖三件事：放二进制 → 写配置并初始化管理员 → 注册 systemd 服务并做健康检查。
 # 幂等：重复执行会走"升级"路径（停服务 → 换二进制 → 启动），不会重建数据目录、
 # 也不会覆盖已有的 master.yaml（除非 --force-config）。
 #
 # 用法（root）：
-#   sh deploy-master.sh --bin ./bin/probe-master \
+#   sh deploy-master.sh --bin ./bin/xb-probe-master \
 #       --public-origin https://status.example.com \
 #       --admin-origin  https://admin.example.com \
 #       --admin-user ops --admin-password '<强口令>'
@@ -38,17 +38,17 @@
 # 他的机器上**没有这个文件**。见文件末尾"卸载提示怎么给"那一段。
 #
 # "只更新 Agent 发布文件"是同一类问题：GitHub 上出了新的 Agent 版本时，原先要
-# 自己去 Release 页看版本号、再手敲一条 `probe-master dist pull --version 0.1.2
+# 自己去 Release 页看版本号、再手敲一条 `xb-probe-master dist pull --version 0.1.2
 # --from .../download/v0.1.2`（版本号敲错就是 404）。放进这一问之后，
 # "把新节点装到的 Agent 升到最新"＝重跑脚本 → 选 3。
 #
 # 只看不装（打印将要写入的 master.yaml，不建用户/目录、不注册服务、不建管理员）：
-#   PROBE_NO_ASK=1 sh deploy-master.sh --bin ./bin/probe-master --dry-run
+#   PROBE_NO_ASK=1 sh deploy-master.sh --bin ./bin/xb-probe-master --dry-run
 #
 # 常用可选参数：
-#   --dir <目录>          配置目录（默认 /etc/probe-master）
-#   --data <目录>         数据目录（默认 /var/lib/probe-master）
-#   --bin-dir <目录>      二进制安装目录（默认 /usr/local/bin；只读根文件系统用 /opt/probe-master）
+#   --dir <目录>          配置目录（默认 /etc/xb-probe-master）
+#   --data <目录>         数据目录（默认 /var/lib/xb-probe-master）
+#   --bin-dir <目录>      二进制安装目录（默认 /usr/local/bin；只读根文件系统用 /opt/xb-probe-master）
 #   --public-listen <地址> 公开站监听（默认 0.0.0.0:8080；只写端口如 9000 等价于 0.0.0.0:9000）
 #   --admin-listen  <地址> 管理端监听（默认 127.0.0.1:8081 —— 只监听回环，
 #                          公网访问请走反代，或显式写 0.0.0.0:8081 自行承担风险）
@@ -154,8 +154,8 @@ if [ -z "${PROBE_REEXEC:-}" ] && [ -z "${BASH_VERSION:-}" ] && command -v bash >
 fi
 
 BIN_SRC=""
-DIR="${PROBE_DIR:-/etc/probe-master}"
-DATA="${PROBE_DATA:-/var/lib/probe-master}"
+DIR="${PROBE_DIR:-/etc/xb-probe-master}"
+DATA="${PROBE_DATA:-/var/lib/xb-probe-master}"
 BIN_DIR="${PROBE_BIN_DIR:-/usr/local/bin}"
 PUBLIC_LISTEN="${PROBE_PUBLIC_LISTEN:-0.0.0.0:8080}"
 ADMIN_LISTEN="${PROBE_ADMIN_LISTEN:-127.0.0.1:8081}"
@@ -192,6 +192,13 @@ NO_ASK=""
 UNINSTALL=""
 # 只更新 Agent 发布文件（不动 Master 的二进制、配置与服务）——问答题里的第 3 项。
 RELEASE_ONLY=""
+# 只替换 Master 本体（不碰配置、证书、管理员账号）——问答题里的第 4 项。
+UPGRADE_ONLY=""
+# 只重置管理员密码（不动二进制与配置）——问答题里的第 5 项。
+RESET_PASSWORD=""
+# 上面这几个"只做一件事"的开关与 UNINSTALL / RELEASE_ONLY 是同一类：**必须**在这里
+# 给出默认值。`set -eu` 下少一个就会在"判断它有没有被设置"的那一行直接 unbound
+# variable 退出——而那行恰好在问答题派发处，等于整个交互入口全废（本轮真实踩过）。
 # "做什么"这一问由谁问：--ask-mode 只问不做事（入口脚本用），--mode 是入口问完之后
 # 把答案传回来（于是不会再问第二遍）。两者都见 0a-3。
 ASK_MODE=""
@@ -274,7 +281,7 @@ usage() {
 deploy-master.sh —— Master 一键部署
 
 必需：
-  --bin <路径>              probe-master 二进制（或已安装时省略以只做配置/服务）
+  --bin <路径>              xb-probe-master 二进制（或已安装时省略以只做配置/服务）
 
 推荐：
   --public-origin <URL>     公开站对外地址（6.1 源分离，配了才做 Host 白名单）
@@ -283,8 +290,8 @@ deploy-master.sh —— Master 一键部署
   --admin-password <口令>    不传则交互输入；也可用环境变量 PROBE_ADMIN_PASSWORD
 
 可选：
-  --dir <目录>              配置目录（默认 /etc/probe-master）
-  --data <目录>             数据目录（默认 /var/lib/probe-master）
+  --dir <目录>              配置目录（默认 /etc/xb-probe-master）
+  --data <目录>             数据目录（默认 /var/lib/xb-probe-master）
   --bin-dir <目录>          二进制安装目录（默认 /usr/local/bin）
   --public-listen <地址>     默认 0.0.0.0:8080（只写端口如 9000 = 0.0.0.0:9000）
   --admin-listen <地址>      默认 127.0.0.1:8081（只监听回环，公网请走反代）
@@ -330,16 +337,32 @@ TLS：
   --release-only            去 GitHub 查**最新 Release**，把它的 Agent 发布文件
                             拉进 data_dir/dist/<最新版本>/。
                             版本号由脚本自己查（不必再手敲 --version），也不需要
-                            注册码；已装好的节点随后用 `probe-agent upgrade` 升级。
+                            注册码；已装好的节点随后用 `xb-probe-agent upgrade` 升级。
                             与 --uninstall 互斥；配 --dry-run 只查版本不写盘。
 
+只升级 Master 本体（不动配置、证书、站点设置与管理员账号）：
+  --upgrade-only            用 --bin 给的新二进制替换已安装的 xb-probe-master，
+                            然后停/起服务并当场验活。**不重写 master.yaml**、
+                            不申请证书、不动 Caddy、不碰管理员账号、也不重拉
+                            Agent 发布文件。
+                            与 --uninstall / --release-only / --reset-password 互斥；
+                            启动失败会自动把旧二进制换回来（配置从头到尾没动过）。
+
+重置管理员密码：
+  --reset-password          改 --admin-user（默认 ops）的登录口令，不动其它任何东西。
+                            口令取 --admin-password 或 PROBE_ADMIN_PASSWORD，
+                            都没给就交互输入两次。
+                            与其它三种"只做一件事"的模式互斥；配 --dry-run 只回显计划。
+
 给入口脚本用的两个（一般不需要手工敲）：
-  --ask-mode                只问"做什么"（1 安装/升级、2 卸载、3 只更新发布文件），
-                            把答案写到 stdout 就退出。不碰系统、不需要 root。
+  --ask-mode                只问"做什么"（1 安装/升级、2 卸载、3 只更新发布文件、
+                            4 只升级本体、5 重置管理员密码），把答案写到 stdout
+                            就退出。不碰系统、不需要 root。
                             install-master-bin.sh / install-master.sh 靠它**在下载
                             二进制、装工具链之前**就知道用户要做什么。
-  --mode <1|2|3>            入口脚本问完之后把答案传回来，于是不会再问第二遍。
-                            2 等价于 --uninstall、3 等价于 --release-only。
+  --mode <1|2|3|4|5>        入口脚本问完之后把答案传回来，于是不会再问第二遍。
+                            2 等价于 --uninstall、3 等价于 --release-only、
+                            4 等价于 --upgrade-only、5 等价于 --reset-password。
 EOF
 }
 
@@ -375,6 +398,8 @@ while [ $# -gt 0 ]; do
 	--proxy-domain) PROXY_DOMAINS="${2:-}"; shift 2 ;;
 	--uninstall) UNINSTALL="1"; shift ;;
 	--release-only) RELEASE_ONLY="1"; shift ;;
+	--upgrade-only) UPGRADE_ONLY="1"; shift ;;
+	--reset-password) RESET_PASSWORD="1"; shift ;;
 	--ask-mode) ASK_MODE="1"; shift ;;
 	--mode) MODE_IN="${2:-}"; shift 2 ;;
 	--keep-data) KEEP_DATA="1"; shift ;;
@@ -382,6 +407,144 @@ while [ $# -gt 0 ]; do
 	*) echo "未知参数：$1" >&2; usage; exit 2 ;;
 	esac
 done
+
+# ---------------------------------------------------------------------------
+# 配置探测与诊断 helper（必须定义在任何调用点之前——见下文 0d/0e 的说明）
+# ---------------------------------------------------------------------------
+# binary_supports_config_key <键名>：二进制认不认识某个配置键。
+#
+# 为什么需要它：`install-master-bin.sh` 下的二进制来自 **Release 标签**，而部署脚本
+# 来自 **main**。两者版本不同步——脚本可能写出二进制还不认识的键，而 LoadMaster 是
+# 严格解析（KnownFields(true)），后果是**服务启动即失败**（用户在真机上就撞到了：
+# `field sync_obtain not found in type config.ACMEConfig`）。
+#
+# 判据必须问二进制本人，不能靠"比版本号"：版本号规则会变、也需要有人记得维护。
+# 做法＝拿一份**只含这一个键**的最小配置喂给它，看它是"未知键"还是别的错误。
+# 用 tls status 而不是启动服务：它是只读的、不需要端口、立即返回。
+#
+# ⚠⚠ 探测器必须先证明"自己真的读到了我们给它的那份文件"，否则它会给出
+# 一个**恒为"认识"的假结论**——这一条是踩过的事故，值得写清楚：
+#
+#   xb-probe-master tls status -config <临时文件>
+#
+# 在**没有 tls 子命令**的旧二进制上（Release 的 v0.1.0 就是），`tls` 不匹配
+# main() 里任何 case，于是 fall through 到服务启动；而 flag.Parse 遇到第一个
+# 非 flag 参数 `tls` 就**停止解析**，`-config <临时文件>` 被整个忽略，读的是
+# 默认路径的真实配置。结果是"基线"与"待测"两次调用读的是**同一份**文件：
+# 基线通过（因为那份真实配置本来就能解析），待测也没有"未知键"报错 ——
+# 于是探测恒回答"认识"。脚本写下二进制不认识的 sync_obtain，服务随即拒绝启动。
+#
+# 修法是加一个**哨兵**：同样结构，键名换成一个必然不存在的名字。
+#   · 哨兵没有被"点名拒绝" → 这条通道根本没测到我们的文件 → 结论不可信 → 返回 1；
+#   · 哨兵被点名拒绝、而待测键没有 → 通道有效，且二进制确实认识该键 → 返回 0。
+# 哨兵一次覆盖了"子命令不存在"与"-config 被忽略"两种失效——它们的**症状相同**，
+# 光看待测键那一次的输出分辨不出来。它同时取代了原来的"基线"：探测配置若自身
+# 语法错误，报错会是语法错而不是 `field <哨兵> not found`，哨兵判据同样不匹配。
+#
+# "无法判断"一律按"不认识"处理：宁可少写一个键（功能降级到旧行为），
+# 也不能写下去让服务起不来。
+PROBE_SENTINEL_KEY="probe_sentinel_key_that_cannot_exist"
+
+# _probe_write <文件> <键名>：写一份只含该键的最小配置。
+# listen 值一律加引号：`127.0.0.1:0` 不加引号会被 YAML 当成映射键，那样二进制
+# 报的是**语法错**而不是"未知键"，两种失败在"有没有报错"这个层面看不出区别。
+_probe_write() {
+	cat >"$1" <<EOF
+public_listen: "127.0.0.1:0"
+admin_listen: "127.0.0.1:0"
+tls:
+  mode: "acme"
+  acme:
+    $2: false
+EOF
+}
+
+# _probe_channel_ok：这条探测通道**有效吗**——即我们给它的文件真的被读了吗。
+# 判据还是哨兵：一份只含哨兵键的最小配置，必须被**点名**拒绝。
+_probe_channel_ok() {
+	[ -x "$BIN_DIR/xb-probe-master" ] || return 1
+	_probe="$(mktemp 2>/dev/null || printf '%s' "/tmp/probe-channel-$$.yaml")"
+	_probe_write "$_probe" "$PROBE_SENTINEL_KEY"
+	_out="$("$BIN_DIR/xb-probe-master" tls status -config "$_probe" 2>&1)"
+	rm -f "$_probe" 2>/dev/null || true
+	case "$_out" in
+	*"field $PROBE_SENTINEL_KEY not found"*) return 0 ;;
+	esac
+	return 1
+}
+
+binary_supports_config_key() {
+	_key="${1:-}"
+	[ -z "$_key" ] && return 1
+	_probe_channel_ok || return 1
+	_probe="$(mktemp 2>/dev/null || printf '%s' "/tmp/probe-support-$$.yaml")"
+	_probe_write "$_probe" "$_key"
+	_out="$("$BIN_DIR/xb-probe-master" tls status -config "$_probe" 2>&1)"
+	rm -f "$_probe" 2>/dev/null || true
+	case "$_out" in
+	*"field $_key not found"* | *"not found in type"*) return 1 ;;
+	esac
+	return 0
+}
+
+# config_parses_ok <配置文件>：用二进制自己验一遍这份配置能不能被解析。
+# 返回 0 = 能；1 = 不能（原始输出留在 _CP_OUT，里面点名了是哪个键）；
+#       2 = **判断不了**（通道失效，例如旧二进制没有 tls 子命令）。
+#
+# 这一层专为"保留旧配置"服务：上一轮写坏的配置会被这一轮原样保留，
+# 若不在写完之后立刻验，用户要等输完口令、服务起不来、回滚之后才看到原因。
+# "判断不了"时绝不猜——交给第 4 步 init-admin 的输出兜底，那条路径对任何版本都有效。
+config_parses_ok() {
+	_CP_OUT=""
+	[ -f "${1:-}" ] || return 2
+	_probe_channel_ok || return 2
+	_CP_OUT="$("$BIN_DIR/xb-probe-master" tls status -config "$1" 2>&1)"
+	case "$_CP_OUT" in
+	*"not found in type"* | *"unmarshal"* | *"解析配置失败"*) return 1 ;;
+	esac
+	return 0
+}
+
+# config_mismatch_report <二进制的原始输出>：报出"配置与二进制不匹配"，**不动系统**。
+#
+# 拆成"报告"与"回滚"两半，是因为它有两个使用者，而两者该做的事不一样：
+#   · 安装流程（第 3 步写完配置 / 第 4 步 init-admin）—— 配置可能刚被本脚本改写，
+#     报完必须 rollback 把这一轮改动撤掉；
+#   · --upgrade-only —— 此时**一个字节都还没写**，报完直接退出即可。让它去 rollback
+#     反而是错的（回滚会去停服务、删刚写的东西，而这里根本没写过）。
+# 点名的是哪个键（存在 _CM_BAD_KEY 里，供调用方拼自己的回滚理由）与三种修法两处完全
+# 相同，各写一份迟早会有一份忘了更新。
+config_mismatch_report() {
+	_CM_BAD_KEY="$(printf '%s\n' "${1:-}" | sed -n 's/.*field \([A-Za-z0-9_]*\) not found.*/\1/p' | head -n 1)"
+	echo >&2
+	echo "错误：$CFG 里有当前二进制不认识的键${_CM_BAD_KEY:+（$_CM_BAD_KEY）}。" >&2
+	echo >&2
+	echo "  这通常不是你填错了，而是**两边版本不一致**：" >&2
+	echo "    · 二进制来自 GitHub Release 标签，部署脚本来自 main 分支；" >&2
+	echo "    · 脚本按最新的配置格式写文件，而这台机器上的二进制比它旧。" >&2
+	echo >&2
+	# 修法按"代价从小到大"排：先给只摘掉那一行（保留你其余的设置），
+	# 再给整份重写，最后是换成源码安装（两边同源，从根上不再错配）。
+	cat >&2 <<EOF
+  修法（任选一种）：
+    1) 只删掉这一行，然后重跑本脚本：
+EOF
+	if [ -n "$_CM_BAD_KEY" ]; then
+		printf '         sed -i "/^[[:space:]]*%s:/d" %s\n' "$_CM_BAD_KEY" "$CFG" >&2
+	else
+		printf '         rm -f %s\n' "$CFG" >&2
+	fi
+	cat >&2 <<EOF
+    2) 删掉整份配置重跑（脚本会按当前二进制的能力重写）：
+         rm -f $CFG
+         sudo sh -c "\$(curl -fsSL https://raw.githubusercontent.com/koyoca/XB-Probe/main/install-master-bin.sh)" xb
+    3) 改用源码安装（二进制与脚本同源，不会再错配）：
+         curl -fsSL https://raw.githubusercontent.com/koyoca/XB-Probe/main/install-master.sh | sh
+EOF
+	echo >&2
+}
+
+
 
 # ---------------------------------------------------------------------------
 # 0-0) 由默认值推导出来的路径、平台与模式互斥
@@ -414,8 +577,8 @@ riscv64) _mp_arch="riscv64" ;;
 esac
 _mp_plat="${_mp_os}_${_mp_arch}"
 
-# --mode <1|2|3>：入口脚本已经问过"做什么"了，把答案原样带过来。
-# 三个取值与 0a-3 的菜单一一对应。入口脚本用它是为了"不再问第二遍"——
+# --mode <1|2|3|4|5>：入口脚本已经问过"做什么"了，把答案原样带过来。
+# 五个取值与 0a-3 的菜单一一对应。入口脚本用它是为了"不再问第二遍"——
 # 不然用户会在入口那里答一次、进了部署脚本又被问一次同一件事。
 case "${MODE_IN:-}" in
 '') : ;;
@@ -428,20 +591,44 @@ case "${MODE_IN:-}" in
 	RELEASE_ONLY="1"
 	MODE_GIVEN="1"
 	;;
+4)
+	UPGRADE_ONLY="1"
+	MODE_GIVEN="1"
+	;;
+5)
+	RESET_PASSWORD="1"
+	MODE_GIVEN="1"
+	;;
 *)
-	echo "错误：--mode 只能是 1、2 或 3（收到「$MODE_IN」）。" >&2
-	echo "  1 = 安装 / 升级 Master，2 = 卸载 Master，3 = 只更新 Agent 发布文件。" >&2
+	echo "错误：--mode 只能是 1、2、3、4 或 5（收到「$MODE_IN」）。" >&2
+	echo "  1 = 安装 / 升级 Master，2 = 卸载 Master，3 = 只更新 Agent 发布文件，" >&2
+	echo "  4 = 只升级 Master 本体，5 = 重置管理员密码。" >&2
 	exit 2
 	;;
 esac
 
-# --uninstall 与 --release-only 是两种**互斥**的模式。同时给就是自相矛盾的
-# 要求，直接拒绝——而不是让其中一个悄悄赢：悄悄赢的那种，用户以为做了 A、
-# 实际做了 B，而且两条路都不会报错。
-# 这个判断必须放在 --mode 的映射**之后**：--mode 2 / --mode 3 也会把对应的标志
-# 置起来，于是 `--mode 2 --release-only` 这种自相矛盾的组合同样会被拦下。
-if [ -n "$UNINSTALL" ] && [ -n "$RELEASE_ONLY" ]; then
-	echo "错误：--uninstall 与 --release-only 不能同时使用（一个是卸载、一个是只更新发布文件）。" >&2
+# "只做一件事就退出"的四种模式**两两互斥**。同时给就是自相矛盾的要求，直接拒绝
+# ——而不是让其中一个悄悄赢：悄悄赢的那种，用户以为做了 A、实际做了 B，
+# 而且两条路都不会报错。
+#
+# 判据写成"数一数有几个"，而不是"两两组合列举"：早先是 `[ -n A ] && [ -n B ]`
+# 只盖住 A/B 这一对，第 14 轮加了模式 4/5 之后，`--upgrade-only --uninstall`
+# 这类新组合会**静默通过**（4 个标志 → C(4,2)=6 对，写全很啰嗦且漏一对没人发现）。
+# 这个判断必须放在 --mode 的映射**之后**：--mode 2/3/4/5 也会把对应的标志置起来，
+# 于是 `--mode 2 --release-only` 这种自相矛盾的组合同样会被拦下。
+_oneshot_names=""
+_oneshot_count=0
+_oneshot_note() {
+	_oneshot_count=$((_oneshot_count + 1))
+	_oneshot_names="$_oneshot_names $1"
+}
+if [ -n "$UNINSTALL" ]; then _oneshot_note --uninstall; fi
+if [ -n "$RELEASE_ONLY" ]; then _oneshot_note --release-only; fi
+if [ -n "$UPGRADE_ONLY" ]; then _oneshot_note --upgrade-only; fi
+if [ -n "$RESET_PASSWORD" ]; then _oneshot_note --reset-password; fi
+if [ "$_oneshot_count" -gt 1 ]; then
+	echo "错误：这几项都只做一件事，不能同时使用：$_oneshot_names" >&2
+	echo "  「卸载」「只更新发布文件」「只升级本体」「重置密码」一次只能选一个。" >&2
 	exit 2
 fi
 
@@ -696,7 +883,7 @@ default_dist_source() {
 dist_pull_hint() {
 	echo "    可以手动补（或在能访问 GitHub 的机器上拉好后拷进 $DATA/dist/）："
 	printf '      %s dist pull --version %s --from %s\n' \
-		"$BIN_DIR/probe-master" "${1:-<版本>}" "${DIST_SOURCE:-$(default_dist_source "${1:-<版本>}")}"
+		"$BIN_DIR/xb-probe-master" "${1:-<版本>}" "${DIST_SOURCE:-$(default_dist_source "${1:-<版本>}")}"
 	echo "    这个机房的网络到不了 GitHub 时，也可以把「设置 → 安装与下载」里的"
 	echo "    install.dist_base 指向你自己的镜像，再从那台镜像上取发布文件。"
 }
@@ -792,7 +979,7 @@ pull_agent_release() {
 	if [ "$_pa_rc" != "0" ] || [ ! -s "$DATA/dist/$_pa_ver/SHA256SUMS" ]; then
 		return 1
 	fi
-	_pa_n="$(ls -1 "$DATA/dist/$_pa_ver" 2>/dev/null | grep -c '^probe-agent_' || true)"
+	_pa_n="$(ls -1 "$DATA/dist/$_pa_ver" 2>/dev/null | grep -c '^xb-probe-agent_' || true)"
 	if [ "${_pa_n:-0}" -le 0 ]; then
 		return 1
 	fi
@@ -812,7 +999,7 @@ pull_agent_release() {
 # resolve_latest_agent_version：查 GitHub 上的最新 Release，输出归一化后的版本号。
 #
 # 为什么这条查询在**脚本里**而不是二进制里（`dist latest` 之类）：
-# 部署脚本来自 `main`（每次取最新），而节点上装着的 probe-master 来自某个
+# 部署脚本来自 `main`（每次取最新），而节点上装着的 xb-probe-master 来自某个
 # **Release 标签**——两者版本天生不同步（这条差异踩过好几次，见文件里
 # binary_supports_config_key 的说明）。把查询放进二进制，等于要求"先把
 # Master 升级到带这个子命令的版本才能用它"，而这个功能恰恰是用在"Master
@@ -873,7 +1060,7 @@ resolve_latest_agent_version() {
 		echo "最新发布标签是「$_rl_tag」，它不是一个「纯数字点分」的版本号，不敢拿它去拼下载路径。" >&2
 		echo "  （这条闸同时也是在挡形如 v../../x 的标签变成 data_dir 下的路径。）" >&2
 		echo "  用自定义标签（nightly 之类）时请显式指定版本：" >&2
-		printf '    %s dist pull --config %s --version <版本> \\\n' "$BIN_DIR/probe-master" "$CFG" >&2
+		printf '    %s dist pull --config %s --version <版本> \\\n' "$BIN_DIR/xb-probe-master" "$CFG" >&2
 		printf '      --from https://github.com/%s/releases/download/v<版本>\n' "$RELEASE_REPO" >&2
 		return 1
 		;;
@@ -888,7 +1075,7 @@ resolve_latest_agent_version() {
 #
 # 入口脚本（install-master-bin.sh / install-master.sh）也要问这一问，而且必须**在
 # 它自己动手之前**问：
-#   · 免编译入口要先知道答案，才知道**要不要下载**那几十 MB 的 probe-master；
+#   · 免编译入口要先知道答案，才知道**要不要下载**那几十 MB 的 xb-probe-master；
 #   · 编译入口要先知道答案，才知道**要不要装一套 Go 工具链并编译几分钟**。
 # 用户实测反馈过一次：跑一键命令，先看它下完二进制、才被问"做什么"，然后他选了 3
 # （只更新发布文件）——那次下载纯属浪费，而这台机器上本来就是有二进制的。
@@ -899,16 +1086,17 @@ resolve_latest_agent_version() {
 #
 # 通道约定（很重要，入口要靠它解析）：
 #   · 菜单与提示走 **stderr** —— 那是"给人看的"；
-#   · 答案（`1`/`2`/`3`）走 **stdout** —— 那是"给脚本用的"，调用方要能
+#   · 答案（`1` ~ `5`）走 **stdout** —— 那是"给脚本用的"，调用方要能
 #     `$(...)` 拿到一个干净的数字，不会被菜单文本污染。
 ask_mode_menu() {
 	cat >&2 <<'EOF'
 
-这个脚本可以做三件事：
+这个脚本可以做五件事：
 
   1) 安装 / 升级 Master
      装（或升级）Master 本体：二进制、配置、systemd 服务，以及新节点要用的
-     Agent 发布文件。
+     Agent 发布文件。**会重新收敛整站配置**：重写 master.yaml、按需要申请证书、
+     初始化管理员。适合首次安装，或配置被改坏了要拉回正轨。
 
   2) 卸载 Master
      停服务 → 删单元、二进制、配置、数据、系统用户。默认**连数据一起删**。
@@ -917,11 +1105,22 @@ ask_mode_menu() {
      去 GitHub 查最新 Release，把它的 Agent 发布文件拉进 data_dir/dist/。
      不动 Master 的二进制、配置与服务（不重启、也不重问任何配置）。
 
+  4) 只升级 Master 本体
+     只换二进制并重启服务。**不重写 master.yaml、不申请证书、不动 Caddy、
+     不碰管理员账号、也不重拉 Agent 发布文件**。适合"网站已经跑得好好的，
+     只想把 Master 升到新版本"。启动失败会自动换回旧二进制。
+
+  5) 重置管理员密码
+     只改一个管理员的登录口令（用户名默认 ops，可用 --admin-user 指定），
+     其它什么都不动。忘了后台密码时用它，不必卸载重装。
+
 EOF
-	read_line _mode "请输入 1、2 或 3 [1]: " || _mode=""
+	read_line _mode "请输入 1、2、3、4 或 5 [1]: " || _mode=""
 	case "$_mode" in
 	2 | uninstall | UNINSTALL | Uninstall | 卸载) echo "2" ;;
 	3 | release | RELEASE | Release | 更新 | 发布文件) echo "3" ;;
+	4 | upgrade | UPGRADE | Upgrade | 升级本体 | 只升级本体) echo "4" ;;
+	5 | password | PASSWORD | Password | 重置密码 | 改密码) echo "5" ;;
 	*) echo "1" ;;
 	esac
 }
@@ -934,7 +1133,7 @@ if [ -n "$ASK_MODE" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 0b) 第一个问题：安装/升级、卸载，还是只更新 Agent 发布文件
+# 0b) 第一个问题：安装/升级、卸载、只更新发布文件、只升级本体，还是重置密码
 # ---------------------------------------------------------------------------
 #
 # 这一问是用户提的：跑完一次安装，脚本最后打印"卸载：sh deploy-master.sh --uninstall"，
@@ -953,15 +1152,28 @@ fi
 # （`--version 0.1.2 --from .../download/v0.1.2`）——版本号得自己去 Release 页看，
 # 敲错就是 404。放进这一问之后，"更新 Agent"变成"重跑脚本 → 选 3"，版本号由脚本查。
 #
-# 它是**只读发布目录之外什么都不碰**的模式：不重装二进制、不重写配置、不重启服务，
-# 所以放在卸载位之后、TLS 问答之前，选它就直接做完退出（见 0c）。
+# 第 4、5 项同样是用户加的，两句原话：
+#   「如果 master 更新，但是我只想更新本体……他会全部走一遍流程，包括站点设置、
+#     证书申请、管理员账号设置等全部流程，但是这些我不想做」；
+#   「如果我 web 界面忘记密码，就必须利用脚本卸载重装，所以 master 或者一键部署
+#     脚本具备重新设置密码选项」。
+# 共同点是"只想做一件事、别的都别动"，所以它们都排在工作量最大的问答**之前**：
+# 选错的人不必先走完一遍整站问答才发现自己白答了。（这一点在 sh 入口脚本里更值钱
+# ——那边选错要多付一次完整的 Go 编译。）
 #
-# 三种"不问"：已经给了 --uninstall / --release-only（显式参数优先于面试）、
-# 入口脚本已经问过并把答案通过 --mode 传下来了（MODE_GIVEN）、以及全局的 ASK 关掉时。
-if [ -z "$UNINSTALL" ] && [ -z "$RELEASE_ONLY" ] && [ -z "$MODE_GIVEN" ] && [ -n "$ASK" ]; then
+# 它们是**只读发布目录之外什么都不碰**的模式：不重装二进制、不重写配置、不重启服务，
+# 所以放在卸载位之后、TLS 问答之前，选它就直接做完退出（见 0c / 0d / 0e）。
+#
+# 四种"不问"：已经给了 --uninstall / --release-only / --upgrade-only /
+# --reset-password（显式参数优先于面试）、入口脚本已经问过并把答案通过 --mode
+# 传下来了（MODE_GIVEN）、以及全局的 ASK 关掉时。
+if [ -z "$UNINSTALL" ] && [ -z "$RELEASE_ONLY" ] && [ -z "$UPGRADE_ONLY" ] &&
+	[ -z "$RESET_PASSWORD" ] && [ -z "$MODE_GIVEN" ] && [ -n "$ASK" ]; then
 	case "$(ask_mode_menu)" in
 	2) UNINSTALL="1" ;;
 	3) RELEASE_ONLY="1" ;;
+	4) UPGRADE_ONLY="1" ;;
+	5) RESET_PASSWORD="1" ;;
 	esac
 	if [ -n "$UNINSTALL" ]; then
 		printf '已选择卸载。默认**连数据一起删**（数据目录里有数据库与 master.key）。\n' >&2
@@ -994,7 +1206,7 @@ if [ -n "$RELEASE_ONLY" ]; then
 		_ro_bin="$BIN_SRC"
 		_ro_from="--bin 指定的那份"
 	else
-		_ro_bin="$BIN_DIR/probe-master"
+		_ro_bin="$BIN_DIR/xb-probe-master"
 		_ro_from="已安装的那份"
 	fi
 
@@ -1086,18 +1298,252 @@ if [ -n "$RELEASE_ONLY" ]; then
 	fi
 	if [ "$DIST_PULL" = "local" ] && [ -z "$_mp_plat" ]; then
 		echo "错误：认不出本机平台（uname 结果不在已知表里），不能只拉本机。" >&2
-		echo "      可以改选全部平台，或直接用 probe-master dist pull 手工指定。" >&2
+		echo "      可以改选全部平台，或直接用 xb-probe-master dist pull 手工指定。" >&2
 		exit 1
 	fi
 	if pull_agent_release "$_ro_ver" "$DIST_PULL" "$_ro_bin"; then
 		echo "==> 完成：$DATA/dist/$_ro_ver 已就绪（新节点装到的 Agent 就是这一版）"
 		echo "    新节点：后台「节点 → 注册码」生成注册码，按页面给的命令装即可"
-		echo "    已装节点：sudo probe-agent upgrade --check && sudo probe-agent upgrade"
+		echo "    已装节点：sudo xb-probe-agent upgrade --check && sudo xb-probe-agent upgrade"
 	else
 		echo "错误：发布文件没有入库（$DATA/dist/$_ro_ver 里没有可用的 SHA256SUMS）。" >&2
 		dist_pull_hint "$_ro_ver"
 		exit 1
 	fi
+	exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# 0d) 只升级 Master 本体（--upgrade-only；问答题里的第 4 项）
+# ---------------------------------------------------------------------------
+#
+# 用户原话：「如果 master 更新，但是我只想更新本体 …… 如果我选择 1) 安装 / 升级
+# Master，那么他会全部走一遍流程，包括站点设置、证书申请、管理员账号设置等全部
+# 流程，但是这些我不想做，我仅仅只想升级 master 本体」。
+#
+# 所以这里只做四件事：停服务 → 换二进制（先备份）→ 起服务 → 当场验活。
+# 刻意**不做**的事，每一条都是"顺手做了会造成伤害"：
+#   · 不重写 master.yaml —— 站点形态、监听端口、TLS 方式都是运维自己定的，
+#     升级一个版本不该改它们（选 1 会重写，那才是它的用途）；
+#   · 不申请证书、不动 Caddy —— 证书与反代与"换二进制"毫无关系；
+#   · 不碰管理员账号（要改口令用第 5 项）；
+#   · 不重拉 Agent 发布文件（那是第 3 项）。
+#
+# 与选 1 的真正区别：选 1 是"重新收敛到脚本认为正确的状态"，本模式假设系统
+# 当前是对的，只把二进制换掉。
+#
+# 失败**必须回滚**。新二进制起不来（端口被占、配置里有它不认识的键、架构不对）
+# 时要有"把备份换回去并重启"这条退路，否则一次"只想升个版本"会变成一次停机事故
+# ——而本模式从头到尾没动过配置，回滚回去的状态是确定可用的。
+upgrade_only_rollback() {
+	echo >&2
+	echo "错误：$1" >&2
+	systemctl --no-pager status xb-probe-master 2>/dev/null | sed -n '1,10p' >&2 || true
+	journalctl -u xb-probe-master --no-pager -n 20 2>/dev/null | sed 's/^/    /' >&2 || true
+	if [ -f "${UPGRADE_BACKUP:-}" ]; then
+		echo "    正在换回升级前的二进制…" >&2
+		if command -v install >/dev/null 2>&1; then
+			install -m 0755 "$UPGRADE_BACKUP" "$BIN_DIR/xb-probe-master"
+		else
+			cp -f "$UPGRADE_BACKUP" "$BIN_DIR/xb-probe-master" && chmod 0755 "$BIN_DIR/xb-probe-master"
+		fi
+		if systemctl start xb-probe-master; then
+			sleep 1
+			if systemctl is-active --quiet xb-probe-master; then
+				echo "    已还原到升级前的版本，服务在跑；master.yaml 全程未被改动。" >&2
+			else
+				echo "    已还原旧二进制，但服务仍未起来——请手工看：journalctl -u xb-probe-master -n 50" >&2
+			fi
+		else
+			echo "    还原后启动失败——请手工看：journalctl -u xb-probe-master -n 50" >&2
+		fi
+		echo "    备份仍留在 ${UPGRADE_BACKUP:-}（确认无误后可自行删除）。" >&2
+	else
+		echo "    没有可用的备份（升级前就不存在 $BIN_DIR/xb-probe-master），未做还原。" >&2
+	fi
+	exit 1
+}
+
+if [ -n "$UPGRADE_ONLY" ]; then
+	echo "==> 只升级 Master 本体"
+
+	# 新二进制从哪来：只认 --bin。入口脚本（install-master.sh 编译、
+# install-master-bin.sh 下载）本来就是这么把二进制交给本脚本的，
+	# 用户从菜单选第 4 项时走的就是那条路。
+	if [ -z "$BIN_SRC" ]; then
+		echo "错误：只升级本体需要指定新二进制。" >&2
+		echo "  · 走一键安装脚本的话直接选第 4 项即可（脚本会把新二进制带过来）；" >&2
+		echo "  · 手工执行时用 --bin 指到新版：--bin /path/to/xb-probe-master" >&2
+		exit 2
+	fi
+	if [ ! -f "$BIN_SRC" ]; then
+		echo "错误：--bin 指向的文件不存在：$BIN_SRC" >&2
+		exit 2
+	fi
+	if [ "$BIN_SRC" = "$BIN_DIR/xb-probe-master" ]; then
+		echo "    源与目标相同（$BIN_SRC）：没有可升级的内容，什么都没做。"
+		exit 0
+	fi
+
+	# 三件事全部在**停服务之前**做完。这是本模式唯一能"在动系统之前失败"的机会：
+	# 等停了服务才发现二进制跑不起来或读不懂现有配置，就白白断了一次服务。
+	if ! _uo_new_ver="$("$BIN_SRC" version 2>/dev/null)"; then
+		echo "错误：$BIN_SRC 跑不起来（架构不对？文件没传完？）。" >&2
+		echo "      本机平台：$_mp_plat。用 --bin 换成正确的那个文件再试。" >&2
+		exit 2
+	fi
+	if [ -f "$CFG" ]; then
+		_uo_cp_rc=0
+		config_parses_ok "$CFG" || _uo_cp_rc=$?
+		# 返回 1 = 明确判出"这份配置新二进制不认"，这是本模式唯一真正危险的情况：
+		# 换上去服务必定起不来。到这里直接停，比"装上去 → 起不来 → 回滚"更干净。
+		# 返回 2 = 判不了（旧二进制没有 tls 子命令之类），**不猜**，放行。
+		if [ "$_uo_cp_rc" = "1" ]; then
+			echo "错误：$BIN_SRC 读不懂现有的 $CFG —— 换上去服务起不来，已中止（什么都没改）。" >&2
+			config_mismatch_report "$_CP_OUT"
+			# config_mismatch_report **只报告不退出**（它另一个使用者要接着回滚），
+			# 所以这里必须自己 exit，否则会一路走到"停服务 → 换二进制"上去。
+			exit 2
+		fi
+	fi
+	echo "    新二进制：$BIN_SRC"
+	echo "    版本：${_uo_new_ver:-（未报告版本）}"
+	echo "    不会改动：$CFG、证书、Caddy 配置、管理员账号、$DATA/dist/"
+
+	if [ -n "$DRY_RUN" ]; then
+		echo "    [dry-run] 停服务 → 备份 $BIN_DIR/xb-probe-master → 拷入 $BIN_SRC → 起服务 → 验活"
+		echo "==> dry-run：未改动任何东西。"
+		exit 0
+	fi
+	if [ "$(id -u)" -ne 0 ]; then
+		echo "错误：升级本体要写 $BIN_DIR 并重启服务，需要 root 或 sudo（--dry-run 不需要）。" >&2
+		exit 1
+	fi
+	# 没有 systemd 时不猜也不硬来：Master 官方只注册 systemd（见第 5 步），
+	# 容器/Alpine 容器里本来就是手工托管的，那就把替换步骤说清楚由用户执行。
+	if ! command -v systemctl >/dev/null 2>&1; then
+		echo "警告：本机没有 systemctl（容器或非 systemd 发行版），不会替你重启服务。" >&2
+		echo "      手工替换步骤：停掉 Master 进程 → 用 $BIN_SRC 覆盖 $BIN_DIR/xb-probe-master → 重新启动" >&2
+		echo "      当前配置是 $CFG（本模式不改它）。" >&2
+		exit 0
+	fi
+
+	UPGRADE_BACKUP="$BIN_DIR/xb-probe-master.bak"
+	if [ -f "$BIN_DIR/xb-probe-master" ]; then
+		cp -f "$BIN_DIR/xb-probe-master" "$UPGRADE_BACKUP" || {
+			echo "错误：备份现有二进制到 $UPGRADE_BACKUP 失败，已中止（不升级没有退路的二进制）。" >&2
+			exit 1
+		}
+		echo "    已备份旧二进制到 $UPGRADE_BACKUP"
+	fi
+
+	systemctl stop xb-probe-master >/dev/null 2>&1 || true
+	if command -v install >/dev/null 2>&1; then
+		install -m 0755 "$BIN_SRC" "$BIN_DIR/xb-probe-master" || upgrade_only_rollback "写入 $BIN_DIR/xb-probe-master 失败"
+	else
+		{ cp -f "$BIN_SRC" "$BIN_DIR/xb-probe-master" && chmod 0755 "$BIN_DIR/xb-probe-master"; } ||
+			upgrade_only_rollback "写入 $BIN_DIR/xb-probe-master 失败"
+	fi
+	echo "    已写入 $BIN_DIR/xb-probe-master"
+
+	systemctl start xb-probe-master || upgrade_only_rollback "新二进制启动失败（日志见上）"
+	# Type=simple 下 systemctl start 一返回就认为"成功"，而进程可能已经开始
+	# 申请证书、也可能**立刻**因为别的原因退出（端口被占、配置键写错）。
+	# 多给一秒再确认一次，把"根本没起来"抓在回滚点上。
+	sleep 1
+	systemctl is-active --quiet xb-probe-master ||
+		upgrade_only_rollback "新二进制启动后立即退出（端口被占用、配置键写错都会这样）"
+
+	# 验活：服务活着 + 版本是新的那个。两条都要，缺一条都不算"升级成功"。
+	_uo_now="$(systemctl show -p MainPID --value xb-probe-master 2>/dev/null || echo "")"
+	echo "==> 升级完成"
+	echo "    运行中的版本：${_uo_new_ver:-（未报告版本）}"
+	echo "    服务状态：$(systemctl is-active xb-probe-master 2>/dev/null || echo unknown)${_uo_now:+（MainPID $_uo_now）}"
+	echo "    未改动：$CFG、证书、Caddy、管理员账号、$DATA/dist/"
+	echo "    旧二进制留在 $UPGRADE_BACKUP（确认无误后可删）。"
+	exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# 0e) 重置管理员密码（--reset-password；问答题里的第 5 项）
+# ---------------------------------------------------------------------------
+#
+# 用户原话：「如果我 web 界面忘记密码，就必须利用脚本卸载重装，所以 master 或者
+# 一键部署脚本具备重新设置密码选项」。卸载重装会连数据一起清掉，为了改一个口令
+# 付这个代价毫无道理。
+#
+# 实现只有一步：调 `xb-probe-master reset-admin`。它有 `--i-know-what-i-am-doing`
+# 这道闸，这里**主动传**它——那道闸挡的是"随手敲一条命令误改生产口令"，
+# 而本模式是用户从菜单里明确选了「重置管理员密码」，属于它的正当用途。
+# 反过来说：这也意味着本模式不该出现在任何"无人值守的默认路径"里，
+# 所以它不参与 --yes 之外的自动选择（菜单默认项仍是 1）。
+if [ -n "$RESET_PASSWORD" ]; then
+	echo "==> 重置管理员密码"
+	if [ -n "$DRY_RUN" ]; then
+		echo "    [dry-run] 将会执行：$BIN_DIR/xb-probe-master reset-admin -config $CFG -username ${ADMIN_USER:-ops}"
+		echo "    [dry-run] 口令在正式执行时交互输入（或由 --admin-password / PROBE_ADMIN_PASSWORD 提供）。"
+		echo "==> dry-run：未改动任何东西。"
+		exit 0
+	fi
+	if [ "$(id -u)" -ne 0 ]; then
+		echo "错误：重置口令要写 $DATA 里的数据库，需要 root 或 sudo（--dry-run 不需要）。" >&2
+		exit 1
+	fi
+	if [ ! -x "$BIN_DIR/xb-probe-master" ]; then
+		echo "错误：找不到可执行的 $BIN_DIR/xb-probe-master —— 这台机器上还没有装 Master？" >&2
+		echo "      首次部署请选 1（安装 / 升级）。" >&2
+		exit 1
+	fi
+	if [ ! -f "$CFG" ]; then
+		echo "错误：读不到 $CFG —— 拿不到数据目录，不敢继续。" >&2
+		exit 1
+	fi
+
+	# 口令来源优先级与选 1 的第 4 步完全一致：参数 > 环境变量 > 交互。
+	# 交互时问两遍并要求一致——重置口令没有"再输一次确认"的话，
+	# 打错一个字符就变成"重置成功但登不进去"，而那看起来像 bug。
+	if [ -z "$ADMIN_PASSWORD" ]; then
+		printf '管理员 %s 的新口令（不回显）：' "${ADMIN_USER:-ops}" >&2
+		stty -echo 2>/dev/null || true
+		IFS= read -r ADMIN_PASSWORD || ADMIN_PASSWORD=""
+		stty echo 2>/dev/null || true
+		printf '\n' >&2
+		printf '再输一遍确认：' >&2
+		stty -echo 2>/dev/null || true
+		IFS= read -r _rp_again || _rp_again=""
+		stty echo 2>/dev/null || true
+		printf '\n' >&2
+		if [ "$ADMIN_PASSWORD" != "$_rp_again" ]; then
+			echo "错误：两次输入的口令不一致，未做任何改动。" >&2
+			exit 2
+		fi
+	fi
+	if [ -z "$ADMIN_PASSWORD" ]; then
+		echo "错误：口令不能为空。" >&2
+		exit 2
+	fi
+
+	# 与第 4 步同一个道理：**先把输出收进变量再自己判**。
+	# 写成 `cmd 2>&1 | sed …` 的话，管道会把 cmd 的退出码换成 sed 的（恒 0），
+	# 任何失败都被静默吞掉，脚本还会接着打印"完成"。
+	_rp_out="$("$BIN_DIR/xb-probe-master" reset-admin -config "$CFG" \
+		-username "${ADMIN_USER:-ops}" -password "$ADMIN_PASSWORD" \
+		--i-know-what-i-am-doing 2>&1)"
+	_rp_rc=$?
+	printf '%s\n' "$_rp_out" | sed 's/^/    /'
+	if [ "$_rp_rc" -ne 0 ]; then
+		case "$_rp_out" in
+		*"解析配置失败"* | *"unmarshal"* | *"not found in type"*)
+			config_mismatch_report "$_rp_out"
+			;;
+		esac
+		echo "错误：重置口令失败（上面是 xb-probe-master 的输出）。" >&2
+		echo "      用户名「${ADMIN_USER:-ops}」不存在时也会这样——可用 --admin-user 指定。" >&2
+		exit 1
+	fi
+	unset ADMIN_PASSWORD
+	echo "==> 完成：管理员 ${ADMIN_USER:-ops} 的口令已更新，其它任何东西都没动。"
+	echo "    用新口令登录后，建议在「系统设置 → 安全」里核对 TOTP 状态。"
 	exit 0
 fi
 
@@ -1187,21 +1633,21 @@ if [ -n "$UNINSTALL" ]; then
 		fi
 	}
 
-	echo "==> 卸载 Server Probe Master"
+	echo "==> 卸载 XB-Probe Master"
 	if [ -n "$DRY_RUN" ]; then
 		echo "    （dry-run：只列出将要做的事，不删除任何东西）"
 	fi
 
 	echo "==> 1/8 停止并注销服务"
-	UNIT_PATH=/etc/systemd/system/probe-master.service
+	UNIT_PATH=/etc/systemd/system/xb-probe-master.service
 	if [ -n "$DRY_RUN" ]; then
-		echo "    [dry-run] systemctl disable --now probe-master；删除 $UNIT_PATH"
+		echo "    [dry-run] systemctl disable --now xb-probe-master；删除 $UNIT_PATH"
 	elif command -v systemctl >/dev/null 2>&1; then
-		systemctl disable --now probe-master >/dev/null 2>&1 || true
+		systemctl disable --now xb-probe-master >/dev/null 2>&1 || true
 		if [ -f "$UNIT_PATH" ]; then
 			rm -f "$UNIT_PATH" 2>/dev/null || true
 			systemctl daemon-reload >/dev/null 2>&1 || true
-			systemctl reset-failed probe-master >/dev/null 2>&1 || true
+			systemctl reset-failed xb-probe-master >/dev/null 2>&1 || true
 			if [ -f "$UNIT_PATH" ]; then echo "    ⚠ 残留：$UNIT_PATH"
 			else echo "    已停止并删除 $UNIT_PATH"; fi
 		else
@@ -1212,11 +1658,11 @@ if [ -n "$UNINSTALL" ]; then
 	fi
 
 	echo "==> 2/8 其它 init 系统残留"
-	for _f in /etc/init.d/probe-master /etc/supervisor/conf.d/probe-master.conf; do
+	for _f in /etc/init.d/xb-probe-master /etc/supervisor/conf.d/xb-probe-master.conf; do
 		if [ -e "$_f" ]; then
 			rm_path "$_f" "其它进程管理器的单元"
 			if command -v rc-update >/dev/null 2>&1; then
-				rc-update del probe-master >/dev/null 2>&1 || true
+				rc-update del xb-probe-master >/dev/null 2>&1 || true
 			fi
 		else
 			echo "    $_f 不存在"
@@ -1224,7 +1670,7 @@ if [ -n "$UNINSTALL" ]; then
 	done
 
 	echo "==> 3/8 删除二进制"
-	rm_path "$BIN_DIR/probe-master" "Master 可执行文件"
+	rm_path "$BIN_DIR/xb-probe-master" "Master 可执行文件"
 
 	echo "==> 4/8 删除配置目录"
 	rm_path "$DIR" "配置（master.yaml、master.key）"
@@ -1241,14 +1687,14 @@ if [ -n "$UNINSTALL" ]; then
 	# 这里最难的不是停服务，而是**分清哪些是我们的、哪些是别人的**：
 	# 这台机器上很可能原本就有一个 Caddy（发行版包、x-ui 之类），把它一并停掉删掉
 	# 是比"没卸载干净"严重得多的错误。所以三项各用各的判据，且都偏向"不动"：
-	#   · 服务单元：Description 里带 "Server Probe" 才是我们写的那份（官方包那份
+	#   · 服务单元：Description 里带 "XB-Probe" 才是我们写的那份（官方包那份
 	#     写的是 "Caddy web server"）；不是我们的就只停不禁用不删。
 	#   · Caddyfile：有 .bak 说明我们**追加**过 → 用 .bak 还原；没有 .bak 且整份
 	#     都是我们写的 → 删掉；都没有就只摘掉我们那一段（按追加速记行切分）。
 	#   · 命令/二进制：本脚本不会装系统包，所以 /usr/bin/caddy 一律不动。
 	CADDY_SVC=/etc/systemd/system/caddy.service
 	_caddy_is_ours=""
-	if [ -f "$CADDY_SVC" ] && grep -q 'Server Probe' "$CADDY_SVC" 2>/dev/null; then
+	if [ -f "$CADDY_SVC" ] && grep -q 'XB-Probe' "$CADDY_SVC" 2>/dev/null; then
 		_caddy_is_ours="1"
 	fi
 	if [ -n "$DRY_RUN" ]; then
@@ -1256,7 +1702,7 @@ if [ -n "$UNINSTALL" ]; then
 		if [ -n "$_caddy_is_ours" ]; then
 			echo "    [dry-run] 删除 $CADDY_SVC（本脚本写的单元）"
 		elif [ -f "$CADDY_SVC" ]; then
-			echo "    保留 $CADDY_SVC（不是本脚本写的：$CADDY_SVC 里没有 Server Probe 标记）"
+			echo "    保留 $CADDY_SVC（不是本脚本写的：$CADDY_SVC 里没有 XB-Probe 标记）"
 		else
 			echo "    $CADDY_SVC 不存在"
 		fi
@@ -1283,7 +1729,7 @@ if [ -n "$UNINSTALL" ]; then
 				if [ -f "$CADDY_SVC" ]; then echo "    ⚠ 残留：$CADDY_SVC"
 				else echo "    已删除 $CADDY_SVC（本脚本写的单元）"; fi
 			elif [ -f "$CADDY_SVC" ]; then
-				echo "    保留 $CADDY_SVC（不是本脚本写的：里面没有 Server Probe 标记）"
+				echo "    保留 $CADDY_SVC（不是本脚本写的：里面没有 XB-Probe 标记）"
 				echo "      它已被停止，但开机仍会自启——需要的话手工 systemctl disable caddy"
 			else
 				echo "    $CADDY_SVC 不存在"
@@ -1832,13 +2278,13 @@ ans_put PROXY_DOMAINS "$PROXY_DOMAINS"
 # 用户才知道真正的原因。
 #
 # 与其等到回滚，不如在**动手之前**说清楚并给他一个选择。只动"本脚本自己装的
-# Caddy"（判据与卸载段一致：服务单元里带 Server Probe 标记）；别人装的
+# Caddy"（判据与卸载段一致：服务单元里带 XB-Probe 标记）；别人装的
 # Caddy/Nginx 只提示、不动手——停掉别人的服务是比"装不上"严重得多的错误。
 if [ "$TLS_TERMINATOR" = "master" ] && [ -z "$DRY_RUN" ] && command -v systemctl >/dev/null 2>&1; then
 	if systemctl is-active caddy >/dev/null 2>&1; then
 		_caddy_ours=""
 		if [ -f /etc/systemd/system/caddy.service ] &&
-			grep -q 'Server Probe' /etc/systemd/system/caddy.service 2>/dev/null; then
+			grep -q 'XB-Probe' /etc/systemd/system/caddy.service 2>/dev/null; then
 			_caddy_ours="1"
 		fi
 		echo >&2
@@ -1896,7 +2342,7 @@ if [ -n "$ASK" ]; then
 	if [ -n "$NO_SERVICE" ]; then
 		printf '  %s：%s\n' "服务" "不注册（--no-service）" >&2
 	else
-		printf '  %s：%s\n' "服务" "systemd（probe-master，开机自启）" >&2
+		printf '  %s：%s\n' "服务" "systemd（xb-probe-master，开机自启）" >&2
 	fi
 	echo >&2
 	if ! confirm "继续？"; then
@@ -1992,133 +2438,23 @@ fi
 # CFG 自身的定义已经上移到文件前部的"0-0"段（问答与"只更新发布文件"都要用它，
 # 只能有一份来源）。这里保留这段说明，是因为"为什么这么早"这个理由仍然成立。
 
-# binary_supports_config_key <键名>：二进制认不认识某个配置键。
-#
-# 为什么需要它：`install-master-bin.sh` 下的二进制来自 **Release 标签**，而部署脚本
-# 来自 **main**。两者版本不同步——脚本可能写出二进制还不认识的键，而 LoadMaster 是
-# 严格解析（KnownFields(true)），后果是**服务启动即失败**（用户在真机上就撞到了：
-# `field sync_obtain not found in type config.ACMEConfig`）。
-#
-# 判据必须问二进制本人，不能靠"比版本号"：版本号规则会变、也需要有人记得维护。
-# 做法＝拿一份**只含这一个键**的最小配置喂给它，看它是"未知键"还是别的错误。
-# 用 tls status 而不是启动服务：它是只读的、不需要端口、立即返回。
-#
-# ⚠⚠ 探测器必须先证明"自己真的读到了我们给它的那份文件"，否则它会给出
-# 一个**恒为"认识"的假结论**——这一条是踩过的事故，值得写清楚：
-#
-#   probe-master tls status -config <临时文件>
-#
-# 在**没有 tls 子命令**的旧二进制上（Release 的 v0.1.0 就是），`tls` 不匹配
-# main() 里任何 case，于是 fall through 到服务启动；而 flag.Parse 遇到第一个
-# 非 flag 参数 `tls` 就**停止解析**，`-config <临时文件>` 被整个忽略，读的是
-# 默认路径的真实配置。结果是"基线"与"待测"两次调用读的是**同一份**文件：
-# 基线通过（因为那份真实配置本来就能解析），待测也没有"未知键"报错 ——
-# 于是探测恒回答"认识"。脚本写下二进制不认识的 sync_obtain，服务随即拒绝启动。
-#
-# 修法是加一个**哨兵**：同样结构，键名换成一个必然不存在的名字。
-#   · 哨兵没有被"点名拒绝" → 这条通道根本没测到我们的文件 → 结论不可信 → 返回 1；
-#   · 哨兵被点名拒绝、而待测键没有 → 通道有效，且二进制确实认识该键 → 返回 0。
-# 哨兵一次覆盖了"子命令不存在"与"-config 被忽略"两种失效——它们的**症状相同**，
-# 光看待测键那一次的输出分辨不出来。它同时取代了原来的"基线"：探测配置若自身
-# 语法错误，报错会是语法错而不是 `field <哨兵> not found`，哨兵判据同样不匹配。
-#
-# "无法判断"一律按"不认识"处理：宁可少写一个键（功能降级到旧行为），
-# 也不能写下去让服务起不来。
-PROBE_SENTINEL_KEY="probe_sentinel_key_that_cannot_exist"
+# 探测/诊断 helper（PROBE_SENTINEL_KEY、_probe_write、_probe_channel_ok、
+# binary_supports_config_key、config_parses_ok、config_mismatch_report）
+# **已上移到文件前部的「0-0」段之前**：脚本是自上而下执行的，函数必须定义在
+# 任何调用点之前，而 0d/0e 两个"只做一件事"的模式分支（只升级本体、重置口令）
+# 要在 TLS 问答**之前**就用它们做配置诊断——不然管理员只想换一个二进制，
+# 却要先回答一轮"你要哪种证书"。
 
-# _probe_write <文件> <键名>：写一份只含该键的最小配置。
-# listen 值一律加引号：`127.0.0.1:0` 不加引号会被 YAML 当成映射键，那样二进制
-# 报的是**语法错**而不是"未知键"，两种失败在"有没有报错"这个层面看不出区别。
-_probe_write() {
-	cat >"$1" <<EOF
-public_listen: "127.0.0.1:0"
-admin_listen: "127.0.0.1:0"
-tls:
-  mode: "acme"
-  acme:
-    $2: false
-EOF
-}
-
-# _probe_channel_ok：这条探测通道**有效吗**——即我们给它的文件真的被读了吗。
-# 判据还是哨兵：一份只含哨兵键的最小配置，必须被**点名**拒绝。
-_probe_channel_ok() {
-	[ -x "$BIN_DIR/probe-master" ] || return 1
-	_probe="$(mktemp 2>/dev/null || printf '%s' "/tmp/probe-channel-$$.yaml")"
-	_probe_write "$_probe" "$PROBE_SENTINEL_KEY"
-	_out="$("$BIN_DIR/probe-master" tls status -config "$_probe" 2>&1)"
-	rm -f "$_probe" 2>/dev/null || true
-	case "$_out" in
-	*"field $PROBE_SENTINEL_KEY not found"*) return 0 ;;
-	esac
-	return 1
-}
-
-binary_supports_config_key() {
-	_key="${1:-}"
-	[ -z "$_key" ] && return 1
-	_probe_channel_ok || return 1
-	_probe="$(mktemp 2>/dev/null || printf '%s' "/tmp/probe-support-$$.yaml")"
-	_probe_write "$_probe" "$_key"
-	_out="$("$BIN_DIR/probe-master" tls status -config "$_probe" 2>&1)"
-	rm -f "$_probe" 2>/dev/null || true
-	case "$_out" in
-	*"field $_key not found"* | *"not found in type"*) return 1 ;;
-	esac
-	return 0
-}
-
-# config_parses_ok <配置文件>：用二进制自己验一遍这份配置能不能被解析。
-# 返回 0 = 能；1 = 不能（原始输出留在 _CP_OUT，里面点名了是哪个键）；
-#       2 = **判断不了**（通道失效，例如旧二进制没有 tls 子命令）。
+# fail_config_mismatch <二进制的原始输出>：报出"配置与二进制不匹配"并**回滚**。
 #
-# 这一层专为"保留旧配置"服务：上一轮写坏的配置会被这一轮原样保留，
-# 若不在写完之后立刻验，用户要等输完口令、服务起不来、回滚之后才看到原因。
-# "判断不了"时绝不猜——交给第 4 步 init-admin 的输出兜底，那条路径对任何版本都有效。
-config_parses_ok() {
-	_CP_OUT=""
-	[ -f "${1:-}" ] || return 2
-	_probe_channel_ok || return 2
-	_CP_OUT="$("$BIN_DIR/probe-master" tls status -config "$1" 2>&1)"
-	case "$_CP_OUT" in
-	*"not found in type"* | *"unmarshal"* | *"解析配置失败"*) return 1 ;;
-	esac
-	return 0
-}
-
-# fail_config_mismatch <二进制的原始输出>：报出"配置与二进制不匹配"并回滚。
-# 抽出来是因为它会在两处被调用（第 3 步写完配置、第 4 步 init-admin），
-# 两处的**原因与修法完全一样**，各写一份迟早会有一份忘了更新。
+# 报告部分（点名是哪个键 + 三种修法）住在 config_mismatch_report，定义在文件前部，
+# 因为它有两个使用者：本函数（安装流程：配置可能刚被本脚本改写，报完必须撤掉这一
+# 轮的改动）与 --upgrade-only 模式（此时一个字节都还没写，报完直接退出即可）。
+# 两处的原因与修法完全一样，各写一份迟早会有一份忘了更新。
 fail_config_mismatch() {
-	_bad_key="$(printf '%s\n' "${1:-}" | sed -n 's/.*field \([A-Za-z0-9_]*\) not found.*/\1/p' | head -n 1)"
-	echo >&2
-	echo "错误：$CFG 里有当前二进制不认识的键${_bad_key:+（$_bad_key）}。" >&2
-	echo >&2
-	echo "  这通常不是你填错了，而是**两边版本不一致**：" >&2
-	echo "    · 二进制来自 GitHub Release 标签，部署脚本来自 main 分支；" >&2
-	echo "    · 脚本按最新的配置格式写文件，而这台机器上的二进制比它旧。" >&2
-	echo >&2
-	# 修法按"代价从小到大"排：先给只摘掉那一行（保留你其余的设置），
-	# 再给整份重写，最后是换成源码安装（两边同源，从根上不再错配）。
-	cat >&2 <<EOF
-  修法（任选一种）：
-    1) 只删掉这一行，然后重跑本脚本：
-EOF
-	if [ -n "$_bad_key" ]; then
-		printf '         sed -i "/^[[:space:]]*%s:/d" %s\n' "$_bad_key" "$CFG" >&2
-	else
-		printf '         rm -f %s\n' "$CFG" >&2
-	fi
-	cat >&2 <<EOF
-    2) 删掉整份配置重跑（脚本会按当前二进制的能力重写）：
-         rm -f $CFG
-         sudo sh -c "\$(curl -fsSL https://raw.githubusercontent.com/koyoca/XB-Probe/main/install-master-bin.sh)" xb
-    3) 改用源码安装（二进制与脚本同源，不会再错配）：
-         curl -fsSL https://raw.githubusercontent.com/koyoca/XB-Probe/main/install-master.sh | sh
-EOF
-	echo >&2
-	if [ -n "$_bad_key" ]; then
-		rollback "配置键 $_bad_key 与当前二进制不匹配（版本错配，见上面的说明）"
+	config_mismatch_report "${1:-}"
+	if [ -n "$_CM_BAD_KEY" ]; then
+		rollback "配置键 $_CM_BAD_KEY 与当前二进制不匹配（版本错配，见上面的说明）"
 	else
 		rollback "配置文件无法被当前二进制解析（版本错配，见上面的说明）"
 	fi
@@ -2154,7 +2490,7 @@ render_config() {
 	# 之所以值得写这么长一段，是因为旧版解析是非严格的：脚本写进去的这一段
 	# 会被整段静默吞掉，配置文件里白纸黑字、后台设置页却是空的，只能靠人比对。
 	# 它们的唯一入口是后台「设置 → 安装与下载」。
-	# master_url 未设置时会回落到 public_origin（见 cmd/probe-master/main.go
+	# master_url 未设置时会回落到 public_origin（见 cmd/xb-probe-master/main.go
 	# 的 MasterURL 闭包），所以给了 --public-origin 就不必再单独设它。
 	case "$TLS_MODE" in
 	none)
@@ -2172,6 +2508,7 @@ render_config() {
 		echo "  key_file:  \"$TLS_KEY\""
 		;;
 	selfsigned)
+
 		echo 'tls:'
 		echo '  mode: "selfsigned"         # 自签：SAN 覆盖下面的域名与 IP（IP 证书的唯一可用形态）'
 		echo '  selfsigned:'
@@ -2221,7 +2558,7 @@ render_config() {
 # Caddy 反代：--tls-terminator caddy
 # ---------------------------------------------------------------------------
 #
-# 用户的原话是："probe-master 可以监听任何端口，但如果选择下面的 2 3 4，应该自行
+# 用户的原话是："xb-probe-master 可以监听任何端口，但如果选择下面的 2 3 4，应该自行
 # 完成前置 Caddy/Nginx 的反代和自动申请证书以及续期证书，也就是说可以直接访问
 # https，而不需要自己再安装下载 Caddy/Nginx 进行配置反代。"
 #
@@ -2426,9 +2763,9 @@ precheck_state() {
 	PREE_CHECKED="1"
 	if [ -d "$DIR" ]; then PREE_HAVE_DIR="1"; fi
 	if [ -d "$DATA" ]; then PREE_HAVE_DATA="1"; fi
-	if [ -e "$BIN_DIR/probe-master" ]; then PREE_HAVE_BIN="1"; fi
+	if [ -e "$BIN_DIR/xb-probe-master" ]; then PREE_HAVE_BIN="1"; fi
 	if id -u probe >/dev/null 2>&1; then PREE_HAVE_USER="1"; fi
-	if [ -e /etc/systemd/system/probe-master.service ]; then PREE_HAVE_UNIT="1"; fi
+	if [ -e /etc/systemd/system/xb-probe-master.service ]; then PREE_HAVE_UNIT="1"; fi
 	if [ -f "$CADDYFILE" ]; then PREE_HAVE_CADDYFILE="1"; fi
 	if [ -e /etc/systemd/system/caddy.service ]; then PREE_HAVE_CADDY_UNIT="1"; fi
 }
@@ -2444,8 +2781,8 @@ rollback() {
 	echo "==> 回滚 1/6 停止服务" >&2
 	# 先停再删：服务还在跑着的时候删二进制，systemd 会按 Restart=always 反复重启，
 	# 而它每次重启都会在日志里留一条"找不到可执行文件"——把真正的失败原因淹掉。
-	systemctl stop probe-master >/dev/null 2>&1 || true
-	systemctl disable probe-master >/dev/null 2>&1 || true
+	systemctl stop xb-probe-master >/dev/null 2>&1 || true
+	systemctl disable xb-probe-master >/dev/null 2>&1 || true
 	if [ "$TLS_TERMINATOR" = "caddy" ]; then
 		systemctl stop caddy >/dev/null 2>&1 || true
 		systemctl disable caddy >/dev/null 2>&1 || true
@@ -2454,10 +2791,10 @@ rollback() {
 
 	echo "==> 回滚 2/6 服务单元" >&2
 	if [ -z "$PREE_HAVE_UNIT" ]; then
-		rm -f /etc/systemd/system/probe-master.service 2>/dev/null || true
-		echo "    已删除 probe-master.service（本次新建）" >&2
+		rm -f /etc/systemd/system/xb-probe-master.service 2>/dev/null || true
+		echo "    已删除 xb-probe-master.service（本次新建）" >&2
 	else
-		echo "    保留 probe-master.service（安装前就存在）" >&2
+		echo "    保留 xb-probe-master.service（安装前就存在）" >&2
 	fi
 	# caddy 的服务单元**只在本次是它装的**才删。用"安装前有没有 caddy 这个命令"
 	# 判不出来——apt 装完之后命令就在 PATH 里了，所以这里用单元文件是否存在过。
@@ -2466,15 +2803,15 @@ rollback() {
 		echo "    已删除 caddy.service（本次新建）" >&2
 	fi
 	systemctl daemon-reload >/dev/null 2>&1 || true
-	systemctl reset-failed probe-master >/dev/null 2>&1 || true
+	systemctl reset-failed xb-probe-master >/dev/null 2>&1 || true
 	systemctl reset-failed caddy >/dev/null 2>&1 || true
 
 	echo "==> 回滚 3/6 二进制" >&2
 	if [ -z "$PREE_HAVE_BIN" ] && [ -n "$BIN_SRC" ]; then
-		rm -f "$BIN_DIR/probe-master" 2>/dev/null || true
-		echo "    已删除 $BIN_DIR/probe-master（本次新建）" >&2
+		rm -f "$BIN_DIR/xb-probe-master" 2>/dev/null || true
+		echo "    已删除 $BIN_DIR/xb-probe-master（本次新建）" >&2
 	elif [ -n "$PREE_HAVE_BIN" ]; then
-		echo "    保留 $BIN_DIR/probe-master（安装前就存在；升级失败时旧二进制已被覆盖）" >&2
+		echo "    保留 $BIN_DIR/xb-probe-master（安装前就存在；升级失败时旧二进制已被覆盖）" >&2
 	fi
 
 	echo "==> 回滚 4/6 配置与反代配置" >&2
@@ -2555,8 +2892,8 @@ case "$HEALTH_ADDR" in
 ":::") HEALTH_ADDR="127.0.0.1" ;;
 esac
 
-if [ -z "$BIN_SRC" ] && [ ! -x "$BIN_DIR/probe-master" ]; then
-	echo "错误：既没有 --bin，$BIN_DIR 里也没有已安装的 probe-master。" >&2
+if [ -z "$BIN_SRC" ] && [ ! -x "$BIN_DIR/xb-probe-master" ]; then
+	echo "错误：既没有 --bin，$BIN_DIR 里也没有已安装的 xb-probe-master。" >&2
 	exit 2
 fi
 if [ -n "$BIN_SRC" ] && [ ! -f "$BIN_SRC" ]; then
@@ -2588,8 +2925,8 @@ if [ -n "$DRY_RUN" ]; then
 	echo "==> dry-run：未创建用户/目录、未安装二进制、未注册服务、未初始化管理员。"
 	echo "    去掉 --dry-run 即执行（其余参数完全一致）。"
 	echo
-	echo "==> dry-run：最后还会把 Agent 发布文件拉进 $DATA/dist/（probe-master dist pull）。"
-	echo "    不拉的话一键安装脚本会在下载 probe-agent 那一步 404；用 --no-dist-pull 跳过。"
+	echo "==> dry-run：最后还会把 Agent 发布文件拉进 $DATA/dist/（xb-probe-master dist pull）。"
+	echo "    不拉的话一键安装脚本会在下载 xb-probe-agent 那一步 404；用 --no-dist-pull 跳过。"
 	exit 0
 fi
 
@@ -2619,16 +2956,16 @@ if [ -n "$BIN_SRC" ]; then
 	# 只读根文件系统（部分 LXC 模板、distroless）上 /usr/local/bin 不可写，
 	# 用 --bin-dir 指到可写目录即可——systemd 单元里的 ExecStart 会跟着走。
 	mkdir -p "$BIN_DIR" || { echo "错误：无法创建 $BIN_DIR（只读根文件系统？用 --bin-dir 指到可写目录）。" >&2; exit 2; }
-	if [ "$BIN_SRC" = "$BIN_DIR/probe-master" ]; then
+	if [ "$BIN_SRC" = "$BIN_DIR/xb-probe-master" ]; then
 		# 源与目标同一个文件：install/cp 都会报 "are the same file" 并以非 0 退出，
 		# 在 set -e 下直接把整个部署打断，而错误信息完全看不出发生了什么。
 		echo "    源与目标相同（$BIN_SRC），跳过拷贝"
 	elif command -v install >/dev/null 2>&1; then
-		install -m 0755 "$BIN_SRC" "$BIN_DIR/probe-master"
+		install -m 0755 "$BIN_SRC" "$BIN_DIR/xb-probe-master"
 	else
-		cp -f "$BIN_SRC" "$BIN_DIR/probe-master" && chmod 0755 "$BIN_DIR/probe-master"
+		cp -f "$BIN_SRC" "$BIN_DIR/xb-probe-master" && chmod 0755 "$BIN_DIR/xb-probe-master"
 	fi
-	"$BIN_DIR/probe-master" version || true
+	"$BIN_DIR/xb-probe-master" version || true
 fi
 
 echo "==> 3/7 写配置文件 $CFG"
@@ -2682,7 +3019,7 @@ fi
 # 服务必然起不来，最后以"启动失败"回滚——用户看到的失败原因离真正的原因很远
 # （真机日志里，第 4 步已经打印了 `field sync_obtain not found`，脚本却照常往下走）。
 # 所以：先把输出收进变量再自己判，不要让管道吃掉退出码。
-_ia_out="$("$BIN_DIR/probe-master" init-admin -config "$CFG" \
+_ia_out="$("$BIN_DIR/xb-probe-master" init-admin -config "$CFG" \
 	-username "$ADMIN_USER" -password "$ADMIN_PASSWORD" 2>&1)"
 _ia_rc=$?
 printf '%s\n' "$_ia_out" | sed 's/^/    /'
@@ -2706,11 +3043,11 @@ if [ "$_ia_rc" -ne 0 ]; then
 	case "$_ia_out" in
 	*"已存在"*)
 		# 幂等升级时管理员已经建过了，这是预期内的，继续。
-		echo "    （管理员已存在，跳过；改口令用 probe-master reset-admin）"
+		echo "    （管理员已存在，跳过；改口令用 xb-probe-master reset-admin）"
 		;;
 	*)
 		echo >&2
-		echo "错误：初始化管理员失败（上面是 probe-master 的输出）。" >&2
+		echo "错误：初始化管理员失败（上面是 xb-probe-master 的输出）。" >&2
 		rollback "初始化管理员失败"
 		;;
 	esac
@@ -2750,7 +3087,7 @@ if [ -n "$NO_SERVICE" ]; then
 	none) _ns_scheme="http" ;;
 	*) _ns_scheme="https" ;;
 	esac
-	echo "    前台运行：$BIN_DIR/probe-master -config $CFG"
+	echo "    前台运行：$BIN_DIR/xb-probe-master -config $CFG"
 	echo
 	# 与收尾那段同一个道理：ADMIN_ORIGIN 才是"对外地址"，没给时给的本机地址
 	# 必须**说明它只在本机有效**，否则会被当成公网后台地址记下来。
@@ -2769,17 +3106,17 @@ if [ -n "$NO_SERVICE" ]; then
 fi
 
 echo "==> 5/7 写 systemd 单元"
-UNIT=/etc/systemd/system/probe-master.service
+UNIT=/etc/systemd/system/xb-probe-master.service
 if command -v systemctl >/dev/null 2>&1 && [ -d /etc/systemd/system ]; then
 	cat >"$UNIT" <<EOF
 [Unit]
-Description=Server Probe Master
+Description=XB-Probe Master
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=$BIN_DIR/probe-master -config $CFG
+ExecStart=$BIN_DIR/xb-probe-master -config $CFG
 Restart=always
 RestartSec=3
 User=probe
@@ -2799,14 +3136,14 @@ WorkingDirectory=$DATA
 WantedBy=multi-user.target
 EOF
 	systemctl daemon-reload
-	systemctl enable probe-master >/dev/null 2>&1 || true
-	if ! systemctl restart probe-master; then
+	systemctl enable xb-probe-master >/dev/null 2>&1 || true
+	if ! systemctl restart xb-probe-master; then
 		# 启动失败必须回滚。最典型的一种是 tls.mode=acme 且开了 sync_obtain：
 		# 证书申请不成功时服务**故意**起不来，而这是部署阶段，用户正等着结果。
 		# 不回滚的话系统里会留一个反复重启失败的服务，而脚本已经"完成"了。
-		systemctl --no-pager status probe-master 2>/dev/null | sed -n '1,10p' >&2 || true
-		journalctl -u probe-master --no-pager -n 20 2>/dev/null | sed 's/^/    /' >&2 || true
-		rollback "probe-master 服务启动失败（日志见上）"
+		systemctl --no-pager status xb-probe-master 2>/dev/null | sed -n '1,10p' >&2 || true
+		journalctl -u xb-probe-master --no-pager -n 20 2>/dev/null | sed 's/^/    /' >&2 || true
+		rollback "xb-probe-master 服务启动失败（日志见上）"
 	fi
 	echo "    已启用并启动"
 	# Type=simple 下 systemctl restart 一返回就认为"成功"，而进程可能已经开始
@@ -2814,14 +3151,14 @@ EOF
 	# 所以多给一秒再确认一次它还活着——把"服务根本没起来"这件事在回滚点上
 	# 抓住，而不是等到后面的健康检查超时 20 秒再报一句含糊的"没探到公开 API"。
 	sleep 1
-	if ! systemctl is-active --quiet probe-master; then
-		systemctl --no-pager status probe-master 2>/dev/null | sed -n '1,10p' >&2 || true
-		journalctl -u probe-master --no-pager -n 20 2>/dev/null | sed 's/^/    /' >&2 || true
-		rollback "probe-master 启动后立即退出（日志见上；端口被占用、配置键写错都会这样）"
+	if ! systemctl is-active --quiet xb-probe-master; then
+		systemctl --no-pager status xb-probe-master 2>/dev/null | sed -n '1,10p' >&2 || true
+		journalctl -u xb-probe-master --no-pager -n 20 2>/dev/null | sed 's/^/    /' >&2 || true
+		rollback "xb-probe-master 启动后立即退出（日志见上；端口被占用、配置键写错都会这样）"
 	fi
 else
 	echo "警告：没有 systemd（Alpine/OpenRC 或容器），请自行用进程管理器托管：" >&2
-	echo "      $BIN_DIR/probe-master -config $CFG" >&2
+	echo "      $BIN_DIR/xb-probe-master -config $CFG" >&2
 	exit 0
 fi
 
@@ -2975,7 +3312,7 @@ if [ "$TLS_TERMINATOR" = "caddy" ]; then
 		_caddy_bin="$(command -v caddy 2>/dev/null || printf '%s' "$BIN_DIR/caddy")"
 		cat >"$CADDY_UNIT" <<EOF
 [Unit]
-Description=Caddy (Server Probe 反向代理)
+Description=Caddy (XB-Probe 反向代理)
 Documentation=https://caddyserver.com/docs/
 After=network-online.target
 Wants=network-online.target
@@ -3038,7 +3375,7 @@ while [ $i -lt 20 ]; do
 	i=$((i + 1))
 	sleep 1
 done
-systemctl --no-pager status probe-master | sed -n '1,8p' || true
+systemctl --no-pager status xb-probe-master | sed -n '1,8p' || true
 
 echo "==> 6/7 证书"
 # 这一步是本轮改动里最要紧的一处，用户的原话是：
@@ -3106,13 +3443,13 @@ else
 		i=0
 		while [ $i -lt "$_cert_wait" ]; do
 			_cert_rc=0
-			"$BIN_DIR/probe-master" tls status -config "$CFG" >/dev/null 2>&1 || _cert_rc=$?
+			"$BIN_DIR/xb-probe-master" tls status -config "$CFG" >/dev/null 2>&1 || _cert_rc=$?
 			[ "$_cert_rc" != "2" ] && break
 			i=$((i + 5))
 			sleep 5
 		done
 		_cert_rc=0
-		"$BIN_DIR/probe-master" tls status -config "$CFG" || _cert_rc=$?
+		"$BIN_DIR/xb-probe-master" tls status -config "$CFG" || _cert_rc=$?
 	else
 		if [ "$TLS_MODE" = "acme" ]; then
 			echo "    正在申请证书（前台进行，失败会中止安装并回滚）"
@@ -3121,9 +3458,9 @@ else
 		# 这里刻意**不再**吞掉输出：tls status 会打印主体/签发者/有效期，
 		# 申请失败时打印原因与可复制的排查命令——那正是用户要的"反馈结果"。
 		if [ "$_cert_wait" -gt 0 ]; then
-			"$BIN_DIR/probe-master" tls status -config "$CFG" -wait "$_cert_wait" || _cert_rc=$?
+			"$BIN_DIR/xb-probe-master" tls status -config "$CFG" -wait "$_cert_wait" || _cert_rc=$?
 		else
-			"$BIN_DIR/probe-master" tls status -config "$CFG" || _cert_rc=$?
+			"$BIN_DIR/xb-probe-master" tls status -config "$CFG" || _cert_rc=$?
 		fi
 	fi
 	case "$_cert_rc" in
@@ -3141,7 +3478,7 @@ else
 		# 极慢的 CA。它不是成功，但也不足以判定失败，所以不回滚，
 		# 而是把"怎么继续查"说清楚。
 		echo "    ⚠ 申请仍未返回结果（超时）。服务会在后台继续重试；"
-		echo "      随时可查：$BIN_DIR/probe-master tls status -config $CFG -wait 120"
+		echo "      随时可查：$BIN_DIR/xb-probe-master tls status -config $CFG -wait 120"
 		;;
 	*)
 		# 申请失败：上面已经打出了原因与排查命令。按用户要求中止安装并回滚。
@@ -3159,14 +3496,14 @@ echo "==> 6c/7 发布文件入库（/dist/ 里放的是 Agent 二进制，新节
 # Agent：
 #     curl -fsSL https://<域名>/install.sh | sudo sh -s -- --code <注册码>
 #       ==> 平台：linux_amd64
-#       ==> 下载 probe-agent_linux_amd64
+#       ==> 下载 xb-probe-agent_linux_amd64
 #       curl: (22) The requested URL returned error: 404
 #      错误：下载失败。
 #
 # 根因：/install.sh 是**内嵌在二进制里**的（所以那一步取得到，用户看到的是一份
-# 完整可读的脚本），而脚本接下来要的是 `$DIST_BASE/probe-agent_<os>_<arch>` 与
+# 完整可读的脚本），而脚本接下来要的是 `$DIST_BASE/xb-probe-agent_<os>_<arch>` 与
 # `/dist/SHA256SUMS`——这两个是 `data_dir/dist/<版本>/` 下的**发布文件**。
-# 部署流程从来没把发布文件放进去，只在收尾清单里把 `probe-master dist pull`
+# 部署流程从来没把发布文件放进去，只在收尾清单里把 `xb-probe-master dist pull`
 # 当成**事后手工步骤**提了一句。于是一个"一键部署成功"的 Master，开箱的装机
 # 通道是坏的，而且 404 完全指不出原因（用户第一反应是"是不是反代没配好"）。
 #
@@ -3186,7 +3523,7 @@ echo "==> 6c/7 发布文件入库（/dist/ 里放的是 Agent 二进制，新节
 # ③ 版本号对不上就跳过。只有"纯数字点分"的版本号才可能对上 Release 标签
 #    （0.1.1 → v0.1.1）。本地自编译的二进制版本号是 dev/带 git 描述，
 #    照默认 URL 去拉必然 404，不如直接说明白。
-_mp_bin="$BIN_DIR/probe-master"
+_mp_bin="$BIN_DIR/xb-probe-master"
 _mp_ver="$("$_mp_bin" version 2>/dev/null | awk '{print $NF}')"
 
 # 本机平台 `_mp_plat` 不在这里算：问答里要显示它、拉取时要传给 --platform，
@@ -3200,13 +3537,13 @@ esac
 
 if [ -n "$NO_DIST_PULL" ] || [ "$DIST_PULL" = "skip" ]; then
 	echo "    已跳过（--no-dist-pull / --dist-pull skip）。"
-	echo "    ⚠ 没有发布文件时，一键安装脚本会在下载 probe-agent 那一步 404。"
+	echo "    ⚠ 没有发布文件时，一键安装脚本会在下载 xb-probe-agent 那一步 404。"
 	# 版本留空 → 提示里用 <版本> 占位。这一支里本来就没有"将要拉取的版本"。
 	dist_pull_hint
 	_mp_done=""
 elif [ -z "$_mp_releasable" ]; then
 	echo "    当前二进制版本是「${_mp_ver:-未知}」，不是发布版本号，跳过自动拉取。"
-	echo "    ⚠ 没有发布文件时，一键安装脚本会在下载 probe-agent 那一步 404。"
+	echo "    ⚠ 没有发布文件时，一键安装脚本会在下载 xb-probe-agent 那一步 404。"
 	# 同理：这一支里 $_mp_ver 是 dev 之类，把它填进命令示例只会误导。
 	dist_pull_hint
 	_mp_done=""
@@ -3220,14 +3557,14 @@ else
 
 Agent 二进制从哪来：Master 的 /dist/ 就是新节点的**自举来源**。
 装第一个 Agent 之前必须把发布文件放进 data_dir/dist/，否则安装脚本
-下载 probe-agent 时只会得到 404（/install.sh 本身是内嵌的，所以那一步正常）。
+下载 xb-probe-agent 时只会得到 404（/install.sh 本身是内嵌的，所以那一步正常）。
 EOF
 		fi
 		ask_dist_pull_scope
 	fi
 
 	if [ "$DIST_PULL" = "skip" ]; then
-		echo "    已跳过。⚠ 没有发布文件时，一键安装脚本会在下载 probe-agent 那一步 404。"
+		echo "    已跳过。⚠ 没有发布文件时，一键安装脚本会在下载 xb-probe-agent 那一步 404。"
 		dist_pull_hint "$_mp_ver"
 		_mp_done=""
 	elif [ "$DIST_PULL" = "local" ] && [ -z "$_mp_plat" ]; then
@@ -3267,7 +3604,7 @@ EOF
 				_mp_body="$(wget -q $_mp_nc -O- --timeout=10 "$_mp_url" 2>/dev/null || true)"
 			fi
 			case "$_mp_body" in
-			*probe-agent_*)
+			*xb-probe-agent_*)
 				echo "    自检：$_mp_url 已可读，新节点可以下载了"
 				;;
 			*分发入口当前未开放*)
@@ -3288,7 +3625,7 @@ EOF
 			esac
 		else
 			echo "    ⚠ 发布文件拉取失败。Master 本身不受影响，"
-			echo "      但新节点装机时会在下载 probe-agent 那一步 404。"
+			echo "      但新节点装机时会在下载 xb-probe-agent 那一步 404。"
 			dist_pull_hint "$_mp_ver"
 		fi
 	fi
@@ -3405,8 +3742,8 @@ cat <<EOF
        curl -fsSL ${PUBLIC_ORIGIN:-http://$PUBLIC_LISTEN}/install.sh | sudo sh -s -- --code <注册码>
   4) 发布文件：本脚本在部署时已经把 Agent 发布文件拉进 data_dir/dist/ 了
      （见上面 6c 的输出）。若当时跳过了、或之后发布了新版本，补拉一次：
-       probe-master dist pull --version <版本> --from <发布源 URL>
-     没有发布文件时，`/install.sh | sh` 会在下载 probe-agent 那一步 404
+       xb-probe-master dist pull --version <版本> --from <发布源 URL>
+     没有发布文件时，`/install.sh | sh` 会在下载 xb-probe-agent 那一步 404
      （/install.sh 本身是内嵌的，所以那一步看起来一切正常，坏在下一步）。
   5) 公开看板与后台要不要分成两个域名 —— 在「设置 → 站点形态」里选：
        · 跟随配置文件（默认）：master.yaml 里有 host 白名单就分离，没有就同站
@@ -3493,7 +3830,7 @@ selfsigned)
 	cat >&2 <<EOF
 ℹ tls.mode=selfsigned：浏览器会报「证书不受信任」，这是自签的预期行为。
   装 Agent 时需要把指纹钉进去（install.sh 的 --spki-sha256），
-  指纹可在后台的「TLS 状态」页或 probe-master 的日志里看到。
+  指纹可在后台的「TLS 状态」页或 xb-probe-master 的日志里看到。
 EOF
 	;;
 acme)

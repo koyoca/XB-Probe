@@ -1,11 +1,11 @@
-// Package cli 实现 probe-agent 的命令行（文档 3.2 / 3.4 / 12.3）。
+// Package cli 实现 xb-probe-agent 的命令行（文档 3.2 / 3.4 / 12.3）。
 //
-//	probe-agent run                                    前台运行（由服务管理器调用）
-//	probe-agent install --master <URL> --code <注册码>  注册、写配置、创建服务并启动
-//	probe-agent reenroll --code <注册码>                用新注册码换取新令牌
-//	probe-agent upgrade [--check|--version X|--rollback] 拉取并替换自身（自升级）
-//	probe-agent uninstall                              本机卸载（需 root）
-//	probe-agent version                                显示版本
+//	xb-probe-agent run                                    前台运行（由服务管理器调用）
+//	xb-probe-agent install --master <URL> --code <注册码>  注册、写配置、创建服务并启动
+//	xb-probe-agent reenroll --code <注册码>                用新注册码换取新令牌
+//	xb-probe-agent upgrade [--check|--version X|--rollback] 拉取并替换自身（自升级）
+//	xb-probe-agent uninstall                              本机卸载（需 root）
+//	xb-probe-agent version                                显示版本
 //
 // 权限最小化：仅 install/uninstall 需要 root；服务以专用低权限用户运行（3.2）。
 package cli
@@ -22,13 +22,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yourorg/probe/internal/agent"
-	"github.com/yourorg/probe/internal/agent/agentconfig"
-	"github.com/yourorg/probe/internal/agent/client"
-	"github.com/yourorg/probe/internal/agent/service"
-	"github.com/yourorg/probe/internal/agent/updater"
-	"github.com/yourorg/probe/internal/dist"
-	"github.com/yourorg/probe/internal/model"
+	"github.com/koyoca/xb-probe/internal/agent"
+	"github.com/koyoca/xb-probe/internal/agent/agentconfig"
+	"github.com/koyoca/xb-probe/internal/agent/client"
+	"github.com/koyoca/xb-probe/internal/agent/service"
+	"github.com/koyoca/xb-probe/internal/agent/updater"
+	"github.com/koyoca/xb-probe/internal/dist"
+	"github.com/koyoca/xb-probe/internal/model"
 )
 
 // Run 是命令入口。version 由 -ldflags 注入。
@@ -49,7 +49,7 @@ func Run(args []string, version string) int {
 	case "uninstall":
 		return cmdUninstall(args[1:])
 	case "version", "-v", "--version":
-		fmt.Println("probe-agent", version, runtime.GOOS+"/"+runtime.GOARCH, "(发布标签 "+dist.CurrentTag()+")")
+		fmt.Println("xb-probe-agent", version, runtime.GOOS+"/"+runtime.GOARCH, "(发布标签 "+dist.CurrentTag()+")")
 		return 0
 	case "help", "-h", "--help":
 		usage()
@@ -62,7 +62,7 @@ func Run(args []string, version string) int {
 }
 
 func usage() {
-	fmt.Fprint(os.Stderr, `用法：probe-agent <命令> [参数]
+	fmt.Fprint(os.Stderr, `用法：xb-probe-agent <命令> [参数]
 
 命令：
   run          前台运行
@@ -93,8 +93,14 @@ install 参数：
   --service-only         只按当前版本重写系统服务（unit/init 脚本 + 配置属主）并重启，
                          不联系 Master、不换令牌（**不需要 --master/--code**）
   --spki-sha256 <指纹>    固定 Master 公钥指纹（自签证书场景，可重复）
+  --public-ip-url <URL>   公网地址探测服务（如 https://api.ipify.org）。默认关闭。
+                          显式传空串（--public-ip-url ""）可关掉已配置的探测。
   --force                已安装时重新注册并换取新令牌
   --insecure-http        仅本机回环开发场景放行 http://
+
+  关于 --public-ip-url：Master 与 Agent 同机部署时，Master 看到的来源地址是
+  127.0.0.1，地址栏里就永远是回环地址；此时只有节点自己出网问一句才能拿到真正的
+  公网地址。打开它会**定期访问第三方服务**，是否启用由你决定。
 `)
 }
 
@@ -142,7 +148,7 @@ func cmdRun(args []string, version string) int {
 	}
 
 	d := agent.New(*cfgPath, cfg, cli, version)
-	logger.Info("probe-agent 启动", "version", version, "master", cfg.MasterURL,
+	logger.Info("xb-probe-agent 启动", "version", version, "master", cfg.MasterURL,
 		"targets", len(cfg.Targets), "report_interval_s", cfg.ReportIntervalS)
 
 	if err := d.Run(context.Background()); err != nil {
@@ -157,6 +163,11 @@ func cmdRun(args []string, version string) int {
 // ---------------------------------------------------------------------------
 
 func cmdInstall(args []string, version string) int {
+	// 第一件事：收拾改名（probe-* → xb-probe-*）之前留下的旧服务定义与配置目录。
+	// 必须在读取配置之前 —— 老机器上的配置在旧目录里，先搬过来，下面的
+	// "已安装"幂等分支才能认出来（否则会当成全新安装，白白换一次令牌）。
+	service.MigrateLegacy()
+
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	master := fs.String("master", "", "Master 地址")
 	code := fs.String("code", os.Getenv("PROBE_CODE"), "一次性注册码（或用环境变量 PROBE_CODE）")
@@ -165,18 +176,28 @@ func cmdInstall(args []string, version string) int {
 	serviceOnly := fs.Bool("service-only", false, "只重写系统服务（unit/init 脚本与配置属主）并重启，不注册、不换令牌")
 	force := fs.Bool("force", false, "已安装时重新注册并换取新令牌")
 	insecureHTTP := fs.Bool("insecure-http", false, "允许 http://（仅本机回环开发）")
+	publicIPURL := fs.String("public-ip-url", "", "公网地址探测服务地址（留空=关闭；给了就在已安装的节点上就地更新）")
 	var spki multiFlag
 	fs.Var(&spki, "spki-sha256", "固定 Master 公钥指纹（可重复）")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	// "是否显式给了 --public-ip-url" 必须与"它的值"分开记。
+	// 只看值的话，`--public-ip-url ""` 与"没给这个参数"无法区分，
+	// 而这两件事的意思正好相反：前者是"关掉探测"，后者是"别动我的设置"。
+	publicIPGiven := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "public-ip-url" {
+			publicIPGiven = true
+		}
+	})
 
 	// --service-only：只按**当前二进制里的模板**重写服务定义并重启，不联系 Master、不换令牌。
 	//
 	// 为什么需要它：服务定义（systemd unit / init 脚本）是嵌在二进制里的模板渲染出来的，
 	// 所以"unit 模板升级"必须拿着新二进制重跑一遍安装流程；而在此之前只有两条路，
 	// 都不通：`--force` 要重新注册（得先去后台生成一个新注册码，而这个码根本不会被用到），
-	// 或者手工去改 /etc/systemd/system/probe-agent.service。
+	// 或者手工去改 /etc/systemd/system/xb-probe-agent.service。
 	// 真机上就是这么卡住的——老节点 unit 里没有 ReadWritePaths、配置属主是 root，
 	// 服务起不来，而用户手里没有"只修服务定义"这条命令。
 	//
@@ -218,8 +239,25 @@ func cmdInstall(args []string, version string) int {
 
 	// 幂等：已安装且未指定 --force 时只替换二进制并重启服务（12.3）。
 	// 只想重写服务定义、连 --master/--code 都不想给时，用 --service-only（等价且更明确）。
-	if _, err := agentconfig.Load(cfgPath); err == nil && !*force {
+	if cur, err := agentconfig.Load(cfgPath); err == nil && !*force {
 		fmt.Println("检测到已安装配置，仅重装系统服务（不换令牌；如需换令牌请加 --force）。")
+		// 显式给了 --public-ip-url 就落到本地配置里：这条路径是**唯一**能让
+		// 已经装好的节点打开公网地址探测的办法（否则只能手工改 agent.yaml）。
+		// 没给就一个字都不动 —— 这个开关的语义是"我明确要设置它"，
+		// 不是"顺手把别人的设置重置成默认值"。
+		if publicIPGiven {
+			cur.PublicIPURL = strings.TrimSpace(*publicIPURL)
+			if err := agentconfig.Save(cfgPath, cur); err != nil {
+				fmt.Fprintln(os.Stderr, "错误：写入配置失败：", err)
+				return 1
+			}
+			if cur.PublicIPURL == "" {
+				fmt.Println("已关闭公网地址探测（public_ip_url 置空）。")
+			} else {
+				fmt.Printf("已设置 public_ip_url=%s（探测间隔 %d 秒）。\n",
+					cur.PublicIPURL, cur.PublicIPIntervalS)
+			}
+		}
 		if err := service.Detect().Uninstall(binPath, cfgPath); err != nil {
 			fmt.Fprintln(os.Stderr, "清理旧服务时出错（继续）：", err)
 		}
@@ -263,6 +301,7 @@ func cmdInstall(args []string, version string) int {
 		SPKISHA256:     spki,
 		InsecureHTTP:   *insecureHTTP,
 		ServiceManager: service.Detect().Name(),
+		PublicIPURL:    strings.TrimSpace(*publicIPURL),
 	}
 	cfg.ApplyServerConfig(resp.Config)
 
@@ -282,7 +321,7 @@ func cmdInstall(args []string, version string) int {
 
 func installService(binPath, cfgPath string, noService bool) error {
 	if noService {
-		fmt.Println("已跳过服务注册（--no-service）。可前台运行：probe-agent run")
+		fmt.Println("已跳过服务注册（--no-service）。可前台运行：xb-probe-agent run")
 		return nil
 	}
 	// 记录安装清单（卸载时只删除清单内的路径，避免误删，S13）。
@@ -290,7 +329,32 @@ func installService(binPath, cfgPath string, noService bool) error {
 	_ = os.WriteFile(manifest, []byte(binPath+"\n"+cfgPath+"\n"), 0o600)
 	// 配置属主的交接在 Install 内部完成（建好用户之后、启动服务之前，见 service/handover.go）：
 	// 这里刚写的 manifest 也是 root:root 0600，一并交过去，卸载时不必区分是谁写的。
-	return service.Detect().Install(binPath, cfgPath, service.DefaultUser)
+	err := service.Detect().Install(binPath, cfgPath, service.DefaultUser)
+	if errors.Is(err, service.ErrNoManager) {
+		// 这里**不是**安装失败：配置写好了、节点注册了、二进制装好了，
+		// 只是这台机器上没有可用的服务管理器（精简容器镜像常见）。
+		//
+		// 以前这条路由分发给节点的 install.sh 用 `cat /proc/1/comm` 去猜，
+		// 猜错（Alpine 的 PID 1 是 busybox init、容器里更是什么都有）就把
+		// --no-service 硬塞进来，"安装"看上去成功、服务从来没注册过 ——
+		// 用户以为是权限问题，实际是脚本替他做了个不必要的决定。
+		// 现在把这个判断交还给**真正知道答案的那一端**（agent 自己的 Detect）。
+		fmt.Printf("\n本机没有识别到可用的服务管理器（%v）。\n", err)
+		printForegroundHint(binPath, cfgPath)
+		return nil
+	}
+	return err
+}
+
+// printForegroundHint 给出"没有 init 系统时怎么让它常驻"的可照做命令。
+//
+// 不写一句"请自行托管"就完事：容器用户真正需要的是**确切的命令行**，
+// 以及"重启容器后它不会自己回来"这个事实。
+func printForegroundHint(binPath, cfgPath string) {
+	fmt.Printf("配置与令牌都已就位，节点已注册；用下面任一种方式让它常驻：\n"+
+		"  · 前台/自建守护：%s run --config %s\n"+
+		"  · 容器：把上面这行作为 entrypoint 或写成 Supervisor/s6 的配置\n"+
+		"注意：这种方式在重启后不会自动拉起。\n", binPath, cfgPath)
 }
 
 // ---------------------------------------------------------------------------
@@ -369,7 +433,7 @@ func cmdUninstall(args []string) int {
 		return 1
 	}
 	if !*yes {
-		fmt.Printf("将卸载 probe-agent 并删除 %s。确认执行？[y/N] ", filepath.Dir(*cfgPath))
+		fmt.Printf("将卸载 xb-probe-agent 并删除 %s。确认执行？[y/N] ", filepath.Dir(*cfgPath))
 		var ans string
 		_, _ = fmt.Scanln(&ans)
 		if !strings.EqualFold(strings.TrimSpace(ans), "y") {
@@ -396,7 +460,7 @@ func cmdUninstall(args []string) int {
 	// 2) 停止并移除服务
 	binPath, _ := readManifest(*cfgPath)
 	if binPath == "" {
-		binPath = filepath.Join(agentconfig.DefaultBinaryDir(), "probe-agent")
+		binPath = filepath.Join(agentconfig.DefaultBinaryDir(), "xb-probe-agent")
 	}
 	if err := service.Detect().Uninstall(binPath, *cfgPath); err != nil {
 		fmt.Fprintln(os.Stderr, "移除服务时出错（继续清理）：", err)
@@ -408,7 +472,7 @@ func cmdUninstall(args []string) int {
 		fmt.Fprintln(os.Stderr, "清理配置目录失败：", err)
 	}
 	_ = os.Remove(binPath)
-	_ = os.Remove(filepath.Join(agentconfig.DefaultBinaryDir(), "probe-agent"))
+	_ = os.Remove(filepath.Join(agentconfig.DefaultBinaryDir(), "xb-probe-agent"))
 
 	fmt.Println("卸载完成。")
 	return 0
@@ -439,7 +503,7 @@ func (m *multiFlag) Set(v string) error {
 // 关键是 noService：**只有注册系统服务才需要 root**，而 --no-service 明确表示不注册
 // （容器 / 无 init / 只前台运行；install.sh 会按 /proc/1/comm 自动加它）。
 // 早先的实现只看 init 名字、完全不理 --no-service，于是
-// `probe-agent install --no-service --dir <可写目录>` 在 Linux 非 root 下被误判成
+// `xb-probe-agent install --no-service --dir <可写目录>` 在 Linux 非 root 下被误判成
 // "安装为系统服务需要 root 权限"而直接失败——正是它自己的帮助文本承诺的用法。
 func needsRootForExplicitDir(noService bool, initName string, root bool) bool {
 	if noService {
@@ -453,14 +517,14 @@ func resolvePaths(dir string, noService bool) (cfgPath, binPath string, err erro
 		if needsRootForExplicitDir(noService, service.Detect().Name(), isRoot()) {
 			return "", "", fmt.Errorf("安装为系统服务需要 root 权限（或加 --no-service 只放文件）")
 		}
-		return filepath.Join(dir, "agent.yaml"), filepath.Join(dir, "probe-agent"), nil
+		return filepath.Join(dir, "agent.yaml"), filepath.Join(dir, "xb-probe-agent"), nil
 	}
-	// 缺省路径是系统目录（/usr/local/bin、/etc/probe-agent）：能不能写进去本身
+	// 缺省路径是系统目录（/usr/local/bin、/etc/xb-probe-agent）：能不能写进去本身
 	// 就取决于权限，与是否注册服务无关，所以这条不看 noService。
 	if !isRoot() && runtime.GOOS != "windows" {
 		return "", "", fmt.Errorf("安装需要 root 权限（请使用 sudo，或用 --dir 指定可写目录）")
 	}
-	return agentconfig.DefaultPath(), filepath.Join(agentconfig.DefaultBinaryDir(), "probe-agent"), nil
+	return agentconfig.DefaultPath(), filepath.Join(agentconfig.DefaultBinaryDir(), "xb-probe-agent"), nil
 }
 
 func isRoot() bool { return os.Geteuid() == 0 }
@@ -494,7 +558,7 @@ func readManifest(cfgPath string) (string, error) {
 	return strings.TrimSpace(lines[0]), nil
 }
 
-// cmdUpgrade 实现 `probe-agent upgrade`：从 Master 拉取新版本并替换自身。
+// cmdUpgrade 实现 `xb-probe-agent upgrade`：从 Master 拉取新版本并替换自身。
 //
 // 替换成功后**不自行重启**：进程自我重启在 systemd / Windows 服务 / 容器里各有各的坑，
 // 统一交给服务管理器（Restart=always / SCM 失败恢复）或运维执行重启命令，
@@ -623,7 +687,7 @@ func cmdUpgrade(args []string, version string) int {
 //
 //	v0.1.1 装的节点：unit 里没有 ReadWritePaths=<配置目录>（ProtectSystem=strict
 //	下配置写不回去），配置还是 0600 root:root（unit 里 User=probe 一启动就读不到）。
-//	升级到 v0.1.2 并重启后：「读取配置失败: /etc/probe-agent/agent.yaml: permission denied」
+//	升级到 v0.1.2 并重启后：「读取配置失败: /etc/xb-probe-agent/agent.yaml: permission denied」
 //	——换二进制修不了这两样，用户看到的是"升级了反而起不来"。
 //
 // **不启动也不重启服务**（重启由用户/服务管理器执行，见 cmdUpgrade 的约定）；
@@ -635,17 +699,17 @@ func cmdUpgrade(args []string, version string) int {
 func repairAfterUpgrade(m service.Manager, cfgPath, binPath string, canRepair, customTarget, skip bool) string {
 	if skip {
 		return "提示：--no-service-repair，未重写服务定义与配置属主；" +
-			"若服务重启后报配置 permission denied，执行：sudo probe-agent install --service-only"
+			"若服务重启后报配置 permission denied，执行：sudo xb-probe-agent install --service-only"
 	}
 	if customTarget {
 		// --target 是"替换另一个路径上的二进制"（容器/离线场景），那种场合的服务
 		// 定义不归本命令管：按 --target 去改 unit 会把它指到一个临时路径上。
 		return "提示：指定了 --target，未改动服务定义；" +
-			"若需要按当前版本重写服务定义，执行：sudo probe-agent install --service-only"
+			"若需要按当前版本重写服务定义，执行：sudo xb-probe-agent install --service-only"
 	}
 	if !canRepair {
 		return "提示：当前不是 root，未重写服务定义与配置属主（交接属主需要 root）；" +
-			"请执行：sudo probe-agent install --service-only"
+			"请执行：sudo xb-probe-agent install --service-only"
 	}
 	if err := repairServiceDefinition(m, cfgPath, binPath); err != nil {
 		// "这台机器没把 Agent 装成服务"不是失败：容器 / --no-service 跑的节点
@@ -655,7 +719,7 @@ func repairAfterUpgrade(m service.Manager, cfgPath, binPath string, canRepair, c
 				"（容器或 --no-service 场景属正常）。"
 		}
 		return "警告：重写服务定义/交接配置属主失败：" + err.Error() +
-			"\n      可以手工执行：sudo probe-agent install --service-only"
+			"\n      可以手工执行：sudo xb-probe-agent install --service-only"
 	}
 	return "已按当前版本重写服务定义（含配置目录的写权限）并把配置交给服务用户，" +
 		"重启后生效（不会自行重启）。"
@@ -676,18 +740,18 @@ func repairServiceDefinition(m service.Manager, cfgPath, binPath string) error {
 func restartHint() string {
 	switch {
 	case runtime.GOOS == "windows":
-		return "请重启服务使新版本生效：Restart-Service probe-agent"
+		return "请重启服务使新版本生效：Restart-Service xb-probe-agent"
 	default:
 		switch service.Detect().Name() {
 		case "systemd":
-			return "请重启服务使新版本生效：systemctl restart probe-agent"
+			return "请重启服务使新版本生效：systemctl restart xb-probe-agent"
 		case "openrc":
-			return "请重启服务使新版本生效：rc-service probe-agent restart"
+			return "请重启服务使新版本生效：rc-service xb-probe-agent restart"
 		case "procd":
-			return "请重启服务使新版本生效：service probe-agent restart"
+			return "请重启服务使新版本生效：service xb-probe-agent restart"
 		case "sysv", "rcd":
-			return "请重启服务使新版本生效：service probe-agent restart"
+			return "请重启服务使新版本生效：service xb-probe-agent restart"
 		}
 	}
-	return "请重启 probe-agent 进程使新版本生效"
+	return "请重启 xb-probe-agent 进程使新版本生效"
 }

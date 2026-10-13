@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yourorg/probe/internal/model"
+	"github.com/koyoca/xb-probe/internal/model"
 )
 
 // 探测器的单元测试。三块内容：TCP 真实握手、ICMP 的权限与 S4 判定、错误枚举映射。

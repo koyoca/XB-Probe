@@ -58,11 +58,18 @@ func TestVerifyTOTPRejectsMalformed(t *testing.T) {
 }
 
 // OTPAuthURI 必须能被标准认证器解析，且账号名里的特殊字符要转义。
+//
+// 断言写成一个**完整值**（issuer=XB-Probe）而不是身份前缀：旧实现里
+// TOTPIssuer 是 "Server Probe"，而这里断言 "issuer=Server" —— 靠"前缀恰好是
+// 另一个名字的前缀"蒙混过关。产品改名后就变成一条永远会红的假红，或者反过来
+// 掩盖"issuer 被写成了别的 Server 开头的名字"。
 func TestOTPAuthURI(t *testing.T) {
 	uri := OTPAuthURI("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", "admin")
 	for _, want := range []string{
 		"otpauth://totp/", "secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
-		"issuer=Server", "algorithm=SHA1", "digits=6", "period=30",
+		"issuer=XB-Probe", "algorithm=SHA1", "digits=6", "period=30",
+		// label 里也带上 issuer（认证器 App 就按它分组），改名时两处都要跟着走。
+		"otpauth://totp/XB-Probe:admin?",
 	} {
 		if !strings.Contains(uri, want) {
 			t.Errorf("URI 缺少 %q：%s", want, uri)

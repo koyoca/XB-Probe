@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/yourorg/probe/internal/model"
+	"github.com/koyoca/xb-probe/internal/model"
 )
 
 // Linux 采集实现（12.5）：只读 /proc、/sys 与 statfs，不依赖外部命令。

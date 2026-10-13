@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yourorg/probe/internal/config"
-	"github.com/yourorg/probe/internal/tlsconf"
+	"github.com/koyoca/xb-probe/internal/config"
+	"github.com/koyoca/xb-probe/internal/tlsconf"
 )
 
 // writeTLSConfig 在临时目录里造一份能加载的 master.yaml，并返回它的路径。

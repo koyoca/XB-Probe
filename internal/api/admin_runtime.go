@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yourorg/probe/internal/model"
-	"github.com/yourorg/probe/internal/state"
+	"github.com/koyoca/xb-probe/internal/model"
+	"github.com/koyoca/xb-probe/internal/state"
 )
 
 // 管理端实时态与历史查询（文档 5.2“全量资产视察”）。

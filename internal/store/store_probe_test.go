@@ -3,7 +3,7 @@ package store
 import (
 	"testing"
 
-	"github.com/yourorg/probe/internal/model"
+	"github.com/koyoca/xb-probe/internal/model"
 )
 
 // 回归：节点 A 的延迟点阵绝不能读到"节点 B 专属目标"的桶。

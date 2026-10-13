@@ -11,9 +11,9 @@ import (
 //
 // 这就是真机上报的那个故障：
 //
-//	已注册节点（node_id=1），配置写入 /etc/probe-agent/agent.yaml（权限 0600）。
+//	已注册节点（node_id=1），配置写入 /etc/xb-probe-agent/agent.yaml（权限 0600）。
 //	安装完成。
-//	probe-agent[558816]: 错误： 读取配置失败: open /etc/probe-agent/agent.yaml: permission denied
+//	xb-probe-agent[558816]: 错误： 读取配置失败: open /etc/xb-probe-agent/agent.yaml: permission denied
 //
 // 安装脚本每一步都打印了"成功"，唯一失败的是服务本身 —— 而 `User=probe`
 // 与 `0600 root:root` 是分两个文件、两个时刻各自"正确"的，撞在一起才出问题。

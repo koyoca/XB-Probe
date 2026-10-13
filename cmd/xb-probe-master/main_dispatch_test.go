@@ -12,7 +12,7 @@ import (
 //
 // 这一条是从一次真机事故里挖出来的根因，值得把链条写全：
 //
-//  1. 部署脚本用 `probe-master tls status -config <临时文件>` 探测
+//  1. 部署脚本用 `xb-probe-master tls status -config <临时文件>` 探测
 //     "二进制认不认识某个配置键"（配置模板来自 main、二进制来自 Release 标签，
 //     两者会错配，而 LoadMaster 是严格解析，写错一个键＝服务起不来）。
 //  2. 旧二进制（Release 的 v0.1.0）**没有 tls 子命令**，而当时的 main() 顶层
@@ -28,7 +28,7 @@ import (
 // 只做 ② 也能挡住，但 ① 修的是"打错命令就把服务启动起来"这个本身的错误。
 func TestUnknownCommandIsRejectedInsteadOfStartingTheServer(t *testing.T) {
 	if _, err := os.Stat("../../configs/master.yaml.example"); err != nil {
-		t.Fatal("本测试要从 cmd/probe-master 目录跑：", err)
+		t.Fatal("本测试要从 cmd/xb-probe-master 目录跑：", err)
 	}
 
 	// 抓 stderr：用法是打给 stderr 的，顺便断言它真的给了提示。
@@ -38,7 +38,7 @@ func TestUnknownCommandIsRejectedInsteadOfStartingTheServer(t *testing.T) {
 		t.Fatal("建管道失败：", err)
 	}
 	os.Stderr = w
-	code := runMain([]string{"probe-master", "foobar", "-config", "/nonexistent/nope.yaml"})
+	code := runMain([]string{"xb-probe-master", "foobar", "-config", "/nonexistent/nope.yaml"})
 	w.Close()
 	os.Stderr = old
 
@@ -57,7 +57,7 @@ func TestUnknownCommandIsRejectedInsteadOfStartingTheServer(t *testing.T) {
 	// 关键：绝不能落到服务启动。启动路径会去读配置文件并打印"启动失败/读取配置"。
 	if strings.Contains(out, "启动失败") {
 		t.Errorf("未知命令 fall through 到了服务启动（输出里有「启动失败」）：\n"+
-			"  这是本测试要钉死的行为——`probe-master tls ...` 在旧二进制上\n"+
+			"  这是本测试要钉死的行为——`xb-probe-master tls ...` 在旧二进制上\n"+
 			"  曾经真的把服务启动起来，还顺手忽略了 -config。\n实际输出：\n%s", out)
 	}
 }
@@ -72,7 +72,7 @@ func TestConfigFlagStillReachesTheServiceStartupPath(t *testing.T) {
 	}
 	os.Stderr = w
 	// 文件不存在 → 启动路径会报"读取配置失败"并点名这个路径。
-	code := runMain([]string{"probe-master", "-config", "/definitely/not/here.yaml"})
+	code := runMain([]string{"xb-probe-master", "-config", "/definitely/not/here.yaml"})
 	w.Close()
 	os.Stderr = old
 

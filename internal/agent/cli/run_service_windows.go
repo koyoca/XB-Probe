@@ -9,15 +9,15 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/yourorg/probe/internal/agent/service"
+	"github.com/koyoca/xb-probe/internal/agent/service"
 )
 
 // runAsService 在 Windows 上处理"以 SCM 服务方式启动"的分支。
 //
 // 为什么必须单独一条路径：
-//   - 服务进程没有控制台，stdout 会丢失，日志要落到文件（ProgramData\probe-agent\agent.log）；
+//   - 服务进程没有控制台，stdout 会丢失，日志要落到文件（ProgramData\xb-probe-agent\agent.log）；
 //   - SCM 的停止请求不走信号，必须实现 svc.Handler 才能优雅退出；
-//   - `sc start` 启动时命令行是 `probe-agent run --config ...`，无法通过参数区分
+//   - `sc start` 启动时命令行是 `xb-probe-agent run --config ...`，无法通过参数区分
 //     "前台 run" 与 "服务 run"——只能问 SCM（svc.IsWindowsService）。
 //
 // 返回值 true 表示"已经以服务模式跑完，调用方应直接返回"。

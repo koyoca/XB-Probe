@@ -3,7 +3,7 @@ package state
 import (
 	"testing"
 
-	"github.com/yourorg/probe/internal/model"
+	"github.com/koyoca/xb-probe/internal/model"
 )
 
 // TestNetStackOf 覆盖协议栈标识的四种组合。

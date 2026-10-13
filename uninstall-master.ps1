@@ -1,4 +1,4 @@
-﻿# Server Probe —— Master 一键卸载（Windows）
+﻿# XB-Probe —— Master 一键卸载（Windows）
 #
 # 一条命令把已部署的 Master 卸干净：计划任务、二进制、配置目录（master.yaml +
 # master.key）、数据目录（数据库、主题、发布件、证书）。

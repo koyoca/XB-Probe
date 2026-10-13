@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/yourorg/probe/internal/model"
+	"github.com/koyoca/xb-probe/internal/model"
 )
 
 // TestSplitListKeepsUnsetDistinctFromEmpty 是不变量 8 在**生产端**的护栏。

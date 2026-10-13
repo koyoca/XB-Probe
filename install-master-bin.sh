@@ -2,7 +2,7 @@
 # XB-Probe —— Master 免编译一键部署（Linux / systemd）
 #
 # 与 install-master.sh 的区别只有一处：**机器上不需要 Go、不需要 git、不编译**。
-# 它下载的是 GitHub Releases 里已经编好的 probe-master，因此：
+# 它下载的是 GitHub Releases 里已经编好的 xb-probe-master，因此：
 #   · 1 核小内存的机器也能装（编译要几分钟 + 几百 MB 构建缓存，这台机器不用付）
 #   · 没有 Go 工具链、没有 gcc、只读根文件系统都能跑
 #   · 拿到的是发布者编的那一份，与你本地编的可能不是同一个二进制
@@ -25,17 +25,21 @@
 # **顺序：先问「做什么」，再决定下载什么。** 第一问（安装/升级、卸载、只更新 Agent
 # 发布文件）来自 scripts/deploy-master.sh 自己的菜单——那三个选项本来就定义在部署
 # 脚本里，这里只负责把答案取回来（`--ask-mode`），然后按答案决定要不要下载那几十 MB
-# 的 probe-master：
+# 的 xb-probe-master：
 #   · 选 1 → 下载并校验二进制，再交给部署脚本安装；
 #   · 选 2 → 只取部署脚本执行 --uninstall，**一个字节的二进制都不下**；
 #   · 选 3 → 只取部署脚本执行 --release-only，同样不下二进制（它用节点上已装的
-#            那份 probe-master 去拉发布文件）。
+#            那份 xb-probe-master 去拉发布文件）；
+#   · 选 5 → 只取部署脚本执行 --reset-password，同样不下二进制；
+#   · 选 4 → **要下**（升级本体就得有新二进制），但同样把整段站点/证书/账号问答
+#            跳过。
 # 之前是先无条件下载二进制、下载完了才问，于是选 2/3 的人白等一次下载——而这两条路
 # 本来就只需要那 100 KB 的部署脚本。
 #
 # 交互问答：**校验通过后会问你**——TLS 方式（要不要 https）、公开站与管理端各监听
 # 哪个端口、对外访问地址、管理员账号与口令。所以不会出现"下载校验都成功、配置文件
 # 里却没有 public_origin"这种半成品；不想被问就加 --yes 并把参数显式给全。
+# **选 4（只升级本体）是这条规矩的例外**：它不问上面任何一个，因为一个都不改。
 #
 # 常用参数：
 #   --version <vX.Y.Z>   指定版本（默认取最新 Release）
@@ -50,7 +54,7 @@
 #                       走这条路时**不下载二进制**，只取部署脚本执行 --uninstall。
 #   --release-only       只更新 Agent 发布文件（去 GitHub 查最新 Release，把它的
 #                       发布文件拉进 data_dir/dist/）。同样**不下载二进制**——
-#                       它用节点上已装的那份 probe-master 去取件；Master 本身
+#                       它用节点上已装的那份 xb-probe-master 去取件；Master 本身
 #                       的二进制、配置与服务都不动。
 #   --keep-data          与 --uninstall 同用，保留数据目录
 #   -h, --help           显示本帮助
@@ -80,9 +84,13 @@ DRY_RUN=""
 UNINSTALL=""
 # 只更新 Agent 发布文件（不动 Master 的二进制、配置与服务）。
 RELEASE_ONLY=""
+# 只升级 Master 本体（要下二进制，但不问站点/证书/账号那一套）。
+UPGRADE_ONLY=""
+# 只重置管理员密码（不需要二进制）。
+RESET_PASSWORD=""
 KEEP_DATA=""
 
-# "做什么"的答案（1 安装/升级、2 卸载、3 只更新发布文件）。
+# "做什么"的答案（1 安装/升级、2 卸载、3 只更新发布文件、4 只升级本体、5 重置密码）。
 # 空 = 还没问出来（--yes / --dry-run / 取回的部署脚本不认识 --ask-mode），
 # 这时按老行为走：下载二进制，让部署脚本自己问。
 MODE=""
@@ -114,6 +122,10 @@ install-master-bin.sh —— XB-Probe Master 免编译部署（从 Releases 取�
   --dry-run             只下载校验，不安装
   --uninstall           卸载（连数据一起清；加 --keep-data 保留数据目录）
   --release-only        只更新 Agent 发布文件（不动 Master 的二进制、配置与服务）
+  --upgrade-only        只升级 Master 本体：仍然下载并校验二进制，但**不再问**站点
+                        地址、证书、监听端口、管理员账号那一套，装完只把新二进制
+                        换上去并重启服务（配置、证书、管理员、data_dir/dist 都不动）
+  --reset-password      只重置管理员密码（不下载、不卸载、不清数据）
   --keep-data           与 --uninstall 同用
   -h, --help            显示本帮助
 
@@ -125,9 +137,10 @@ install-master-bin.sh —— XB-Probe Master 免编译部署（从 Releases 取�
   dns-01 的凭据用环境变量（不进 shell 历史）：
   PROBE_ACME_DNS_PROVIDER（默认 cloudflare）、PROBE_ACME_DNS_TOKEN
 
-不加 --yes 时会先问"做什么"（安装/升级、卸载、只更新 Agent 发布文件），
-按答案决定要不要下载二进制；选 1 之后才会问 TLS 方式、监听端口、公开/管理端
-地址、管理员与口令。
+不加 --yes 时会先问"做什么"（安装/升级、卸载、只更新 Agent 发布文件、只升级
+Master 本体、只重置管理员密码），按答案决定要不要下载二进制；选 1 之后才会问
+TLS 方式、监听端口、公开/管理端地址、管理员与口令（选 4 只换二进制，这些一个都
+不问）。
 EOF
 }
 
@@ -229,11 +242,13 @@ while [ $# -gt 0 ]; do
 		shift
 		;;
 	--dry-run) DRY_RUN="1"; shift ;;
-	# 卸载 / 只更新发布文件：**都不进下载/校验那一段**——两者都不需要二进制，
-	# 也不该因为架构不匹配（armv7 之类）先被拦下来。走到下面"按模式分派"直接
-	# 取部署脚本执行。
+	# 卸载 / 只更新发布文件 / 重置密码：**都不进下载/校验那一段**——三者都不需要
+	# 二进制，也不该因为架构不匹配（armv7 之类）先被拦下来。走到下面"按模式分派"
+	# 直接取部署脚本执行。（升级本体要下二进制，所以**不在**这里。）
 	--uninstall) UNINSTALL="1"; PASSTHRU="$PASSTHRU --uninstall"; shift ;;
 	--release-only) RELEASE_ONLY="1"; PASSTHRU="$PASSTHRU --release-only"; shift ;;
+	--upgrade-only) UPGRADE_ONLY="1"; PASSTHRU="$PASSTHRU --upgrade-only"; shift ;;
+	--reset-password) RESET_PASSWORD="1"; PASSTHRU="$PASSTHRU --reset-password"; shift ;;
 	--keep-data) KEEP_DATA="1"; PASSTHRU="$PASSTHRU --keep-data"; shift ;;
 	-h | --help) usage; exit 0 ;;
 	--)
@@ -337,6 +352,11 @@ if [ -n "$UNINSTALL" ]; then
 	MODE="2"
 elif [ -n "$RELEASE_ONLY" ]; then
 	MODE="3"
+elif [ -n "$UPGRADE_ONLY" ]; then
+	# 显式给了 --upgrade-only：要下二进制（升级就得有新二进制），但不问那一套问答。
+	MODE="4"
+elif [ -n "$RESET_PASSWORD" ]; then
+	MODE="5"
 elif [ -n "$NON_INTERACTIVE" ] || [ -n "$DRY_RUN" ]; then
 	# --yes / --dry-run 都是"别问我"的意思，按老行为走（安装）。
 	MODE=""
@@ -351,10 +371,10 @@ elif [ ! -t 0 ]; then
 EOF
 	exit 2
 else
-	# 菜单与提示走它的 stderr（直接显示给用户），答案走 stdout（只可能是 1/2/3）。
+	# 菜单与提示走它的 stderr（直接显示给用户），答案走 stdout（只可能是 1~5）。
 	MODE="$(sh "$DEPLOY" --ask-mode)" || MODE=""
 	case "$MODE" in
-	1 | 2 | 3) MODE_ASKED="1" ;;
+	1 | 2 | 3 | 4 | 5) MODE_ASKED="1" ;;
 	*)
 		warn "取回的部署脚本不认识 --ask-mode（大概用了较早的 --script-ref），改由它自己提问。"
 		MODE=""
@@ -363,28 +383,36 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 3a) 卸载 / 只更新发布文件：不下载任何东西
+# 3a) 卸载 / 只更新发布文件 / 重置密码：不下载任何东西
 # ---------------------------------------------------------------------------
 #
-# 这就是"先问后下载"省下来的那几十 MB。两条路都只需要已经取到手的那份脚本：
+# 这就是"先问后下载"省下来的那几十 MB。三条路都只需要已经取到手的那份脚本：
 #   · 卸载：删除逻辑只有一份（deploy-master.sh --uninstall），不自己实现一遍；
-#   · 只更新发布文件：取件用的是**节点上已装的那份 probe-master**，不是我们要
-#     下载的这份——所以这里也不需要二进制。
-if [ "$MODE" = "2" ] || [ "$MODE" = "3" ]; then
+#   · 只更新发布文件：取件用的是**节点上已装的那份 xb-probe-master**，不是我们要
+#     下载的这份——所以这里也不需要二进制；
+#   · 重置密码：改口令是 `xb-probe-master reset-admin` 干的活，用的是节点上已装的
+#     那一份，同样不需要下载。
+# （模式 4「只升级本体」不在这里：它就是要换二进制，得下。）
+if [ "$MODE" = "2" ] || [ "$MODE" = "3" ] || [ "$MODE" = "5" ]; then
 	if [ "$MODE" = "2" ]; then
 		_early_what="卸载"
+	elif [ "$MODE" = "5" ]; then
+		_early_what="重置管理员密码"
 	else
 		_early_what="更新 Agent 发布文件"
 	fi
 	# 从菜单问出来的答案只活在变量里，得**真的送下去**：不加这一句，部署脚本会
 	# 把同一件事再问一遍——用户刚答完"3"，转头又被问"1、2 还是 3"。
-	# （显式给了标志的那条路不用传：--uninstall / --release-only 本来就在 PASSTHRU 里。）
+	# （显式给了标志的那条路不用传：--uninstall / --release-only / --reset-password
+	# 本来就在 PASSTHRU 里。）
 	if [ -n "$MODE_ASKED" ]; then
 		PASSTHRU="$PASSTHRU --mode $MODE"
 	fi
 	if [ -z "$DRY_RUN" ] && [ "$(id -u)" -ne 0 ]; then
 		if [ "$MODE" = "2" ]; then
 			err "卸载需要 root 或 sudo（--dry-run 不需要）。"
+		elif [ "$MODE" = "5" ]; then
+			err "重置口令要写数据目录里的数据库，需要 root 或 sudo（--dry-run 不需要）。"
 		else
 			err "更新发布文件要往 data_dir/dist 里写，需要 root 或 sudo（--dry-run 不需要）。"
 		fi
@@ -443,7 +471,7 @@ if [ "$(id -u)" -ne 0 ] && [ -z "$NO_SERVICE" ]; then
     curl -fsSL <本脚本的 URL> -o install-master-bin.sh && sudo sh install-master-bin.sh
 
 容器 / 无 systemd / 只读根文件系统的场景，可以不用 root：
-    sh install-master-bin.sh --no-service --dir ./probe-master --data ./probe-master/data --bin-dir ./probe-master/bin
+    sh install-master-bin.sh --no-service --dir ./xb-probe-master --data ./xb-probe-master/data --bin-dir ./xb-probe-master/bin
 EOF
 	exit 1
 fi
@@ -469,7 +497,7 @@ v*) TAG="$VERSION" ;;
 esac
 say "目标版本 $TAG（linux/$ARCH）"
 
-BIN_NAME="probe-master_linux_${ARCH}"
+BIN_NAME="xb-probe-master_linux_${ARCH}"
 say "下载 $BIN_NAME"
 download "$ASSET_BASE/$TAG/$BIN_NAME" >"$TMP/$BIN_NAME" || {
 	err "下载失败：$ASSET_BASE/$TAG/$BIN_NAME"

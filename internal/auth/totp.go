@@ -97,7 +97,7 @@ func totp(key []byte, counter int64) string {
 // ---------------------------------------------------------------------------
 
 // TOTPIssuer 是 otpauth:// URI 里的发行方名称，认证器 App 用它做分组。
-const TOTPIssuer = "Server Probe"
+const TOTPIssuer = "XB-Probe"
 
 // OTPAuthURI 生成供认证器 App 扫码/手工录入的标准 otpauth URI（RFC 6238 附录 + Key URI Format）。
 //
@@ -172,7 +172,7 @@ func GenerateRecoveryCodes(n int) ([]string, error) {
 //  1. **测试**：端到端验证登录链路时必须能算出"此刻的正确码"，
 //     否则只能测"错误的码被拒绝"，而"正确的码被接受"这条最关键的分支
 //     反而测不到——那恰恰是"启用了 TOTP 就登不进去"的病灶所在。
-//  2. **`probe-master show-totp` 之类的运维兜底**：管理员手机丢了又没有恢复码时，
+//  2. **`xb-probe-master show-totp` 之类的运维兜底**：管理员手机丢了又没有恢复码时，
 //     可以登录服务器本机直接算出当前码（前提是能读到库里的密钥）。
 //
 // 注意：它不校验任何东西，拿到密钥的人本就能算出码。密钥的保密性是唯一防线。

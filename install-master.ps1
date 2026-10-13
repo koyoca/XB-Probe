@@ -22,8 +22,22 @@
 #   powershell -ExecutionPolicy Bypass -File install-master.ps1 -Uninstall -KeepData
 #   powershell -ExecutionPolicy Bypass -File install-master.ps1 -Uninstall -DryRun
 #
-# 卸载**不碰源码与 Go**：它从仓库取回 scripts\deploy-master.ps1 执行 -Uninstall，
-# 所以不需要先装一套工具链，也不会因为 -Src 不在而失败。
+# 只升级 Master 本体（照旧编译，但**不再问**站点/证书/管理员那一套）：
+#   powershell -ExecutionPolicy Bypass -File install-master.ps1 -UpgradeOnly
+#
+# 只重置管理员密码（不卸载、不清数据、不重写配置）：
+#   powershell -ExecutionPolicy Bypass -File install-master.ps1 -ResetPassword
+#   口令按 $env:PROBE_ADMIN_PASSWORD / 交互的先后取（也可先给 deploy-master.ps1
+#   的 -AdminPassword）；用户名默认 ops，可用 -AdminUser 指定。
+#
+# 卸载与重置密码**不碰源码与 Go**：它们从仓库取回 scripts\deploy-master.ps1 执行
+# -Uninstall / -ResetPassword，所以不需要先装一套工具链，也不会因为 -Src 不在而失败。
+#
+# ⚠ 与 shell 入口（install-master.sh）的一处**有意的不对称**：那边会先弹一张
+# 「1 安装 / 2 卸载 / 3 只更新发布文件 / 4 只升级本体 / 5 重置密码」的菜单，本脚本
+# **没有菜单**——上面那两个新模式只走命令行开关。原因是菜单里的第 3 项
+# （只更新 Agent 发布文件）在 Windows 侧还没有对应实现，现在就把菜单搬过来，用户
+# 答 3 会被引导到"什么也没做"或"当成安装"，那比没有菜单更糟。等第 3 项补齐再搬。
 #
 # 问答分两处，不是漏了：TLS 方式、对外地址、管理员账号在这里问（排在装依赖与编译
 # 之前，答案错了就不必动系统）；**监听端口**由 scripts\deploy-master.ps1 在落盘前问。
@@ -43,6 +57,11 @@ param(
     [switch]$DryRun,
     [switch]$Uninstall,
     [switch]$KeepData,
+    # 只升级 Master 本体：照旧取源码 + 编译（本脚本的意义就在这），但**不再问**
+    # 站点/证书/管理员那一套，编译完只把二进制换上去。
+    [switch]$UpgradeOnly,
+    # 只重置管理员密码：不需要源码、不需要 Go，所以和卸载一样走"编译之前"的早退通路。
+    [switch]$ResetPassword,
 
     # 以下原样透传给 scripts\deploy-master.ps1
     [string]$Dir = "",
@@ -144,19 +163,41 @@ function Install-Go {
 }
 
 # ---------------------------------------------------------------------------
-# 卸载：-Uninstall（排在装依赖与编译之前）
+# 卸载 / 重置密码：-Uninstall / -ResetPassword（排在装依赖与编译之前）
 # ---------------------------------------------------------------------------
 #
-# 卸载不需要源码、不需要 Go，所以必须排在"装依赖 / clone / 编译"**之前**——否则
-# "卸个东西"要先装一套工具链，是本末倒置，而且一旦工具链装不上就卸不了。
+# 这两个模式都不需要源码、不需要 Go，所以必须排在"装依赖 / clone / 编译"**之前**
+# ——否则"卸个东西"或"改个口令"要先装一套工具链，是本末倒置，而且一旦工具链装不上
+# 就什么都做不了。
 #
-# 删除逻辑只有一份（scripts\deploy-master.ps1 -Uninstall），这里从仓库把它取回来
-# 执行。**刻意不自己实现一遍删除**：两份删除逻辑迟早漂移，而这里赌的是用户的系统。
-if ($Uninstall) {
-    # 卸载要注销计划任务、删 ProgramData 下的目录，仍然需要管理员；
-    # 只有"只看不删"的 -DryRun 例外。
+# 逻辑只有一份（scripts\deploy-master.ps1 的 -Uninstall / -ResetPassword），这里从
+# 仓库把它取回来执行。**刻意不自己实现一遍**：两份逻辑迟早漂移，而这里赌的是用户的
+# 系统。
+#
+# -UpgradeOnly **不在**这一段里：它要编译，所以走不了早退通路（见下面第 6 步）。
+#
+# 三个单次模式在入口这里**也必须互斥**：下面那段早退通路是"自己拼一串参数"，所以
+# 一旦同时给了两个，被丢掉的那个**永远不会到达部署脚本**——而部署脚本的互斥判断
+# （0.1c）本来是能抓住这种组合的。少了这一段判断，`-UpgradeOnly -Uninstall` 会
+# 安安静静地卸载，用户以为自己在升级本体。
+$oneShotIn = @()
+if ($Uninstall) { $oneShotIn += "-Uninstall" }
+if ($UpgradeOnly) { $oneShotIn += "-UpgradeOnly" }
+if ($ResetPassword) { $oneShotIn += "-ResetPassword" }
+if ($oneShotIn.Count -gt 1) {
+    Write-Err2 "这几项都只做一件事，不能同时使用：$($oneShotIn -join " ")"
+    Write-Host "  「卸载」「只升级本体」「重置密码」一次只能选一个。" -ForegroundColor Red
+    exit 2
+}
+
+if ($Uninstall -or $ResetPassword) {
+    $earlyWhat = "卸载"
+    if ($ResetPassword) { $earlyWhat = "重置管理员密码" }
+
+    # 两者都要管理员：卸载要注销计划任务、删 ProgramData 下的目录；重置密码要写
+    # 数据目录里的数据库。只有"只看不删"的 -DryRun 例外。
     if (-not $DryRun -and -not (Test-Admin)) {
-        Write-Err2 "卸载需要管理员权限（-DryRun 不需要）。"
+        Write-Err2 "$earlyWhat需要管理员权限（-DryRun 不需要）。"
         Write-Host "      请用「以管理员身份运行」的 PowerShell 重跑。" -ForegroundColor Red
         exit 1
     }
@@ -185,7 +226,7 @@ if ($Uninstall) {
     }
 
     $rawUrl = "$rawBase/scripts/deploy-master.ps1"
-    Write-Step "取部署脚本（$Ref）以执行卸载"
+    Write-Step "取部署脚本（$Ref）以执行$earlyWhat"
     $tmpd = Join-Path $env:TEMP ("xb-uninst-" + [Guid]::NewGuid().ToString("N").Substring(0, 8))
     New-Item -ItemType Directory -Force -Path $tmpd | Out-Null
     $deploy = Join-Path $tmpd "deploy-master.ps1"
@@ -203,9 +244,19 @@ if ($Uninstall) {
 
     # 取回来的**必须**是部署脚本：连 -Uninstall 这个开关都没有就说明拿错了文件，
     # 与其拿去执行（未知参数会让它直接报错，甚至做别的事），不如现在就说清楚。
-    if ((Get-Content -LiteralPath $deploy -Raw) -notmatch "Uninstall") {
+    $deployText = Get-Content -LiteralPath $deploy -Raw
+    if ($deployText -notmatch "Uninstall") {
         Write-Err2 "$rawUrl 看起来不是部署脚本（没有 -Uninstall 开关）。"
         exit 1
+    }
+    # 同理，-ResetPassword 也要先探一下对面认不认识：本脚本来自仓库当前 ref，而
+    # 部署脚本从同一 ref 取——正常情况下两者同源。用户把 -Ref 指到某个旧标签时就不
+    # 同源了，那时 PowerShell 会抛一句「找不到与参数名 ResetPassword 匹配的参数」，
+    # 那句话既不说明原因、也不说明"这次什么都没做"。先探再传，报错才说得清。
+    if ($ResetPassword -and $deployText -notmatch "ResetPassword") {
+        Write-Err2 "取回的部署脚本不认识 -ResetPassword（大概 -Ref 指到了较早的提交）。"
+        Write-Host "      这次什么都没做。请改用 -Ref main，或先升级仓库再重跑。" -ForegroundColor Red
+        exit 2
     }
 
     # 非交互（-Yes）也要传下去，否则子脚本还会再问一遍"继续？[y/N]"。
@@ -213,18 +264,23 @@ if ($Uninstall) {
     # 而旧版本对未知参数是硬失败，环境变量则新旧都能收。
     if ($Yes) { $env:PROBE_NO_ASK = "1" }
 
-    $dargs = @("-Uninstall")
-    if ($KeepData) { $dargs += "-KeepData" }
+    if ($ResetPassword) {
+        $dargs = @("-ResetPassword")
+    } else {
+        $dargs = @("-Uninstall")
+        if ($KeepData) { $dargs += "-KeepData" }
+    }
     if ($DryRun) { $dargs += "-DryRun" }
     if ($Dir) { $dargs += @("-Dir", $Dir) }
     if ($Data) { $dargs += @("-Data", $Data) }
+    if ($ResetPassword -and $AdminUser) { $dargs += @("-AdminUser", $AdminUser) }
 
-    Write-Step "开始卸载（接下来的输出来自 scripts\deploy-master.ps1）"
+    Write-Step "开始$earlyWhat（接下来的输出来自 scripts\deploy-master.ps1）"
     & powershell -ExecutionPolicy Bypass -File $deploy @dargs
     $uninstRc = $LASTEXITCODE
     Remove-Item $tmpd -Recurse -Force -ErrorAction SilentlyContinue
     if ($uninstRc -ne 0) {
-        Write-Err2 "卸载脚本执行失败（上面是它的输出）。"
+        Write-Err2 "$earlyWhat 失败（上面是它的输出）。"
         exit 1
     }
     exit 0
@@ -250,6 +306,17 @@ if (-not $Yes -and [Environment]::UserInteractive -eq $false) {
 # ---------------------------------------------------------------------------
 # 1) 交互问答（放在装依赖之前：答错了就没必要动系统）
 # ---------------------------------------------------------------------------
+#
+# -UpgradeOnly 把这一整段（TLS 方式、对外地址、管理员账号）连同下面的"2) 确认"
+# 一起跳过：它只换二进制，站点、证书、端口、管理员**一个都不动**，所以问这些
+# 既是白问、又容易让人以为"改了什么"。用户原话：
+#   「他会全部走一遍流程，包括站点设置、证书申请、管理员账号设置等全部流程，
+#     但是这些我不想做，我仅仅只想升级 master 本体」。
+#
+# 这段体量大，包进 if 之后**刻意不整体缩进一格**：那会让本次改动看起来动了全文
+# 每一行，日后 diff 再也读不出"这次到底改了哪几处"。首尾各留一条显眼的分隔注释。
+# ==== 站点/证书/管理员问答 开始（-UpgradeOnly 时整段跳过）====
+if (-not $UpgradeOnly) {
 
 if (-not $Yes) {
     Write-Host ""
@@ -340,7 +407,7 @@ if (-not $Yes) {
     Write-Host "  管理地址  $(if ($AdminOrigin) { $AdminOrigin } else { '与公开地址相同' })"
     Write-Host "  管理员    $AdminUser（口令随后交互输入）"
     Write-Host "  TLS       $TlsMode"
-    Write-Host "  服务      $(if ($NoStartupTask) { '不注册开机自启' } else { '计划任务 probe-master（开机自启）' })"
+    Write-Host "  服务      $(if ($NoStartupTask) { '不注册开机自启' } else { '计划任务 xb-probe-master（开机自启）' })"
     Write-Host ""
     $go = Read-Host "继续？[Y/n]"
     if ($go -match "^(n|N|no|NO)$") {
@@ -348,6 +415,12 @@ if (-not $Yes) {
         exit 0
     }
 }
+}
+# ==== 站点/证书/管理员问答 结束（-UpgradeOnly 时整段跳过）====
+
+# -UpgradeOnly 不问上面那些，但第 6 步要把 -AdminUser 透传下去（重置密码/管理员相关），
+# 而它在那条路上一直是空的。默认值与部署脚本一致（ops），不另立一个。
+if ($UpgradeOnly -and -not $AdminUser) { $AdminUser = "ops" }
 
 # ---------------------------------------------------------------------------
 # 3) 依赖
@@ -409,8 +482,13 @@ if ($GoProxy) {
 
 if ($DryRun) {
     Write-Step "（dry-run）取源码：$Repo（$Ref）→ $Src"
-    Write-Step "（dry-run）编译：cd $Src; CGO_ENABLED=0 go build -trimpath -o bin\probe-master.exe .\cmd\probe-master"
-    Write-Step "（dry-run）部署：scripts\deploy-master.ps1 -Bin $Src\bin\probe-master.exe …"
+    Write-Step "（dry-run）编译：cd $Src; CGO_ENABLED=0 go build -trimpath -o bin\xb-probe-master.exe .\cmd\xb-probe-master"
+    if ($UpgradeOnly) {
+        Write-Step "（dry-run）部署：scripts\deploy-master.ps1 -Bin $Src\bin\xb-probe-master.exe -UpgradeOnly"
+        Write-Step "（dry-run）只换 Master 二进制并重启任务；配置、证书、管理员账号、数据目录都不动。"
+    } else {
+        Write-Step "（dry-run）部署：scripts\deploy-master.ps1 -Bin $Src\bin\xb-probe-master.exe …"
+    }
     Write-Step "（dry-run）以上为计划，未改动系统。"
     exit 0
 }
@@ -441,11 +519,11 @@ if (-not (Test-Path $deployPs1)) {
 
 $ver = (& git -C $Src describe --tags --always) 2>$null
 if (-not $ver) { $ver = "dev" }
-Write-Step "编译 probe-master（版本 $ver）"
+Write-Step "编译 xb-probe-master（版本 $ver）"
 Push-Location $Src
 try {
     $env:CGO_ENABLED = "0"
-    & $goExe build -trimpath -ldflags "-s -w -X main.version=$ver" -o "bin\probe-master.exe" ".\cmd\probe-master"
+    & $goExe build -trimpath -ldflags "-s -w -X main.version=$ver" -o "bin\xb-probe-master.exe" ".\cmd\xb-probe-master"
     $buildRc = $LASTEXITCODE
 } finally {
     Pop-Location
@@ -456,7 +534,7 @@ if ($buildRc -ne 0) {
     Write-Host "      若是 Go 版本问题，试：-GoVersion 1.27.2" -ForegroundColor Red
     exit 1
 }
-$binPath = Join-Path $Src "bin\probe-master.exe"
+$binPath = Join-Path $Src "bin\xb-probe-master.exe"
 Write-Step "已生成 $binPath"
 
 # ---------------------------------------------------------------------------
@@ -464,6 +542,7 @@ Write-Step "已生成 $binPath"
 # ---------------------------------------------------------------------------
 
 $forward = @{ Bin = $binPath }
+if ($UpgradeOnly) { $forward["UpgradeOnly"] = $true }
 if ($Dir) { $forward["Dir"] = $Dir }
 if ($Data) { $forward["Data"] = $Data }
 if ($PublicListen) { $forward["PublicListen"] = $PublicListen }

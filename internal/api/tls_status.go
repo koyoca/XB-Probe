@@ -3,7 +3,7 @@ package api
 import (
 	"net/http"
 
-	"github.com/yourorg/probe/internal/model"
+	"github.com/koyoca/xb-probe/internal/model"
 )
 
 // handleTLSStatus 返回证书与 TLS 的运行态（只读）。

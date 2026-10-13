@@ -1,5 +1,5 @@
-# probe-master 配置示例（对应设计文档第 10 章）
-# 默认路径：/etc/probe-master/master.yaml ；权限建议 0600。
+# xb-probe-master 配置示例（对应设计文档第 10 章）
+# 默认路径：/etc/xb-probe-master/master.yaml ；权限建议 0600。
 
 # 公开看板监听地址（建议只监听本机，前置 Caddy/Nginx 做 HTTPS；也可自己终结 TLS，见 tls 段）
 public_listen: "127.0.0.1:8080"
@@ -9,13 +9,13 @@ admin_listen: "127.0.0.1:8081"
 
 # 数据目录：probe.db / backups/ / dist/ / master.key 均在此
 # 权限必须为 0700（13.2 S13）
-data_dir: "/var/lib/probe-master"
+data_dir: "/var/lib/xb-probe-master"
 
 # 主题目录（外部主题 themes/<name>/）；内置主题已编入二进制
-themes_dir: "/var/lib/probe-master/themes"
+themes_dir: "/var/lib/xb-probe-master/themes"
 
 # 32 字节主密钥（AES-256-GCM，用于加密告警渠道凭证）。权限 0600，且与数据库分开备份
-master_key_file: "/etc/probe-master/master.key"
+master_key_file: "/etc/xb-probe-master/master.key"
 
 # 仅当连接来源命中该列表时，才信任 X-Forwarded-For / X-Forwarded-Proto（13.2 S5）。
 # 直连时保持为空；不要填 0.0.0.0/0。
@@ -67,7 +67,7 @@ tls:
   min_version: "1.2"
 
   # 证书与账户密钥的缓存目录（默认 <data_dir>/tls）；ACME 的账户私钥落在这里
-  # cache_dir: "/var/lib/probe-master/tls"
+  # cache_dir: "/var/lib/xb-probe-master/tls"
 
   # ---- mode=files：自定义证书 ----
   cert_file: ""

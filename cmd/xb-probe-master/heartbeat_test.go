@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yourorg/probe/internal/db"
-	"github.com/yourorg/probe/internal/store"
+	"github.com/koyoca/xb-probe/internal/db"
+	"github.com/koyoca/xb-probe/internal/store"
 )
 
 // TestHeartbeatSendsRequest 验证外部心跳真的发出 GET，且路径/方法正确。
@@ -47,7 +47,7 @@ func TestHeartbeatSendsRequest(t *testing.T) {
 	if path != "/ping/abc123" {
 		t.Errorf("路径 = %s，期望 /ping/abc123", path)
 	}
-	if ua != "probe-master/heartbeat" {
+	if ua != "xb-probe-master/heartbeat" {
 		t.Errorf("User-Agent = %q", ua)
 	}
 	if cc != "no-store" {

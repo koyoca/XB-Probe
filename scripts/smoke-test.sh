@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Server Probe 端到端冒烟测试（master 侧）。
+# XB-Probe 端到端冒烟测试（master 侧）。
 #
 # 覆盖：CLI 子命令、库迁移、双监听启动、公开 API 与内嵌主题、
 #       管理界面静态资源、登录/CSRF/鉴权、CSP 安全头、路径穿越防护、
@@ -96,13 +96,13 @@ if [ -z "${GO_BIN}" ]; then
 fi
 echo "  使用 Go：${GO_BIN}"
 mkdir -p "${ROOT}/bin"
-if (cd "${ROOT}" && "${GO_BIN}" build -trimpath -ldflags "-s -w" -o bin/probe-master ./cmd/probe-master 2>"${WORK}/build.log"); then
-  ok "go build probe-master"
+if (cd "${ROOT}" && "${GO_BIN}" build -trimpath -ldflags "-s -w" -o bin/xb-probe-master ./cmd/xb-probe-master 2>"${WORK}/build.log"); then
+  ok "go build xb-probe-master"
 else
   bad "go build 失败：$(cat "${WORK}/build.log")"
   exit 1
 fi
-MASTER="${ROOT}/bin/probe-master"
+MASTER="${ROOT}/bin/xb-probe-master"
 
 # ---------------------------------------------------------------------------
 sec "1. 准备临时实例配置"
@@ -154,7 +154,7 @@ else
 fi
 
 # version 子命令
-if "${MASTER}" version | grep -q "probe-master"; then
+if "${MASTER}" version | grep -q "xb-probe-master"; then
   ok "version 子命令可用"
 else
   bad "version 子命令异常"
@@ -218,7 +218,7 @@ if echo "${THEME_HTML}" | grep -qE 'style="' ; then bad "主题首页含内联 s
 # 暴露安装入口与 Master 地址（12.8）。稍后在建好注册码后再验证它能 200。
 check_code 404 "GET /install.sh（on_demand 且无注册码）"  "${PUB_BASE}/install.sh"
 check_code 404 "GET /install.ps1（on_demand 且无注册码）" "${PUB_BASE}/install.ps1"
-check_code 404 "GET /dist/（on_demand 且无注册码）"       "${PUB_BASE}/dist/probe-agent-linux-amd64"
+check_code 404 "GET /dist/（on_demand 且无注册码）"       "${PUB_BASE}/dist/xb-probe-agent-linux-amd64"
 
 # 公开站安全头（S2 / 13.4.5）。
 HDRS="$(curl -s -D - -o /dev/null "${PUB_BASE}/")"
@@ -966,9 +966,9 @@ if [ -n "${NODE_ID}" ]; then
   check_code 200 "GET /install.ps1（有注册码后）" "${PUB_BASE}/install.ps1"
   # /dist 从 <data_dir>/dist 读取发布文件；先在里头放一个假产物，验证真实下发路径。
   mkdir -p "${WORK}/data/dist"
-  printf '#!/bin/sh\necho fake-agent\n' > "${WORK}/data/dist/probe-agent_linux_amd64"
-  check_code 200 "GET /dist/probe-agent_linux_amd64（有注册码后）" "${PUB_BASE}/dist/probe-agent_linux_amd64"
-  DHDR="$(curl -s -D - -o /dev/null "${PUB_BASE}/dist/probe-agent_linux_amd64")"
+  printf '#!/bin/sh\necho fake-agent\n' > "${WORK}/data/dist/xb-probe-agent_linux_amd64"
+  check_code 200 "GET /dist/xb-probe-agent_linux_amd64（有注册码后）" "${PUB_BASE}/dist/xb-probe-agent_linux_amd64"
+  DHDR="$(curl -s -D - -o /dev/null "${PUB_BASE}/dist/xb-probe-agent_linux_amd64")"
   if echo "${DHDR}" | grep -qi 'content-disposition: attachment'; then ok "/dist 以附件形式下发"; else bad "/dist 缺少 Content-Disposition"; fi
   # 路径穿越必须被挡住。用 --path-as-is 阻止 curl 自己先把 ".." 规范化掉。
   TRAV="$(code_of --path-as-is "${PUB_BASE}/dist/../master.key")"
@@ -1318,7 +1318,7 @@ if [ -n "${AGENT_TOKEN:-}" ]; then
   [ "$("${GO_BIN}" env GOOS)" = "windows" ] && HOST_EXT=".exe"
   V_FROM="1.0.0"
   V_TO="9.9.9"
-  ART="probe-agent_${HOST_TAG}${HOST_EXT}"
+  ART="xb-probe-agent_${HOST_TAG}${HOST_EXT}"
   MODULE_PATH="$(awk '/^module /{print $2; exit}' go.mod)"
 
   mkdir -p "${WORK_REL}/agent" "${WORK_REL}/data/dist/${V_TO}"
@@ -1326,19 +1326,19 @@ if [ -n "${AGENT_TOKEN:-}" ]; then
   # 少做一次 isVersionName 过滤，拿到的就是它，随后 readDistSums 失败 ——
   # 表现是"明明发布了新版本，所有节点都报 Master 上没有已发布版本"。
   mkdir -p "${WORK_REL}/data/dist/nightly-20260101"
-  echo "deadbeef  probe-agent_${HOST_TAG}${HOST_EXT}" \
+  echo "deadbeef  xb-probe-agent_${HOST_TAG}${HOST_EXT}" \
     >"${WORK_REL}/data/dist/nightly-20260101/SHA256SUMS"
 
   LDF_FROM="-s -w -X main.version=${V_FROM} -X ${MODULE_PATH}/internal/dist.PlatformTag=${HOST_TAG}"
   LDF_TO="-s -w -X main.version=${V_TO} -X ${MODULE_PATH}/internal/dist.PlatformTag=${HOST_TAG}"
   if (cd "${ROOT}" && CGO_ENABLED=0 "${GO_BIN}" build -trimpath -ldflags "${LDF_FROM}" \
-      -o "${WORK_REL}/agent/probe-agent${HOST_EXT}" ./cmd/probe-agent 2>"${WORK}/build-agent.log"); then
-    ok "构建待升级的 probe-agent（v${V_FROM}，发布标签 ${HOST_TAG}）"
+      -o "${WORK_REL}/agent/xb-probe-agent${HOST_EXT}" ./cmd/xb-probe-agent 2>"${WORK}/build-agent.log"); then
+    ok "构建待升级的 xb-probe-agent（v${V_FROM}，发布标签 ${HOST_TAG}）"
   else
-    bad "构建 probe-agent 失败：$(cat "${WORK}/build-agent.log")"
+    bad "构建 xb-probe-agent 失败：$(cat "${WORK}/build-agent.log")"
   fi
   if (cd "${ROOT}" && CGO_ENABLED=0 "${GO_BIN}" build -trimpath -ldflags "${LDF_TO}" \
-      -o "${WORK_REL}/data/dist/${V_TO}/${ART}" ./cmd/probe-agent 2>"${WORK}/build-agent2.log"); then
+      -o "${WORK_REL}/data/dist/${V_TO}/${ART}" ./cmd/xb-probe-agent 2>"${WORK}/build-agent2.log"); then
     (cd "${WORK_REL}/data/dist/${V_TO}" && sha256sum "${ART}" >SHA256SUMS)
     ok "发布 v${V_TO}：${ART} + SHA256SUMS"
   else
@@ -1406,7 +1406,7 @@ master_url: "${PUB_BASE}"
 token: "${AGENT_TOKEN}"
 insecure_http: true
 YAML
-  AGENT_BIN="${WORK_REL}/agent/probe-agent${HOST_EXT}"
+  AGENT_BIN="${WORK_REL}/agent/xb-probe-agent${HOST_EXT}"
   AGENT_CFG="${WORK_REL}/agent/agent.yaml"
 
   CHECK_OUT="$("${AGENT_BIN}" upgrade --check --config "${AGENT_CFG}" 2>&1)"
@@ -1434,7 +1434,7 @@ YAML
   else
     bad "替换后版本号没变：$("${AGENT_BIN}" version)"
   fi
-  if [ -f "${WORK}/agent/probe-agent${HOST_EXT}.old" ]; then
+  if [ -f "${WORK}/agent/xb-probe-agent${HOST_EXT}.old" ]; then
     ok "留下了 .old 备份（回滚的前提）"
   else
     bad "没有生成备份文件 —— --rollback 会是一句空话"
@@ -1444,7 +1444,7 @@ YAML
   else
     bad "替换后丢了可执行权限"
   fi
-  if [ -f "${WORK}/agent/probe-agent${HOST_EXT}.new" ]; then
+  if [ -f "${WORK}/agent/xb-probe-agent${HOST_EXT}.new" ]; then
     bad "留下了 .new 临时文件（说明替换路径没走完）"
   else
     ok "没有残留 .new 临时文件"
@@ -1463,7 +1463,7 @@ YAML
   else
     bad "回滚失败：${ROLL_OUT}"
   fi
-  if [ -f "${WORK}/agent/probe-agent${HOST_EXT}.broken" ]; then
+  if [ -f "${WORK}/agent/xb-probe-agent${HOST_EXT}.broken" ]; then
     ok "回滚时把被换下的那份留成 .broken（留现场）"
   else
     bad "回滚后没有 .broken 现场文件"

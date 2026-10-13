@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yourorg/probe/internal/auth"
-	"github.com/yourorg/probe/internal/dist"
-	"github.com/yourorg/probe/internal/model"
+	"github.com/koyoca/xb-probe/internal/auth"
+	"github.com/koyoca/xb-probe/internal/dist"
+	"github.com/koyoca/xb-probe/internal/model"
 )
 
 // Agent 自升级的取件接口（12.6 的客户端侧）。
@@ -69,7 +69,7 @@ func (h *Handler) handleAgentReleaseLatest(w http.ResponseWriter, r *http.Reques
 	version, err := latestDistVersion(h.DistDir)
 	if err != nil || version == "" {
 		writeErr(w, http.StatusNotFound, model.ErrNotFound,
-			"Master 上还没有任何已发布版本（先执行 probe-master dist pull）")
+			"Master 上还没有任何已发布版本（先执行 xb-probe-master dist pull）")
 		return
 	}
 

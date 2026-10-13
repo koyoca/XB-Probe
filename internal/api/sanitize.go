@@ -6,7 +6,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/yourorg/probe/internal/model"
+	"github.com/koyoca/xb-probe/internal/model"
 )
 
 // 不可信数据处理（文档 13.4.4 / S1）。

@@ -499,8 +499,12 @@ a.icon-btn { text-decoration: none; }
   /* 高度恒定（等高卡片的硬约束）：标题(13) + 间隙(6) + 4×行(37) + 3×间隙(6)
      + 上内边距(8) + 顶部分隔线(1) = 194。行内每段的高度都在下面显式钉住
      （.lb-title 行高 13 / .lb-head 15 / .lb-dots 8 / .lb-row 间隙 3），
-     改任何一处都要同步这里的算式。目标多于 4 条时在块内滚动（细滚动条），
-     少于 4 条由 JS 补占位行。 */
+     改任何一处都要同步这里的算式。目标多于 4 条时在块内滚动（细滚动条）。
+
+     这个 4 是**预留高度**，不是行数上限，更不是"补几行占位"的依据：
+     JS 只按实际有几条目标渲染几行，空出来的地方就空着。
+     以前补占位行（全灰点 + —）来填满这 4 行，结果"只有 1 条探测目标"的节点
+     看起来像"1 条通 + 3 条全挂"——凭空造出一个需要立刻处理的故障形态。 */
   height: calc(13px + 6px + 4 * 37px + 3 * 6px + 8px + 1px);
   overflow-y: auto;
   scrollbar-width: thin;
@@ -520,7 +524,6 @@ a.icon-btn { text-decoration: none; }
   line-height: 15px;
 }
 .lb-row { display: flex; flex-direction: column; gap: 3px; }
-.lb-row-ph .lb-name { color: var(--muted); font-weight: 400; }
 .lb-head {
   display: flex;
   align-items: baseline;
