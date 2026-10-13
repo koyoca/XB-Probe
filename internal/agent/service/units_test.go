@@ -200,14 +200,19 @@ func TestLinuxManagersHandoverConfigRightAfterCreatingUser(t *testing.T) {
 		{"sysvManager", `run(sysvInitPath, "start")`},
 	}
 	for _, m := range managers {
-		body := funcBody(t, src, "func (m *"+m.name+") Install(binPath, cfgPath, user string) error {")
+		// 判据钉在 writeDefinition 上：它是"建用户 + 交接属主 + 写定义"的那一段，
+		// 启动命令**只能在** Install 里（升级路径会调 RewriteDefinition，
+		// 那一步绝不能让服务在用户没预期的时刻重启）。
+		write := funcBody(t, src, "func (m *"+m.name+") writeDefinition(binPath, cfgPath, user string) error {")
+		inst := funcBody(t, src, "func (m *"+m.name+") Install(binPath, cfgPath, user string) error {")
+		rew := funcBody(t, src, "func (m *"+m.name+") RewriteDefinition(binPath, cfgPath, user string) error {")
 
-		iEnsure := strings.Index(body, "ensureUser(user, binPath)")
-		iHand := strings.Index(body, "HandoverToUser(cfgPath, user)")
-		iStart := strings.Index(body, m.start)
+		iEnsure := strings.Index(write, "ensureUser(user, binPath)")
+		iHand := strings.Index(write, "HandoverToUser(cfgPath, user)")
+		iStart := strings.Index(inst, m.start)
 		if iEnsure < 0 || iStart < 0 {
-			t.Fatalf("%s 的 Install 切不出关键片段（ensureUser=%d、起服务=%d）：结构变了，判据要跟着改",
-				m.name, iEnsure, iStart)
+			t.Fatalf("%s 切不出关键片段（writeDefinition 里建用户=%d、Install 里起服务=%d）："+
+				"结构变了，判据要跟着改", m.name, iEnsure, iStart)
 		}
 		if iHand < 0 {
 			t.Errorf("%s 建完专用用户却没有交接配置属主：\n"+
@@ -218,17 +223,54 @@ func TestLinuxManagersHandoverConfigRightAfterCreatingUser(t *testing.T) {
 		if iHand < iEnsure {
 			t.Errorf("%s 在创建用户之前就交接属主：那时还查不到该用户的 UID", m.name)
 		}
-		if iHand > iStart {
-			t.Errorf("%s 在启动服务之后才交接属主：服务已经以该用户身份读过一次配置了", m.name)
+		// 建用户与交接都在 writeDefinition 里，而启动在 Install 里 ——
+		// "交接早于启动"因此由结构保证；下面再钉住 Install 确实是先写定义后启动。
+		if !strings.Contains(inst, "m.writeDefinition(") {
+			t.Errorf("%s 的 Install 没有委托 writeDefinition：\n"+
+				"  两份实现的下场是「修好了安装、忘了升级」，而这两条路必须走同一段代码。", m.name)
+		} else if i := strings.Index(inst, "m.writeDefinition("); i > iStart {
+			t.Errorf("%s 的 Install 先起服务再写定义：服务已经以该用户身份读过一次配置了", m.name)
+		}
+		// RewriteDefinition 必须是**一层委托**：既不能自己再写一份定义，
+		// 更不能顺手把服务起起来。
+		if !strings.Contains(rew, "m.writeDefinition(") {
+			t.Errorf("%s 的 RewriteDefinition 没有委托 writeDefinition：\n"+
+				"  它必须与 Install 共用同一段「写定义」代码（否则升级修出来的定义和装出来的不一样）。", m.name)
+		}
+		// "不启动"要**两边都查**：RewriteDefinition 委托给 writeDefinition，
+		// 所以启动命令出现在**被委托的那一段**里同样会被升级路径执行到。
+		// （这一版最初只查了 RewriteDefinition，变异 M01 把启动命令放进
+		//  writeDefinition —— 判据全绿，等于没防住。）
+		for _, body := range []struct{ what, text string }{
+			{"writeDefinition", write},
+			{"RewriteDefinition", rew},
+		} {
+			for _, forbid := range []string{m.start, "m.Install("} {
+				if strings.Contains(body.text, forbid) {
+					t.Errorf("%s 的 %s 里出现了 %s：\n"+
+						"  这两段都是「只写定义」用的 —— 升级路径会在用户正用着服务的时候调它，\n"+
+						"  升级进程有时就是那个服务自己（自杀）。启动只能留在 Install 里。",
+						m.name, body.what, forbid)
+				}
+			}
 		}
 	}
 
-	// 数量守恒：Install 实现有几个，交接就该有几处。
-	installs := strings.Count(src, ") Install(binPath, cfgPath, user string) error {")
+	// 数量守恒：每个 Install 实现都必须有一次交接。只遍历四个已知名字的话，
+	// 将来新增一个 manager 却忘了交接，测试照样全绿。
+	// 判据从"Install 数 == 交接数"改成"建用户数 == 交接数"：交接现在就发生在
+	// 建用户的旁边（同一个 writeDefinition），两个动作一一对应。
+	ensures := strings.Count(src, "ensureUser(user, binPath)")
 	handovers := strings.Count(src, "HandoverToUser(cfgPath, user)")
-	if installs != handovers {
-		t.Errorf("Install 实现 %d 个，交接配置属主 %d 处：每个新建专用用户的服务实现都必须交接"+
-			"（新增 manager 时最容易漏的就是这一步）", installs, handovers)
+	if ensures != handovers {
+		t.Errorf("建用户 %d 处，交接配置属主 %d 处：每个新建专用用户的服务实现都必须交接"+
+			"（新增 manager 时最容易漏的就是这一步）", ensures, handovers)
+	}
+	writes := strings.Count(src, ") writeDefinition(binPath, cfgPath, user string) error {")
+	rewrites := strings.Count(src, ") RewriteDefinition(binPath, cfgPath, user string) error {")
+	if writes == 0 || writes != rewrites {
+		t.Errorf("writeDefinition %d 个，RewriteDefinition %d 个：每个服务实现都要能被「只写定义」地重写"+
+			"（升级路径靠它），少一个就等于那条路上这个平台修不了", writes, rewrites)
 	}
 
 	// 用户名的唯一来源：各 manager 不许再写自己的字面量。
@@ -240,8 +282,107 @@ func TestLinuxManagersHandoverConfigRightAfterCreatingUser(t *testing.T) {
 	}
 }
 
-// TestBuildTaggedFilesPassTheRealPathsToRenderers 是**接线断言**（补的一个真实缺口）。
+// TestRewriteDefinitionNeverStartsTheService 把"只写定义"这个契约在**每个平台**上都钉住。
 //
+// 为什么单列一条：Linux 那四个 manager 上面已经覆盖了，但 FreeBSD 与 Windows 的实现
+// 带 build tag，本机的 `go test` 跑不到它们 —— 而那正是"改坏了也没人发现"的那一半
+// （units.go 顶部记着一次同类事故：freebsd 模板参数个数不对，只在真机上现形）。
+// 这里按**源码文本**断言，不受 build tag 影响。
+func TestRewriteDefinitionNeverStartsTheService(t *testing.T) {
+	for _, c := range []struct {
+		file   string
+		bodies []string
+		forbid []string
+	}{
+		{
+			file: "service_freebsd.go",
+			bodies: []string{
+				"func (m *freebsdManager) writeDefinition(binPath, cfgPath, user string) error {",
+				"func (m *freebsdManager) RewriteDefinition(binPath, cfgPath, user string) error {",
+			},
+			// rc.d 的启动命令，以及"设置开机自启"（它不属于"写定义"这一步：
+			// 升级路径不该顺手改开机自启，那是安装在做的事）。
+			forbid: []string{`"service", "probe_agent", "start"`, `run("sysrc"`},
+		},
+		{
+			file: "service_windows.go",
+			bodies: []string{
+				"func (m *windowsManager) writeDefinition(binPath, cfgPath string) error {",
+				"func (m *windowsManager) RewriteDefinition(binPath, cfgPath, user string) error {",
+			},
+			// 删了重建会把正在跑的服务停掉（Install 才那么做）；
+			// 升级路径只 UpdateConfig，不 Start / Stop / Delete。
+			forbid: []string{"s.Start()", "s.Control(svc.Stop)", "s.Delete()"},
+		},
+	} {
+		src := readSourceFile(t, c.file)
+		for _, sig := range c.bodies {
+			body := funcBody(t, src, sig)
+			if !strings.Contains(body, "\n") {
+				t.Fatalf("%s 里切不出 %q 的函数体：结构变了，判据要跟着改", c.file, sig)
+			}
+			for _, bad := range c.forbid {
+				if strings.Contains(body, bad) {
+					t.Errorf("%s 的 %s 里出现了 %s：\n"+
+						"  RewriteDefinition 只写定义、不启动不重启（升级路径会在服务运行中调它），"+
+						"  要启动就把它留在 Install 里。", c.file, sig, bad)
+				}
+			}
+		}
+	}
+}
+
+// TestRewriteDefinitionDoesNotFabricateAService 钉住"没注册就别修"。
+//
+// 容器里用 `--no-service` 跑、或手工前台跑的节点本来就没有服务定义；升级时照样写一份
+// 出来，就是凭空给用户造了一个他没要过的系统状态。
+//
+// 判据必须落在 **RewriteDefinition** 上而不是共用的 writeDefinition：Install 走的是
+// 同一段写定义代码，而**新装**时 unit 恰恰还不存在 —— 检查放错地方会把新装直接挡死
+// （这条"放错位置"的变异在 M13 里有一份对照）。
+func TestRewriteDefinitionDoesNotFabricateAService(t *testing.T) {
+	for _, c := range []struct{ file, sig string }{
+		{"service_linux.go", "func (m *systemdManager) RewriteDefinition(binPath, cfgPath, user string) error {"},
+		{"service_linux.go", "func (m *openrcManager) RewriteDefinition(binPath, cfgPath, user string) error {"},
+		{"service_linux.go", "func (m *procdManager) RewriteDefinition(binPath, cfgPath, user string) error {"},
+		{"service_linux.go", "func (m *sysvManager) RewriteDefinition(binPath, cfgPath, user string) error {"},
+		{"service_freebsd.go", "func (m *freebsdManager) RewriteDefinition(binPath, cfgPath, user string) error {"},
+		// Windows 是例外：它的 Install **不委托** writeDefinition（自己 CreateService），
+		// 所以这道检查就放在 writeDefinition 里 —— 下一段会钉住那个前提。
+		{"service_windows.go", "func (m *windowsManager) writeDefinition(binPath, cfgPath string) error {"},
+	} {
+		body := funcBody(t, readSourceFile(t, c.file), c.sig)
+		if !strings.Contains(body, "ErrNotInstalled") {
+			t.Errorf("%s 的 %s 没有「没注册就别修」的判断：\n"+
+				"  没有服务定义时它会照样写一份出来 —— 容器/--no-service 的节点升级一次\n"+
+				"  就凭空多出一个 unit（还要为此收到一条「警告」）。", c.file, c.sig)
+		}
+	}
+
+	// Windows 的前提：Install 一旦也改成委托 writeDefinition，上面那道检查就会
+	// 把**新装**挡死（新装时 SCM 里当然还没有这个服务）。前提变了，判据要跟着搬。
+	if inst := funcBody(t, readSourceFile(t, "service_windows.go"),
+		"func (m *windowsManager) Install(binPath, cfgPath, user string) error {"); strings.Contains(inst, "m.writeDefinition(") {
+		t.Error("windowsManager.Install 开始委托 writeDefinition 了：\n" +
+			"  那 writeDefinition 里的「没注册就别修」会把新装挡死（新装时服务还不存在）。\n" +
+			"  正确做法是把那道检查移到 RewriteDefinition（与 Linux 侧一致）。")
+	}
+
+	// 反向：共用的 writeDefinition 里**不能**有这道检查。
+	for _, sig := range []string{
+		"func (m *systemdManager) writeDefinition(binPath, cfgPath, user string) error {",
+		"func (m *openrcManager) writeDefinition(binPath, cfgPath, user string) error {",
+		"func (m *procdManager) writeDefinition(binPath, cfgPath, user string) error {",
+		"func (m *sysvManager) writeDefinition(binPath, cfgPath, user string) error {",
+	} {
+		body := funcBody(t, readSourceFile(t, "service_linux.go"), sig)
+		if strings.Contains(body, "ErrNotInstalled") {
+			t.Errorf("%s 里出现了「没注册就别修」的判断：\n"+
+				"  Install 走的是同一段代码，而新装时 unit 还不存在 —— 放这里会把新装挡死。", sig)
+		}
+	}
+}
+
 // 上面那些渲染器测试验的是"模板拿到参数后渲染得对不对"，而**参数是从哪来的**在
 // service_linux.go / service_freebsd.go 里 —— 那两个文件带 build tag，本机编不到也跑不了，
 // 于是"调用点把 binPath 写死"这种改动，渲染器测试全绿、真机上服务却指向错路径。

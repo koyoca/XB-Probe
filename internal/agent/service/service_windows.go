@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 )
@@ -26,6 +27,52 @@ const windowsServiceName = "probe-agent"
 type windowsManager struct{}
 
 func (m *windowsManager) Name() string { return "windows" }
+
+// writeDefinition 更新已注册服务的"可执行路径 + 启动参数"。
+//
+// **不删除、不停止**正在运行的服务：删了重建（Install 的做法）会把服务停掉，
+// 而升级路径要在"不动正在跑的服务"的前提下把新定义放好（见 Manager.RewriteDefinition）。
+// 服务尚未注册时返回错误而不是顺手创建——这个入口是"修定义"，不是"装服务"。
+func (m *windowsManager) writeDefinition(binPath, cfgPath string) error {
+	mg, err := mgr.Connect()
+	if err != nil {
+		return fmt.Errorf("连接服务控制管理器失败（请以管理员身份运行）：%w", err)
+	}
+	defer mg.Disconnect()
+
+	s, err := mg.OpenService(windowsServiceName)
+	if err != nil {
+		// 没注册过这个服务（容器 / 只前台 run 的机器）：**不要**顺手创建，
+		// 那是 Install 的活，而且用户并没有要过（见 ErrNotInstalled）。
+		return fmt.Errorf("%w（SCM 里没有 %s）：%v", ErrNotInstalled, windowsServiceName, err)
+	}
+	defer s.Close()
+
+	c, err := s.Config()
+	if err != nil {
+		return fmt.Errorf("读取服务配置失败：%w", err)
+	}
+	exePath, err := filepath.Abs(binPath)
+	if err != nil {
+		exePath = binPath
+	}
+	cfgAbs, err := filepath.Abs(cfgPath)
+	if err != nil {
+		cfgAbs = cfgPath
+	}
+	// BinaryPathName 是一整条命令行字符串：含空格的路径必须各自加引号，
+	// 否则 `C:\Program Files\...` 会被拆成两个参数，服务起来就是"找不到文件"。
+	c.BinaryPathName = windows.EscapeArg(exePath) + " run --config " + windows.EscapeArg(cfgAbs)
+	if err := s.UpdateConfig(c); err != nil {
+		return fmt.Errorf("更新服务定义失败：%w", err)
+	}
+	return nil
+}
+
+// RewriteDefinition 只更新 SCM 登记项，不启动/不重启。
+func (m *windowsManager) RewriteDefinition(binPath, cfgPath, user string) error {
+	return m.writeDefinition(binPath, cfgPath)
+}
 
 // Install 注册并启动 Windows 服务。
 //

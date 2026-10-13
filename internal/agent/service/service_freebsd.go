@@ -31,7 +31,8 @@ func (m *freebsdManager) Name() string { return "rcd" }
 // renderFreeBSDRcScript 的说明），配置文件保持 root 属主正好匹配它的运行身份。
 // 若将来改成以 probe 运行，**必须**同时加上交接，否则会复现 Linux 上那个
 // "安装完成但服务 permission denied"的故障。
-func (m *freebsdManager) Install(binPath, cfgPath, user string) error {
+// writeDefinition 建用户、写 rc.d 脚本 —— **不含 enable 与启动**。
+func (m *freebsdManager) writeDefinition(binPath, cfgPath, user string) error {
 	if user == "" {
 		user = DefaultUser
 	}
@@ -43,6 +44,23 @@ func (m *freebsdManager) Install(binPath, cfgPath, user string) error {
 	}
 	if err := os.WriteFile(freebsdRcPath, []byte(renderFreeBSDRcScript(binPath, cfgPath)), 0o755); err != nil {
 		return fmt.Errorf("写入 rc.d 脚本失败: %w", err)
+	}
+	return nil
+}
+
+// RewriteDefinition 只重写 rc.d 脚本，不 enable 也不启动（没注册就别修）。
+//
+// ⚠ 与 Linux 侧一样**不做**属主交接（原因见上面 Install 的注释）。
+func (m *freebsdManager) RewriteDefinition(binPath, cfgPath, user string) error {
+	if !exists(freebsdRcPath) {
+		return ErrNotInstalled
+	}
+	return m.writeDefinition(binPath, cfgPath, user)
+}
+
+func (m *freebsdManager) Install(binPath, cfgPath, user string) error {
+	if err := m.writeDefinition(binPath, cfgPath, user); err != nil {
+		return err
 	}
 	// enable：写入 rc.conf.d 而不是直接改 /etc/rc.conf（后者容易被手动编辑搞乱）。
 	if err := os.WriteFile("/etc/rc.conf.d/probe_agent", []byte("probe_agent_enable=\"YES\"\n"), 0o644); err != nil {

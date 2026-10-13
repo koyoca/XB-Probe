@@ -40,8 +40,11 @@ type systemdManager struct{}
 
 func (m *systemdManager) Name() string { return "systemd" }
 
-// systemd 单元的内容由 renderSystemdUnit 提供（见 units.go，含沙箱与 ReadWritePaths 的说明）。
-func (m *systemdManager) Install(binPath, cfgPath, user string) error {
+// writeDefinition 建用户、交接配置属主、写 unit、daemon-reload —— **不含启动**。
+//
+// daemon-reload 只让 systemd 重读单元文件，**不会**重启服务：升级路径要在
+// "不动正在跑的服务"的前提下把新定义放好（见 Manager.RewriteDefinition 的说明）。
+func (m *systemdManager) writeDefinition(binPath, cfgPath, user string) error {
 	if user == "" {
 		user = DefaultUser
 	}
@@ -57,13 +60,26 @@ func (m *systemdManager) Install(binPath, cfgPath, user string) error {
 	if err := os.WriteFile(systemdUnitPath, []byte(renderSystemdUnit(binPath, cfgPath, user)), 0o644); err != nil {
 		return fmt.Errorf("写入 systemd 单元失败: %w", err)
 	}
-	if err := run("systemctl", "daemon-reload"); err != nil {
+	return run("systemctl", "daemon-reload")
+}
+
+// RewriteDefinition 只重写 unit 与配置属主，不启动/不重启（供 upgrade 的修复用）。
+//
+// "没注册就别修"：容器/`--no-service` 跑的节点没有 unit，凭空写一份出来
+// 就是给用户造了一个他没要过的系统状态（见 ErrNotInstalled）。
+// 检查**不能**放进 writeDefinition：Install 走的是同一段代码，而新装时 unit 恰恰还不存在。
+func (m *systemdManager) RewriteDefinition(binPath, cfgPath, user string) error {
+	if !exists(systemdUnitPath) {
+		return ErrNotInstalled
+	}
+	return m.writeDefinition(binPath, cfgPath, user)
+}
+
+func (m *systemdManager) Install(binPath, cfgPath, user string) error {
+	if err := m.writeDefinition(binPath, cfgPath, user); err != nil {
 		return err
 	}
-	if err := run("systemctl", "enable", "--now", "probe-agent"); err != nil {
-		return err
-	}
-	return nil
+	return run("systemctl", "enable", "--now", "probe-agent")
 }
 
 func (m *systemdManager) Uninstall(binPath, cfgPath string) error {
@@ -105,8 +121,8 @@ type openrcManager struct{}
 
 func (m *openrcManager) Name() string { return "openrc" }
 
-// OpenRC 的 init 脚本内容由 renderOpenRCScript 提供（见 units.go）。
-func (m *openrcManager) Install(binPath, cfgPath, user string) error {
+// writeDefinition 建用户、交接配置属主、写 init 脚本与 conf.d —— **不含启动**。
+func (m *openrcManager) writeDefinition(binPath, cfgPath, user string) error {
 	if user == "" {
 		user = DefaultUser
 	}
@@ -124,6 +140,21 @@ func (m *openrcManager) Install(binPath, cfgPath, user string) error {
 	}
 	if err := os.WriteFile(openrcScriptPath, []byte(renderOpenRCScript(binPath, cfgPath, user)), 0o755); err != nil {
 		return fmt.Errorf("写入 OpenRC 服务脚本失败: %w", err)
+	}
+	return nil
+}
+
+// RewriteDefinition 只重写 init 脚本与配置属主，不启动/不重启（没注册就别修）。
+func (m *openrcManager) RewriteDefinition(binPath, cfgPath, user string) error {
+	if !exists(openrcScriptPath) {
+		return ErrNotInstalled
+	}
+	return m.writeDefinition(binPath, cfgPath, user)
+}
+
+func (m *openrcManager) Install(binPath, cfgPath, user string) error {
+	if err := m.writeDefinition(binPath, cfgPath, user); err != nil {
+		return err
 	}
 	// rc-update 在容器里可能因为 runlevel 目录缺失而失败（如 LXC 的 Alpine 精简镜像），
 	// 此时开机能手动 `rc-service probe-agent start`；因此只警告不中断。
@@ -154,8 +185,8 @@ type procdManager struct{}
 
 func (m *procdManager) Name() string { return "procd" }
 
-// procd 的服务脚本内容由 renderProcdScript 提供（见 units.go）。
-func (m *procdManager) Install(binPath, cfgPath, user string) error {
+// writeDefinition 建用户、交接配置属主、写 procd 脚本 —— **不含启动**。
+func (m *procdManager) writeDefinition(binPath, cfgPath, user string) error {
 	if user == "" {
 		user = DefaultUser
 	}
@@ -167,6 +198,21 @@ func (m *procdManager) Install(binPath, cfgPath, user string) error {
 	}
 	if err := os.WriteFile(procdInitPath, []byte(renderProcdScript(binPath, cfgPath, user)), 0o755); err != nil {
 		return fmt.Errorf("写入 procd 服务脚本失败: %w", err)
+	}
+	return nil
+}
+
+// RewriteDefinition 只重写 procd 脚本与配置属主，不启动/不重启（没注册就别修）。
+func (m *procdManager) RewriteDefinition(binPath, cfgPath, user string) error {
+	if !exists(procdInitPath) {
+		return ErrNotInstalled
+	}
+	return m.writeDefinition(binPath, cfgPath, user)
+}
+
+func (m *procdManager) Install(binPath, cfgPath, user string) error {
+	if err := m.writeDefinition(binPath, cfgPath, user); err != nil {
+		return err
 	}
 	if err := run(procdInitPath, "enable"); err != nil {
 		return err
@@ -193,8 +239,8 @@ type sysvManager struct{}
 
 func (m *sysvManager) Name() string { return "sysv" }
 
-// SysV init 脚本内容由 renderSysVScript 提供（见 units.go）。
-func (m *sysvManager) Install(binPath, cfgPath, user string) error {
+// writeDefinition 建用户、交接配置属主、写 SysV init 脚本 —— **不含启动**。
+func (m *sysvManager) writeDefinition(binPath, cfgPath, user string) error {
 	if user == "" {
 		user = DefaultUser
 	}
@@ -206,6 +252,21 @@ func (m *sysvManager) Install(binPath, cfgPath, user string) error {
 	}
 	if err := os.WriteFile(sysvInitPath, []byte(renderSysVScript(binPath, cfgPath, user)), 0o755); err != nil {
 		return fmt.Errorf("写入 init 脚本失败: %w", err)
+	}
+	return nil
+}
+
+// RewriteDefinition 只重写 init 脚本与配置属主，不启动/不重启（没注册就别修）。
+func (m *sysvManager) RewriteDefinition(binPath, cfgPath, user string) error {
+	if !exists(sysvInitPath) {
+		return ErrNotInstalled
+	}
+	return m.writeDefinition(binPath, cfgPath, user)
+}
+
+func (m *sysvManager) Install(binPath, cfgPath, user string) error {
+	if err := m.writeDefinition(binPath, cfgPath, user); err != nil {
+		return err
 	}
 	// 各家自启命令不同，依次尝试，全都失败只警告（服务仍可手动 /etc/init.d/probe-agent start）。
 	for _, c := range [][]string{

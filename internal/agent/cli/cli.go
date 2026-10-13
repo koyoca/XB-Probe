@@ -12,6 +12,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -74,10 +75,15 @@ func usage() {
 upgrade 参数：
   --check                只查询是否有新版本，不下载（适合放进定时任务做巡检）
   --version <版本号>      升级到指定版本（默认是最新；也用于显式降级/重装）
-  --dry-run              下载并校验，但不替换
+  --dry-run              下载并校验，但不替换（服务定义也不动）
   --rollback             把上一次备份的二进制还原回来（升级后起不来时用）
   --target <路径>         要替换的可执行文件路径（默认取当前进程自身）
   --config <路径>         配置文件路径
+  --no-service-repair    不重写服务定义、不交接配置属主
+
+  升级成功后会自动按**当前版本**重写服务定义并把配置交给服务用户（不重启服务）：
+  老节点（更早版本装的）unit 里没有配置目录的写权限、配置属主还是 root，
+  只换二进制的话重启后会报「读取配置失败: permission denied」。
 
 install 参数：
   --master <URL>         Master 地址（必需，必须为 https）
@@ -501,6 +507,8 @@ func cmdUpgrade(args []string, version string) int {
 	dry := fs.Bool("dry-run", false, "下载并校验，但不替换")
 	rollback := fs.Bool("rollback", false, "把上一次备份的二进制还原回来")
 	target := fs.String("target", "", "要替换的可执行文件路径（默认取当前进程的可执行文件）")
+	noRepair := fs.Bool("no-service-repair", false,
+		"不重写服务定义、不交接配置属主（容器里没有服务管理器、或 unit 由自己托管时用）")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -572,17 +580,93 @@ func cmdUpgrade(args []string, version string) int {
 		fmt.Fprintln(os.Stderr, "升级失败：", err)
 		return 1
 	}
-	if res.NoChange {
-		fmt.Printf("已是最新：%s，无需升级\n", res.To)
+	if *dry {
+		// dry-run 一个字节都不写：服务定义与配置属主同样不动。
+		if res.NoChange {
+			fmt.Printf("已是最新：%s，无需升级\n", res.To)
+		} else {
+			fmt.Printf("dry-run：%s 下载并校验通过（%d 字节），未替换\n", res.To, res.Size)
+		}
+		fmt.Println("dry-run：未改动系统（服务定义与配置属主也不动）。")
 		return 0
 	}
-	if *dry {
-		fmt.Printf("dry-run：%s 下载并校验通过（%d 字节），未替换\n", res.To, res.Size)
+
+	// 二进制已经确定留在 exe 这个位置了，接着把**上一次安装留下的**服务定义与
+	// 配置属主补齐 —— 见 repairAfterUpgrade 的说明。
+	//
+	// 注意这里在"已是最新"的分支**之前**：老节点最常见的状态恰恰是
+	// "二进制已经升级过、但 unit 与配置属主还是更早那次安装的"。若把修复放在
+	// "真的换了二进制"之后，那台机器就会一直停在"已是最新，无需升级"，
+	// 而它恰恰是最需要修的那台。
+	//
+	// canRepair：重写 /etc 下的 unit、把文件的属主交给 probe 都需要 root。
+	// Windows 上不在这里拦——它连 SCM 都连不上时会自己报"请以管理员身份运行"。
+	canRepair := isRoot() || runtime.GOOS == "windows"
+	repairNote := repairAfterUpgrade(service.Detect(), *cfgPath, exe, canRepair, *target != "", *noRepair)
+
+	if res.NoChange {
+		fmt.Printf("已是最新：%s，无需升级\n", res.To)
+		fmt.Println(repairNote)
 		return 0
 	}
 	fmt.Printf("已升级 %s -> %s（%d 字节）\n备份：%s\n%s\n",
 		res.From, res.To, res.Size, res.Backup, restartHint())
+	fmt.Println(repairNote)
 	return 0
+}
+
+// repairAfterUpgrade 在升级之后按**当前二进制里的模板**重写服务定义，并把配置
+// 属主交给服务用户（属主交接在 RewriteDefinition 内部，与 install 走同一段逻辑）。
+//
+// 为什么升级必须做这件事：`upgrade` 只换二进制，而节点上的 unit/init 脚本与配置
+// 属主都是**更早那次安装**留下的。真机事故就是这么来的 ——
+//
+//	v0.1.1 装的节点：unit 里没有 ReadWritePaths=<配置目录>（ProtectSystem=strict
+//	下配置写不回去），配置还是 0600 root:root（unit 里 User=probe 一启动就读不到）。
+//	升级到 v0.1.2 并重启后：「读取配置失败: /etc/probe-agent/agent.yaml: permission denied」
+//	——换二进制修不了这两样，用户看到的是"升级了反而起不来"。
+//
+// **不启动也不重启服务**（重启由用户/服务管理器执行，见 cmdUpgrade 的约定）；
+// 这里只让新定义在下次启动时生效。失败只警告，不改升级的结论。
+//
+// 每个"要不要做"的判据都做成参数（而不是在这里读全局/环境）：这几条分支
+// 恰好是本轮事故的边界——"已是最新"、"没给 root"、"指定了 --target"——
+// 只有在任意平台上都能直接断言，才谈得上被测到。
+func repairAfterUpgrade(m service.Manager, cfgPath, binPath string, canRepair, customTarget, skip bool) string {
+	if skip {
+		return "提示：--no-service-repair，未重写服务定义与配置属主；" +
+			"若服务重启后报配置 permission denied，执行：sudo probe-agent install --service-only"
+	}
+	if customTarget {
+		// --target 是"替换另一个路径上的二进制"（容器/离线场景），那种场合的服务
+		// 定义不归本命令管：按 --target 去改 unit 会把它指到一个临时路径上。
+		return "提示：指定了 --target，未改动服务定义；" +
+			"若需要按当前版本重写服务定义，执行：sudo probe-agent install --service-only"
+	}
+	if !canRepair {
+		return "提示：当前不是 root，未重写服务定义与配置属主（交接属主需要 root）；" +
+			"请执行：sudo probe-agent install --service-only"
+	}
+	if err := repairServiceDefinition(m, cfgPath, binPath); err != nil {
+		// "这台机器没把 Agent 装成服务"不是失败：容器 / --no-service 跑的节点
+		// 本来就没有定义可改。当成"警告"发出去，用户会去查一个不存在的问题。
+		if errors.Is(err, service.ErrNotInstalled) {
+			return "提示：本机没有把 Agent 注册成系统服务，跳过服务定义重写" +
+				"（容器或 --no-service 场景属正常）。"
+		}
+		return "警告：重写服务定义/交接配置属主失败：" + err.Error() +
+			"\n      可以手工执行：sudo probe-agent install --service-only"
+	}
+	return "已按当前版本重写服务定义（含配置目录的写权限）并把配置交给服务用户，" +
+		"重启后生效（不会自行重启）。"
+}
+
+// repairServiceDefinition 是本包对 service.Manager 的唯一一处"修复"调用点。
+//
+// 把 Manager 作为参数传进来（而不是在里面直接 service.Detect()）是为了让测试能塞一个
+// 记录调用的假实现进去：否则"升级到底有没有修"这件事只能靠读源码相信。
+func repairServiceDefinition(m service.Manager, cfgPath, binPath string) error {
+	return m.RewriteDefinition(binPath, cfgPath, service.DefaultUser)
 }
 
 // restartHint 给出"让新版本生效"该执行的命令。
