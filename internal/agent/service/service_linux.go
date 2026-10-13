@@ -40,43 +40,21 @@ type systemdManager struct{}
 
 func (m *systemdManager) Name() string { return "systemd" }
 
-// unitTemplate 启用 systemd 沙箱（3.2 权限最小化）：
-//   - 专用低权限用户 probe
-//   - NoNewPrivileges / ProtectSystem=strict / ProtectHome / PrivateTmp
-//   - AmbientCapabilities=CAP_NET_RAW 以支持 ICMP（3.3 / 12.5）
-func (m *systemdManager) unitTemplate(binPath, cfgPath, user string) string {
-	return fmt.Sprintf(`[Unit]
-Description=Server Probe Agent
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=%s
-ExecStart=%s run --config %s
-Restart=always
-RestartSec=5
-NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=yes
-PrivateTmp=yes
-AmbientCapabilities=CAP_NET_RAW
-CapabilityBoundingSet=CAP_NET_RAW
-ReadWritePaths=/dev/shm
-
-[Install]
-WantedBy=multi-user.target
-`, user, binPath, cfgPath)
-}
-
+// systemd 单元的内容由 renderSystemdUnit 提供（见 units.go，含沙箱与 ReadWritePaths 的说明）。
 func (m *systemdManager) Install(binPath, cfgPath, user string) error {
 	if user == "" {
-		user = "probe"
+		user = DefaultUser
 	}
 	if err := ensureUser(user, binPath); err != nil {
 		return err
 	}
-	if err := os.WriteFile(systemdUnitPath, []byte(m.unitTemplate(binPath, cfgPath, user)), 0o644); err != nil {
+	// 建好用户**立刻**交接配置属主：unit 里的 User=<user> 一启动就会去读
+	// <cfgPath>，而它是刚才以 root 身份写的 0600 —— 那正是真机上
+	// "安装完成"之后服务反复 `读取配置失败: permission denied` 的原因（见 handover.go）。
+	if err := HandoverToUser(cfgPath, user); err != nil {
+		return err
+	}
+	if err := os.WriteFile(systemdUnitPath, []byte(renderSystemdUnit(binPath, cfgPath, user)), 0o644); err != nil {
 		return fmt.Errorf("写入 systemd 单元失败: %w", err)
 	}
 	if err := run("systemctl", "daemon-reload"); err != nil {
@@ -127,43 +105,15 @@ type openrcManager struct{}
 
 func (m *openrcManager) Name() string { return "openrc" }
 
-// openrcScript 是符合 OpenRC 约定的 init 脚本。
-//
-// 要点：
-//   - `#!/sbin/openrc-run` 由 OpenRC 的 runscript 解释，不要写成 sh 脚本；
-//   - command_background=true + pidfile 是 OpenRC 推荐的"非 daemonize 程序"托管方式；
-//   - supervise_daemon_args / respawn 提供崩溃自动拉起；
-//   - 容器内（LXC/Docker）OpenRC 的依赖若不存在，`rc-service ... start` 仍可正常工作，
-//     但 `rc-update add` 写入的 runlevel 目录可能不存在——所以这一步失败只警告不致命。
-func (m *openrcManager) openrcScript(cfgPath, user string) string {
-	return fmt.Sprintf(`#!/sbin/openrc-run
-
-name="probe-agent"
-description="Server Probe Agent"
-
-command="/usr/local/bin/probe-agent"
-command_args="run --config %s"
-command_user="%s"
-command_background="true"
-pidfile="/run/probe-agent.pid"
-output_log="/var/log/probe-agent.log"
-error_log="/var/log/probe-agent.log"
-
-respawn_delay=5
-respawn_max=0
-
-depend() {
-	need net
-	after firewall
-}
-`, cfgPath, user)
-}
-
+// OpenRC 的 init 脚本内容由 renderOpenRCScript 提供（见 units.go）。
 func (m *openrcManager) Install(binPath, cfgPath, user string) error {
 	if user == "" {
-		user = "probe"
+		user = DefaultUser
 	}
 	if err := ensureUser(user, binPath); err != nil {
+		return err
+	}
+	if err := HandoverToUser(cfgPath, user); err != nil {
 		return err
 	}
 	if err := os.MkdirAll("/run", 0o755); err != nil {
@@ -172,7 +122,7 @@ func (m *openrcManager) Install(binPath, cfgPath, user string) error {
 	if err := os.WriteFile(openrcConfPath, []byte("# Server Probe Agent（由安装脚本生成）\n"), 0o644); err != nil {
 		return fmt.Errorf("写入 OpenRC 配置失败: %w", err)
 	}
-	if err := os.WriteFile(openrcScriptPath, []byte(m.openrcScript(cfgPath, user)), 0o755); err != nil {
+	if err := os.WriteFile(openrcScriptPath, []byte(renderOpenRCScript(binPath, cfgPath, user)), 0o755); err != nil {
 		return fmt.Errorf("写入 OpenRC 服务脚本失败: %w", err)
 	}
 	// rc-update 在容器里可能因为 runlevel 目录缺失而失败（如 LXC 的 Alpine 精简镜像），
@@ -204,34 +154,18 @@ type procdManager struct{}
 
 func (m *procdManager) Name() string { return "procd" }
 
-// procdScript 是 OpenWrt 的 /etc/init.d 脚本（rc.common 风格 + procd 服务定义）。
-func (m *procdManager) procdScript(cfgPath, user string) string {
-	return fmt.Sprintf(`#!/bin/sh /etc/rc.common
-
-USE_PROCD=1
-START=95
-STOP=10
-
-start_service() {
-	procd_open_instance
-	procd_set_param command /usr/bin/probe-agent run --config %s
-	procd_set_param user %s
-	procd_set_param respawn 3600 5 5
-	procd_set_param stdout 1
-	procd_set_param stderr 1
-	procd_close_instance
-}
-`, cfgPath, user)
-}
-
+// procd 的服务脚本内容由 renderProcdScript 提供（见 units.go）。
 func (m *procdManager) Install(binPath, cfgPath, user string) error {
 	if user == "" {
-		user = "probe"
+		user = DefaultUser
 	}
 	if err := ensureUser(user, binPath); err != nil {
 		return err
 	}
-	if err := os.WriteFile(procdInitPath, []byte(m.procdScript(cfgPath, user)), 0o755); err != nil {
+	if err := HandoverToUser(cfgPath, user); err != nil {
+		return err
+	}
+	if err := os.WriteFile(procdInitPath, []byte(renderProcdScript(binPath, cfgPath, user)), 0o755); err != nil {
 		return fmt.Errorf("写入 procd 服务脚本失败: %w", err)
 	}
 	if err := run(procdInitPath, "enable"); err != nil {
@@ -259,61 +193,18 @@ type sysvManager struct{}
 
 func (m *sysvManager) Name() string { return "sysv" }
 
-func (m *sysvManager) sysvScript(cfgPath, user string) string {
-	return fmt.Sprintf(`#!/bin/sh
-### BEGIN INIT INFO
-# Provides:          probe-agent
-# Required-Start:    $network $remote_fs
-# Required-Stop:     $network $remote_fs
-# Default-Start:     2 3 4 5
-# Default-Stop:      0 1 6
-# Short-Description: Server Probe Agent
-### END INIT INFO
-
-DAEMON="/usr/local/bin/probe-agent"
-ARGS="run --config %s"
-PIDFILE="/var/run/probe-agent.pid"
-USER="%s"
-
-start() {
-	if [ -f "$PIDFILE" ] && kill -0 "$(cat $PIDFILE)" 2>/dev/null; then
-		echo "probe-agent 已在运行"
-		return 0
-	fi
-	if command -v start-stop-daemon >/dev/null 2>&1; then
-		start-stop-daemon --start --quiet --background --make-pidfile \
-			--pidfile "$PIDFILE" --chuid "$USER" --exec "$DAEMON" -- $ARGS
-	else
-		su -s /bin/sh -c "$DAEMON $ARGS &" "$USER" && echo $! > "$PIDFILE"
-	fi
-	echo "probe-agent 已启动"
-}
-
-stop() {
-	if [ -f "$PIDFILE" ]; then
-		kill "$(cat $PIDFILE)" 2>/dev/null && rm -f "$PIDFILE"
-	fi
-	echo "probe-agent 已停止"
-}
-
-case "$1" in
-	start)   start ;;
-	stop)    stop ;;
-	restart) stop; sleep 1; start ;;
-	status)  if [ -f "$PIDFILE" ] && kill -0 "$(cat $PIDFILE)" 2>/dev/null; then echo "running"; else echo "stopped"; exit 3; fi ;;
-	*)       echo "用法: $0 {start|stop|restart|status}"; exit 1 ;;
-esac
-`, cfgPath, user)
-}
-
+// SysV init 脚本内容由 renderSysVScript 提供（见 units.go）。
 func (m *sysvManager) Install(binPath, cfgPath, user string) error {
 	if user == "" {
-		user = "probe"
+		user = DefaultUser
 	}
 	if err := ensureUser(user, binPath); err != nil {
 		return err
 	}
-	if err := os.WriteFile(sysvInitPath, []byte(m.sysvScript(cfgPath, user)), 0o755); err != nil {
+	if err := HandoverToUser(cfgPath, user); err != nil {
+		return err
+	}
+	if err := os.WriteFile(sysvInitPath, []byte(renderSysVScript(binPath, cfgPath, user)), 0o755); err != nil {
 		return fmt.Errorf("写入 init 脚本失败: %w", err)
 	}
 	// 各家自启命令不同，依次尝试，全都失败只警告（服务仍可手动 /etc/init.d/probe-agent start）。

@@ -204,8 +204,8 @@ func TestUsageMentionsEveryCommand(t *testing.T) {
 			t.Errorf("用法未提及命令 %q，实际：%q", cmd, errOut)
 		}
 	}
-	// install 的四个关键开关必须出现在帮助里：漏写会让人用 --dir 之类不存在的参数瞎试。
-	for _, flagName := range []string{"--master", "--code", "--dir", "--no-service", "--spki-sha256", "--force", "--insecure-http"} {
+	// install 的关键开关必须出现在帮助里：漏写会让人用 --dir 之类不存在的参数瞎试。
+	for _, flagName := range []string{"--master", "--code", "--dir", "--no-service", "--service-only", "--spki-sha256", "--force", "--insecure-http"} {
 		if !strings.Contains(errOut, flagName) {
 			t.Errorf("用法未提及 install 参数 %q", flagName)
 		}
@@ -760,5 +760,78 @@ func TestInstallServiceSkipsManifestWhenNoService(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "install.manifest")); !os.IsNotExist(err) {
 		t.Errorf("跳过服务注册却写了安装清单：err=%v", err)
+	}
+}
+
+// TestServiceOnlyRepairsServiceWithoutNeedingCode 钉住"只修服务定义"这条通路。
+//
+// 需要它的原因：服务定义（unit/init 脚本）是**嵌在二进制里的模板**渲染出来的，
+// 所以模板升级后老节点必须拿新二进制重跑一遍安装。在此之前只有两条路——
+// `--force` 要先去后台生成一个新注册码（而这个码根本不会被用到），或者手工改 unit。
+// 真机上就是这么卡住的：老节点 unit 里没有 ReadWritePaths、配置属主是 root，
+// 服务起不来，而用户手里没有"只修服务定义"这条命令。
+func TestServiceOnlyRepairsServiceWithoutNeedingCode(t *testing.T) {
+	dir := t.TempDir()
+
+	// --no-service 只是为了把"注册服务需要 root"那道权限门摘出去（与本文件其它用例同一手法）；
+	// 这一条要验的是**不再要求 --master/--code**。
+	// （真正"重装服务"的动作不能在单测里跑：那会往跑测试的机器上注册系统服务。）
+	code, _, errOut := runCLI(t, "install", "--service-only", "--no-service", "--dir", dir)
+	if strings.Contains(errOut, "--master 与 --code 均为必需") {
+		t.Fatalf("--service-only 仍要求注册码：%q", errOut)
+	}
+	if code != 1 || !strings.Contains(errOut, "没有可用配置") {
+		t.Fatalf("未安装时 --service-only 应以「没有可用配置」报错（rc=1），实际 rc=%d stderr=%q",
+			code, errOut)
+	}
+}
+
+// TestServiceOnlyBranchInstallsAndReenrollHandsBackOwnership 是两条**接线断言**。
+//
+//   - 分支里只打印"已完成"而不真的重装服务 = 没修：老节点的 unit 还是旧的。
+//   - reenroll 必须把配置属主交回服务用户，且必须在 Save **之后**
+//     （Save 是 root 身份重写，属主又变回 root:root 0600；
+//     交在 Save 之前等于白交，服务下次重启就是 permission denied）。
+func TestServiceOnlyBranchInstallsAndReenrollHandsBackOwnership(t *testing.T) {
+	src, err := os.ReadFile("cli.go")
+	if err != nil {
+		t.Fatalf("读 cli.go 失败：%v", err)
+	}
+	body := string(src)
+
+	start := strings.Index(body, "if *serviceOnly {")
+	if start < 0 {
+		t.Fatal("没有 --service-only 分支")
+	}
+	end := strings.Index(body[start:], `if *master == "" || *code == "" {`)
+	if end < 0 {
+		t.Fatal("找不到 --service-only 分支的结束位置：结构变了，判据要跟着改" +
+			"（别把 end 放宽成整份文件——那样 installService 会被别处调用满足）")
+	}
+	if region := body[start : start+end]; !strings.Contains(region, "installService(binPath, cfgPath, *noService)") {
+		t.Error("--service-only 分支没有真的重装服务：老节点的 unit 不会被改写")
+	}
+
+	rstart := strings.Index(body, "func cmdReenroll(")
+	if rstart < 0 {
+		t.Fatal("没有 cmdReenroll")
+	}
+	rend := strings.Index(body[rstart:], "func cmdUninstall(")
+	if rend < 0 {
+		t.Fatal("找不到 cmdReenroll 的结束位置")
+	}
+	region := body[rstart : rstart+rend]
+	iSave := strings.Index(region, "agentconfig.Save(")
+	iHand := strings.Index(region, "service.HandoverToUser(")
+	if iSave < 0 {
+		t.Fatal("cmdReenroll 里没有找到 agentconfig.Save")
+	}
+	if iHand < 0 {
+		t.Fatal("cmdReenroll 写完配置后没有交接属主：\n" +
+			"  它是以 root 身份重写的 0600 文件，而服务以专用低权限用户跑 ——\n" +
+			"  服务下次重启就是 `读取配置失败: permission denied`。")
+	}
+	if iHand < iSave {
+		t.Error("交接发生在 Save 之前：Save 会以 root 重新创建文件，属主又变回 root:root")
 	}
 }

@@ -25,47 +25,15 @@ type freebsdManager struct{}
 
 func (m *freebsdManager) Name() string { return "rcd" }
 
-// freebsdRcScript 是 FreeBSD rc.d 脚本。
+// FreeBSD rc.d 脚本内容由 renderFreeBSDRcScript 提供（见 units.go）。
 //
-// 关键点与 Linux 的 OpenRC/systemd 都不同：
-//   - 必须 `# PROVIDE:` / `# REQUIRE:` 注释块，否则 rcorder 会忽略它；
-//   - 用 /usr/sbin/daemon 做后台化（FreeBSD 官方推荐的 rc 脚本写法），
-//     因为它能自动写 pidfile 并在进程退出后重启；
-//   - _probe_agent 用户若不存在，用 pw(8) 创建（FreeBSD 没有 useradd）。
-func (m *freebsdManager) freebsdRcScript(cfgPath, user string) string {
-	return fmt.Sprintf(`#!/bin/sh
-
-# PROVIDE: probe_agent
-# REQUIRE: NETWORKING
-# KEYWORD: shutdown
-
-. /etc/rc.subr
-
-name="probe_agent"
-rcvar="probe_agent_enable"
-pidfile="/var/run/${name}.pid"
-
-command="/usr/sbin/daemon"
-procname="/usr/local/bin/probe-agent"
-command_args="-p ${pidfile} -r -f ${procname} run --config %s"
-start_precmd="probe_agent_precmd"
-
-probe_agent_precmd()
-{
-	if [ ! -f %s ]; then
-		err 1 "%s 不存在，请先安装"
-	fi
-}
-
-load_rc_config $name
-: ${probe_agent_enable:="YES"}
-run_rc_command "$1"
-`, cfgPath, cfgPath, cfgPath, user)
-}
-
+// ⚠ 这里**故意不调用** HandoverToUser：该脚本以 root 运行（原因见 units.go 里
+// renderFreeBSDRcScript 的说明），配置文件保持 root 属主正好匹配它的运行身份。
+// 若将来改成以 probe 运行，**必须**同时加上交接，否则会复现 Linux 上那个
+// "安装完成但服务 permission denied"的故障。
 func (m *freebsdManager) Install(binPath, cfgPath, user string) error {
 	if user == "" {
-		user = "probe"
+		user = DefaultUser
 	}
 	if err := ensureFreeBSDUser(user); err != nil {
 		return err
@@ -73,7 +41,7 @@ func (m *freebsdManager) Install(binPath, cfgPath, user string) error {
 	if err := os.MkdirAll(filepath.Dir(freebsdRcPath), 0o755); err != nil {
 		return err
 	}
-	if err := os.WriteFile(freebsdRcPath, []byte(m.freebsdRcScript(cfgPath, user)), 0o755); err != nil {
+	if err := os.WriteFile(freebsdRcPath, []byte(renderFreeBSDRcScript(binPath, cfgPath)), 0o755); err != nil {
 		return fmt.Errorf("写入 rc.d 脚本失败: %w", err)
 	}
 	// enable：写入 rc.conf.d 而不是直接改 /etc/rc.conf（后者容易被手动编辑搞乱）。

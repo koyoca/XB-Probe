@@ -40,9 +40,9 @@ sudo sh -c "$(curl -fsSL https://raw.githubusercontent.com/koyoca/XB-Probe/main/
 
 ```bash
 # 指定版本 / 换下载加速前缀 / 只看不装（下载并校验，不改动系统）
-sudo sh install-master-bin.sh --version v0.1.0
+sudo sh install-master-bin.sh --version vX.Y.Z        # 换成实际标签；省略即取最新 Release
 sudo sh install-master-bin.sh --mirror https://ghfast.top/https://github.com
-sh install-master-bin.sh --dry-run --version v0.1.0
+sh install-master-bin.sh --dry-run --version vX.Y.Z
 ```
 
 只发布 `linux/amd64` 与 `linux/arm64`。其它架构（含 FreeBSD）请用方式 B，它会现场编译。
@@ -325,6 +325,9 @@ sudo sh -c "$(curl -fsSL https://raw.githubusercontent.com/koyoca/XB-Probe/main/
 
 # Agent 自升级（取件走节点令牌鉴权，不依赖公开的 /dist/）
 sudo probe-agent upgrade --check && sudo probe-agent upgrade
+# 服务定义（systemd unit / init 脚本）或配置目录属主有更新时，用它重写并重启：
+# 不联系 Master、不重新注册、不换令牌，所以不需要注册码
+sudo probe-agent install --service-only
 sudo systemctl restart probe-agent     # 升级不会自行重启，输出里会给出该执行的命令
 ```
 
@@ -336,6 +339,31 @@ sudo systemctl restart probe-agent     # 升级不会自行重启，输出里会
 备份在管理端「系统设置 → 数据库备份」手动触发或按日自动（`VACUUM INTO` 在线一致快照 + `keep` 轮转）。
 **不要用 `cp` 拷贝数据库文件**——WAL 模式下会拿到撕裂副本，能打开、能查询、但数据不一致。
 恢复时在管理端选一份快照执行恢复；条件允许的话，请在一台闲置实例上先走一遍，确认备份真的可用。
+
+### 如果 Agent 报「读取配置失败: permission denied」
+
+```
+probe-agent[558816]: 错误： 读取配置失败: open /etc/probe-agent/agent.yaml: permission denied
+```
+
+`v0.1.2` 之前装出来的节点会遇到这个：服务以专用低权限用户 `probe` 运行，而配置文件是
+`root:root 0600` —— 安装的每一步都打印"成功"，唯一读不到它的是服务本身。
+装上 `v0.1.2` 后按上面两条命令重跑（`upgrade` + `install --service-only`）即可：
+新版本会在建好用户之后把配置目录与文件交给它，并在 unit 里加上运行期写回配置所需的可写路径。
+
+只想**立刻**把这台机器拉起来（不升级也行）：
+
+```sh
+sudo chown -R probe:probe /etc/probe-agent && sudo chmod 750 /etc/probe-agent
+sudo mkdir -p /etc/systemd/system/probe-agent.service.d
+printf '[Service]\nReadWritePaths=/etc/probe-agent\n' |
+  sudo tee /etc/systemd/system/probe-agent.service.d/override.conf
+sudo systemctl daemon-reload && sudo systemctl restart probe-agent
+```
+
+那条 drop-in 补的是另一件事：unit 开了 `ProtectSystem=strict`，整个文件系统（含 `/etc`）对服务是
+只读的，而 Agent 运行期要把 Master 下发的配置写回同一份文件 —— `ReadWritePaths` 就是为此而开。
+少了它，服务能跑、上报也正常，只有"后台改的设置重启就没了"。
 
 ## 卸载
 

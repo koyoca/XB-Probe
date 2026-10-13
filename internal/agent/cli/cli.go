@@ -84,6 +84,8 @@ install 参数：
   --code <注册码>         一次性注册码（必需；也可用环境变量 PROBE_CODE）
   --dir <目录>            自定义配置目录
   --no-service           只写配置，不注册系统服务（容器或手动前台运行）
+  --service-only         只按当前版本重写系统服务（unit/init 脚本 + 配置属主）并重启，
+                         不联系 Master、不换令牌（**不需要 --master/--code**）
   --spki-sha256 <指纹>    固定 Master 公钥指纹（自签证书场景，可重复）
   --force                已安装时重新注册并换取新令牌
   --insecure-http        仅本机回环开发场景放行 http://
@@ -154,12 +156,47 @@ func cmdInstall(args []string, version string) int {
 	code := fs.String("code", os.Getenv("PROBE_CODE"), "一次性注册码（或用环境变量 PROBE_CODE）")
 	dir := fs.String("dir", "", "自定义配置目录")
 	noService := fs.Bool("no-service", false, "只写配置，不注册系统服务")
+	serviceOnly := fs.Bool("service-only", false, "只重写系统服务（unit/init 脚本与配置属主）并重启，不注册、不换令牌")
 	force := fs.Bool("force", false, "已安装时重新注册并换取新令牌")
 	insecureHTTP := fs.Bool("insecure-http", false, "允许 http://（仅本机回环开发）")
 	var spki multiFlag
 	fs.Var(&spki, "spki-sha256", "固定 Master 公钥指纹（可重复）")
 	if err := fs.Parse(args); err != nil {
 		return 2
+	}
+
+	// --service-only：只按**当前二进制里的模板**重写服务定义并重启，不联系 Master、不换令牌。
+	//
+	// 为什么需要它：服务定义（systemd unit / init 脚本）是嵌在二进制里的模板渲染出来的，
+	// 所以"unit 模板升级"必须拿着新二进制重跑一遍安装流程；而在此之前只有两条路，
+	// 都不通：`--force` 要重新注册（得先去后台生成一个新注册码，而这个码根本不会被用到），
+	// 或者手工去改 /etc/systemd/system/probe-agent.service。
+	// 真机上就是这么卡住的——老节点 unit 里没有 ReadWritePaths、配置属主是 root，
+	// 服务起不来，而用户手里没有"只修服务定义"这条命令。
+	//
+	// 与下面那条幂等分支（已安装且未 --force）的关系：那条是"重跑安装命令"的兼容路径，
+	// 要求带 --master/--code（哪怕不注册）；这一条是它的**显式形式**，不需要注册码。
+	if *serviceOnly {
+		cfgPath, binPath, err := resolvePaths(*dir, *noService)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "错误：", err)
+			return 1
+		}
+		if _, err := agentconfig.Load(cfgPath); err != nil {
+			fmt.Fprintf(os.Stderr,
+				"错误：%s 处没有可用配置，--service-only 只重装服务、不会注册节点（首次安装请去掉它）：%v\n",
+				cfgPath, err)
+			return 1
+		}
+		if err := service.Detect().Uninstall(binPath, cfgPath); err != nil {
+			fmt.Fprintln(os.Stderr, "清理旧服务时出错（继续）：", err)
+		}
+		if err := installService(binPath, cfgPath, *noService); err != nil {
+			fmt.Fprintln(os.Stderr, "错误：", err)
+			return 1
+		}
+		fmt.Println("已完成：服务定义已按当前版本重写（配置与令牌未改动）。")
+		return 0
 	}
 
 	if *master == "" || *code == "" {
@@ -173,9 +210,10 @@ func cmdInstall(args []string, version string) int {
 		return 1
 	}
 
-	// 幂等：已安装且未指定 --force 时只替换二进制并重启服务（12.3）
+	// 幂等：已安装且未指定 --force 时只替换二进制并重启服务（12.3）。
+	// 只想重写服务定义、连 --master/--code 都不想给时，用 --service-only（等价且更明确）。
 	if _, err := agentconfig.Load(cfgPath); err == nil && !*force {
-		fmt.Println("检测到已安装配置，仅重启服务（如需换令牌请加 --force）。")
+		fmt.Println("检测到已安装配置，仅重装系统服务（不换令牌；如需换令牌请加 --force）。")
 		if err := service.Detect().Uninstall(binPath, cfgPath); err != nil {
 			fmt.Fprintln(os.Stderr, "清理旧服务时出错（继续）：", err)
 		}
@@ -242,9 +280,11 @@ func installService(binPath, cfgPath string, noService bool) error {
 		return nil
 	}
 	// 记录安装清单（卸载时只删除清单内的路径，避免误删，S13）。
-	manifest := filepath.Join(filepath.Dir(cfgPath), "install.manifest")
+	manifest := filepath.Join(filepath.Dir(cfgPath), service.ManifestName)
 	_ = os.WriteFile(manifest, []byte(binPath+"\n"+cfgPath+"\n"), 0o600)
-	return service.Detect().Install(binPath, cfgPath, "probe")
+	// 配置属主的交接在 Install 内部完成（建好用户之后、启动服务之前，见 service/handover.go）：
+	// 这里刚写的 manifest 也是 root:root 0600，一并交过去，卸载时不必区分是谁写的。
+	return service.Detect().Install(binPath, cfgPath, service.DefaultUser)
 }
 
 // ---------------------------------------------------------------------------
@@ -293,6 +333,13 @@ func cmdReenroll(args []string, version string) int {
 	if err := agentconfig.Save(*cfgPath, cfg); err != nil {
 		fmt.Fprintln(os.Stderr, "写入配置失败：", err)
 		return 1
+	}
+	// 配置是**以 root 身份**重写的（reenroll 必须 sudo），而服务以专用低权限用户跑：
+	// 不把属主交回去，这次重写就会在下次重启时变成 `permission denied` ——
+	// 与"配置写坏了"同样的症状，却发生在一次"成功"的令牌轮换之后。
+	// 与 install 走同一段交接逻辑，不另写一份。
+	if err := service.HandoverToUser(*cfgPath, service.DefaultUser); err != nil {
+		fmt.Fprintln(os.Stderr, "警告：未能把配置交给服务用户，服务重启后可能读不到配置：", err)
 	}
 	fmt.Println("已换取新令牌并更新配置。请重启服务使配置生效。")
 	return 0
@@ -430,7 +477,7 @@ func counterBits() int {
 }
 
 func readManifest(cfgPath string) (string, error) {
-	raw, err := os.ReadFile(filepath.Join(filepath.Dir(cfgPath), "install.manifest"))
+	raw, err := os.ReadFile(filepath.Join(filepath.Dir(cfgPath), service.ManifestName))
 	if err != nil {
 		return "", err
 	}
