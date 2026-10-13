@@ -208,6 +208,30 @@ function Get-RawBase {
     return "https://raw.githubusercontent.com/$r/$GitRef"
 }
 
+# Save-RawScript：取一个 raw 上的脚本，成功返回 $true。
+#
+# **必须**带缓存规避，两个手段都要：
+#   · 请求头 no-cache / Pragma —— 让 CDN 与中间代理回源校验；
+#   · URL 上带一个每次都不同的查询串 —— CDN 的缓存键含查询串，于是必然 miss。
+#
+# 原因与 shell 入口（install-master-bin.sh）里那一段一模一样：raw.githubusercontent.com
+# 前面有一层 CDN，`main` 这种**可变引用**会被它缓存。文件名不变、内容变了，CDN 仍
+# 可能把旧内容发出来。后果极难查：仓库里已经修好的探测逻辑，用户取到的却是旧版，
+# 于是"CI 全绿、仓库里也确实改好了，而用户反复失败在同一个地方"。
+function Save-RawScript {
+    param([string]$Url, [string]$OutFile)
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { }
+    $bust = "$Url" + "?nocache=" + [Guid]::NewGuid().ToString("N")
+    try {
+        Invoke-WebRequest -Uri $bust -OutFile $OutFile -UseBasicParsing -TimeoutSec 120 `
+            -Headers @{ "Cache-Control" = "no-cache"; "Pragma" = "no-cache" }
+    } catch {
+        Write-Warn2 "$Url 取不到（$($_.Exception.Message)）"
+        return $false
+    }
+    return ((Test-Path -LiteralPath $OutFile) -and ((Get-Item $OutFile).Length -gt 0))
+}
+
 # ---------------------------------------------------------------------------
 # 0) 先问"做什么"（同样排在装依赖与编译之前）
 # ---------------------------------------------------------------------------
@@ -229,11 +253,7 @@ if ($oneShotIn.Count -eq 0 -and -not $Yes -and -not $DryRun) {
         $askDir = Join-Path $env:TEMP ("xb-ask-" + [Guid]::NewGuid().ToString("N").Substring(0, 8))
         New-Item -ItemType Directory -Force -Path $askDir | Out-Null
         $askScript = Join-Path $askDir "deploy-master.ps1"
-        $askOk = $false
-        try {
-            Invoke-WebRequest -Uri $askUrl -OutFile $askScript -UseBasicParsing -TimeoutSec 120
-            $askOk = (Test-Path $askScript) -and ((Get-Item $askScript).Length -gt 0)
-        } catch { $askOk = $false }
+        $askOk = Save-RawScript $askUrl $askScript
         if ($askOk) {
             # 菜单与提示走控制台（直接显示给用户），答案走 stdout——只可能是 1~5。
             $ans = ""
@@ -282,13 +302,7 @@ if ($Uninstall -or $ResetPassword -or $ReleaseOnly) {
     $tmpd = Join-Path $env:TEMP ("xb-uninst-" + [Guid]::NewGuid().ToString("N").Substring(0, 8))
     New-Item -ItemType Directory -Force -Path $tmpd | Out-Null
     $deploy = Join-Path $tmpd "deploy-master.ps1"
-    $got = $false
-    try {
-        Invoke-WebRequest -Uri $rawUrl -OutFile $deploy -UseBasicParsing -TimeoutSec 120
-        $got = $true
-    } catch {
-        Write-Warn2 "$rawUrl 取不到（$($_.Exception.Message)）"
-    }
+    $got = Save-RawScript $rawUrl $deploy
     if (-not $got -or -not (Test-Path $deploy) -or (Get-Item $deploy).Length -eq 0) {
         Write-Err2 "取不到 $rawUrl（网络？-Ref 写错了？）"
         exit 1

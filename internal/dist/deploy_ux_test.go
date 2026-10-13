@@ -751,6 +751,31 @@ func TestScriptFetchBypassesCDNCache(t *testing.T) {
 		t.Error("修复标记清单不完整：\n" +
 			"  每一项都对应一个已修的真机缺陷，少一项就少一次「你拿到旧脚本」的提醒。")
 	}
+
+	// ③ Windows 入口同样要规避，而且**判据不能只落在 sh 那一侧**：ps1 入口也会
+	//    从 raw 取部署脚本（问菜单 / 卸载 / 重置密码 / 更新发布文件，四条路都是），
+	//    少了这一句，Windows 用户就拿到旧脚本——而 CI 跑在 Linux 上永远发现不了。
+	//
+	//    这一条是**实测**逼出来的：给部署脚本加 -ReleaseOnly 之后，按提交 SHA 取
+	//    raw 已经是新内容，而 `main` 这个可变引用隔了很久仍发旧内容，于是入口的
+	//    "先探再传"正确地拒绝了——但那是 CDN 的锅，不是代码的锅。
+	psEntry := readRepoFile(t, "../../install-master.ps1")
+	for _, want := range []string{
+		`-Headers @{ "Cache-Control" = "no-cache"; "Pragma" = "no-cache" }`,
+		`?nocache=" + [Guid]::NewGuid().ToString("N")`,
+	} {
+		if !strings.Contains(psEntry, want) {
+			t.Errorf("install-master.ps1 没有做 raw 的 CDN 缓存规避（缺 %q）：\n"+
+				"  症状与 sh 侧那次一模一样——仓库里明明修好了，Windows 用户取到的\n"+
+				"  却是旧脚本，于是反复失败在同一个地方，而 CI 全绿。", want)
+		}
+	}
+	// 两处下载（问菜单 / 早退通路）都必须走同一个带规避的函数。
+	// 只判"有这个函数"是不行的：其中一处改回裸 Invoke-WebRequest 照样全绿。
+	if strings.Count(psEntry, "Save-RawScript ") < 3 { // 1 处定义 + 2 处调用
+		t.Error("install-master.ps1 里 Save-RawScript 的调用点少于 2 处：\n" +
+			"  只要有一处仍用裸 Invoke-WebRequest，那条路就会拿到 CDN 缓存的旧脚本。")
+	}
 }
 
 // ---------------------------------------------------------------------------
