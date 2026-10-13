@@ -46,7 +46,7 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ip := RealIP(r)
-	now := time.Now()
+	now := nowFunc()
 
 	admin, err := h.Repo.GetAdminByUsername(req.Username)
 	if err != nil || admin == nil {

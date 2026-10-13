@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strconv"
 	"sync/atomic"
+	"time"
 
 	"github.com/koyoca/xb-probe/internal/alert"
 	"github.com/koyoca/xb-probe/internal/auth"
@@ -74,6 +75,15 @@ type Handler struct {
 
 // New 创建 Handler。
 func New(d Deps) *Handler { return &Handler{Deps: d} }
+
+// nowFunc 是"取现在"的接缝，生产路径恒为 time.Now。
+//
+// 存在的理由：登录锁定（9.3 的"5 次锁定 15 分钟"）是**时间相关**的行为契约，
+// 判据落在"锁定期内连正确口令也进不来、到期那一刻自动放行"这条行为链上。
+// 若直接读时钟，验它只能真的 sleep 15 分钟（没人会跑，于是这条断言长期缺失——
+// 文档 02 里它就一直是"第三类未补"）；写死成常量又会让 LockedUntil 的比较
+// 失去意义。留一个可替换的取时函数，才能把 T、T+899、T+900 三个点钉死。
+var nowFunc = time.Now
 
 // ---------------------------------------------------------------------------
 // 响应辅助
