@@ -1,0 +1,33 @@
+/* 示例外部主题样式。
+   CSP 为 style-src 'self'，因此样式必须写在本文件里，HTML 中不得内联 style="..."。 */
+
+:root {
+  color-scheme: light dark;
+  --bg: #f6f7f9;
+  --fg: #1c1e21;
+  --muted: #6b7280;
+  --card: #ffffff;
+  --line: #e5e7eb;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1115;
+    --fg: #e6e8eb;
+    --muted: #9aa3af;
+    --card: #171a20;
+    --line: #262b33;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0; padding: 24px; background: var(--bg); color: var(--fg);
+  font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+h1 { font-size: 20px; margin: 0 0 6px; }
+.muted { color: var(--muted); font-size: 12px; }
+
+.grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); margin-top: 16px; }
+.item { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+.item strong { font-weight: 500; }

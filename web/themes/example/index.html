@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Server Probe（示例外部主题）</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!--
+    外部主题（文档 5.3）：放在 themes/<name>/ 下，入口由 theme.json 的 entry 指定。
+
+    硬性约束：
+      - 只能调用 /api/public/v1/*，无权访问 /api/admin/v1/*。
+      - 静态文件服务严格限制在主题目录内（防路径穿越）。
+      - 响应头 CSP 为 default-src 'self'; script-src 'self'; style-src 'self'，
+        因此 **不能** 使用内联 <script> / <style> 或 style="..." 属性，
+        也不能加载任何 CDN 资源（图表请自行用 Canvas 绘制）。
+      - 渲染不可信字符串必须用 textContent，禁止 innerHTML 拼接（13.4.4）。
+  -->
+  <h1>示例外部主题</h1>
+  <p id="summary" class="muted"></p>
+  <div id="nodes" class="grid"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

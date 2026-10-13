@@ -1,0 +1,96 @@
+# probe-master 配置示例（对应设计文档第 10 章）
+# 默认路径：/etc/probe-master/master.yaml ；权限建议 0600。
+
+# 公开看板监听地址（建议只监听本机，前置 Caddy/Nginx 做 HTTPS；也可自己终结 TLS，见 tls 段）
+public_listen: "127.0.0.1:8080"
+
+# 管理端监听地址（可选）。强烈建议与管理端分离为不同源或加 IP 白名单（13.4.5）
+admin_listen: "127.0.0.1:8081"
+
+# 数据目录：probe.db / backups/ / dist/ / master.key 均在此
+# 权限必须为 0700（13.2 S13）
+data_dir: "/var/lib/probe-master"
+
+# 主题目录（外部主题 themes/<name>/）；内置主题已编入二进制
+themes_dir: "/var/lib/probe-master/themes"
+
+# 32 字节主密钥（AES-256-GCM，用于加密告警渠道凭证）。权限 0600，且与数据库分开备份
+master_key_file: "/etc/probe-master/master.key"
+
+# 仅当连接来源命中该列表时，才信任 X-Forwarded-For / X-Forwarded-Proto（13.2 S5）。
+# 直连时保持为空；不要填 0.0.0.0/0。
+trusted_proxies: []
+# trusted_proxies: ["127.0.0.1", "10.0.0.0/8"]
+
+# ---------------------------------------------------------------------------
+# 6.1 源分离：公开站与管理端用各自的域名（origin = scheme + host + port）
+# ---------------------------------------------------------------------------
+# 配了 origin 就会**自动推导** Host 白名单，也可用 public_hosts / admin_hosts
+# 显式覆盖（写成 主机名[:端口]，不带协议）。
+# 不在白名单里的 Host 请求会被拒绝为 421 Misdirected Request —— 便于第一时间
+# 发现"域名解析串了"或"反代把管理端暴露到公开域名"这类配置错误。
+# 默认端口 80/443 视为同一源（"a.com:443" 与 "a.com" 等价），:8443 是另一个源。
+#
+# 这两项只是**启动时的基线**：管理后台「系统设置 → 站点形态」里的
+# site.public_hosts / site.admin_hosts 非空时会顶替它们（改完即时生效，不用重启，
+# 启动日志会打印最终生效的清单与形态）。想只用一个域名同时访问公开看板与
+# /admin/，把「站点形态」设成「同站」即可，不必删掉这里的白名单。
+# public_origin: "https://status.example.com"
+# admin_origin: "https://admin.example.com"
+# public_hosts: ["status.example.com"]
+# admin_hosts: ["admin.example.com", "admin.example.com:8443"]
+
+# ---------------------------------------------------------------------------
+# 6.3 TLS 与证书：四种取证书方式任选其一
+# ---------------------------------------------------------------------------
+tls:
+  # none        不启用 TLS（交给前置 Caddy/Nginx，或本机/内网调试）
+  # files       自定义证书：直接读 cert_file / key_file（商业证书、企业内网 CA、
+  #             其他 ACME 客户端签发的都走这条；文件变更会热加载，无需重启）
+  # selfsigned  自签证书：本进程生成并落盘，SAN 覆盖域名与 **IP**。
+  #             这是"IP 证书"在私有地址下唯一可用的形态（公网 CA 不会给私有地址签证书）。
+  # acme        自动申请：内置零依赖 ACME v2 客户端，支持**域名证书**与
+  #             **RFC 8738 IP 证书**，挑战方式可选 http-01 / tls-alpn-01。
+  #             首张证书在后台申请（不阻塞启动），已缓存的证书先顶上。
+  mode: none
+
+  # 最低 TLS 版本：1.2 | 1.3（写错会直接报错，不会静默退化成 1.2）
+  min_version: "1.2"
+
+  # 证书与账户密钥的缓存目录（默认 <data_dir>/tls）；ACME 的账户私钥落在这里
+  # cache_dir: "/var/lib/probe-master/tls"
+
+  # ---- mode=files：自定义证书 ----
+  cert_file: ""
+  key_file: ""
+  # cert_file: "/etc/ssl/probe/fullchain.pem"
+  # key_file:  "/etc/ssl/probe/privkey.pem"
+
+  # ---- mode=selfsigned：自签证书 ----
+  # selfsigned:
+  #   hosts: ["probe.lan", "192.168.1.10", "::1"]   # 留空则 localhost / 127.0.0.1 / ::1
+  #   valid_days: 825                               # 1~3650
+
+  # ---- mode=acme：自动申请 ----
+  # acme:
+  #   email: "ops@example.com"        # 可选，用于 CA 的到期提醒
+  #   ca: "letsencrypt"               # letsencrypt | letsencrypt-staging | zerossl | <目录URL>
+  #   challenge: "http-01"            # http-01 | tls-alpn-01（后者不需要 80 端口）
+  #   http_addr: ":80"                # http-01 的明文监听；80 被反代占用、且反代会
+  #                                   # 转发 /.well-known/ 进来时写 off
+  #   domains: ["status.example.com"] # 域名证书（可多个）
+  #   ips: ["203.0.113.10"]           # IP 证书（RFC 8738，可多个）
+  #
+  # 兼容旧键：顶层 acme_domains 会并入 acme.domains（建议改用上面的写法）
+  acme_domains: []
+
+  # HSTS：**只在"确认走 HTTPS"的连接上下发**（明文 HTTP 上发它浏览器会直接忽略，
+  # 反而让人误以为已加固）。它与会话 Cookie 的 Secure 判定共用同一逻辑。
+  hsts:
+    enabled: true               # 默认 true
+    max_age: 31536000           # 秒，默认 1 年
+    include_subdomains: false   # 开启会强制**所有**子域走 HTTPS；确认没有只跑 HTTP 的子域再开
+    preload: false              # 提交 HSTS preload 列表才开（要求上面两项都满足）
+
+# 日志级别：debug | info | warn | error（输出到 stdout/journald，不含令牌与密码）
+log_level: "info"

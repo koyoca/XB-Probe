@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title id="page-title">Server Probe 管理后台</title>
+  <link rel="stylesheet" href="admin.css">
+</head>
+<body>
+
+<!-- 登录 -->
+<section id="login" class="login-wrap" hidden>
+  <form id="login-form" class="login-card" autocomplete="on">
+    <div class="login-head">
+      <h1 id="login-title">Server Probe</h1>
+      <button type="button" class="icon-btn tgl" aria-label="切换深浅色" title="切换深浅色">
+        <svg class="ico-moon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+        <svg class="ico-sun" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+      </button>
+    </div>
+    <p class="muted">管理后台登录</p>
+    <label>用户名<input id="login-user" name="username" type="text" autocomplete="username" required></label>
+    <label>密码<input id="login-pass" name="password" type="password" autocomplete="current-password" required></label>
+    <label id="totp-row" hidden>动态验证码<input id="login-totp" name="totp" type="text" inputmode="numeric" autocomplete="one-time-code"></label>
+    <button type="submit" class="primary">登录</button>
+    <p id="login-error" class="error" role="alert"></p>
+  </form>
+</section>
+
+<!-- 主体 -->
+<div id="app" hidden>
+  <header class="topbar">
+    <span class="brand" id="brand-title">Server Probe</span>
+    <nav class="topnav">
+      <button data-view="nodes" class="nav active">节点</button>
+      <button data-view="targets" class="nav">探测目标</button>
+      <button data-view="alerts" class="nav">告警</button>
+      <button data-view="settings" class="nav">系统</button>
+      <button data-view="account" class="nav">账户安全</button>
+      <button data-view="releases" class="nav">发布文件</button>
+      <button data-view="audit" class="nav">审计日志</button>
+    </nav>
+    <span class="spacer"></span>
+    <span id="whoami" class="muted"></span>
+    <button class="icon-btn tgl" type="button" aria-label="切换深浅色" title="切换深浅色">
+      <svg class="ico-moon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+      <svg class="ico-sun" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+    </button>
+    <button id="btn-password" class="ghost">改密</button>
+    <button id="btn-logout" class="ghost">登出</button>
+  </header>
+
+  <!-- 浮动提示容器：**必须在 <main> 之外**。
+       <main> 有 padding 与 max-width，且位于文档流中；提示要跟随视口而不是文档流，
+       同时用 fit-content 包住顶栏，避免另算一个顶栏高度常量（导航换行时会算错）。
+       置于 #app 内是为了随登录态一起显隐，不泄漏到登录页。 -->
+  <div id="toast-wrap" class="toast-wrap"><p id="toast" class="toast" hidden role="status"></p></div>
+
+  <main>
+    <!-- 节点列表（卡片网格） -->
+    <section id="view-nodes" class="view">
+      <div class="nodes-head">
+        <h2>节点</h2>
+        <div class="tabs" id="node-tabs" role="tablist" aria-label="按分组筛选节点"></div>
+        <span class="spacer"></span>
+        <input id="node-filter" type="search" placeholder="按名称 / IP / 分组 / 主机名筛选">
+        <button id="btn-refresh-nodes" class="ghost">刷新</button>
+        <button id="btn-new-node" class="primary">添加节点</button>
+      </div>
+
+      <section class="kpis" aria-label="节点汇总">
+        <div class="kpi">
+          <div class="kpi-head"><span class="kpi-ico" aria-hidden="true">▦</span>节点</div>
+          <div class="kpi-main">
+            <b id="kpi-online">0</b><span class="kpi-sep">/</span><span class="kpi-total" id="kpi-total">0</span>
+          </div>
+          <div class="kpi-sub" id="kpi-offline">—</div>
+        </div>
+
+        <div class="kpi">
+          <div class="kpi-head"><span class="kpi-ico" aria-hidden="true">◔</span>最忙节点</div>
+          <div class="kpi-main"><b id="kpi-busy-pct">—</b></div>
+          <div class="kpi-sub" id="kpi-busy-name">—</div>
+        </div>
+
+        <div class="kpi">
+          <div class="kpi-head"><span class="kpi-ico" aria-hidden="true">⇅</span>今日流量</div>
+          <div class="kpi-pair">
+            <div><span class="dir down" aria-label="下行">↓</span><b id="kpi-today-rx">—</b></div>
+            <div><span class="dir up" aria-label="上行">↑</span><b id="kpi-today-tx">—</b></div>
+          </div>
+          <div class="kpi-sub">
+            周期流量 <span class="dir down" aria-label="周期下行">↓</span><span id="kpi-period-rx">—</span>
+            <span class="dir up" aria-label="周期上行">↑</span><span id="kpi-period-tx">—</span>
+          </div>
+        </div>
+
+        <div class="kpi">
+          <div class="kpi-head"><span class="kpi-ico" aria-hidden="true">◷</span>实时网速</div>
+          <div class="kpi-pair">
+            <div><span class="dir down" aria-label="下行">↓</span><b id="kpi-rx">—</b></div>
+            <div><span class="dir up" aria-label="上行">↑</span><b id="kpi-tx">—</b></div>
+          </div>
+          <canvas class="spark" id="spark" role="img" aria-label="聚合下行带宽趋势"></canvas>
+        </div>
+
+        <!-- 月费合计：与公开看板同一口径（按支付周期折算成月均后求和）。
+             archived 节点不计入，与公开看板的"公开可见"口径不同——这里是
+             "这台机器每月还要花多少钱"，归档等于已经不用了。 -->
+        <div class="kpi">
+          <div class="kpi-head"><span class="kpi-ico" aria-hidden="true">$</span>月费合计</div>
+          <div class="kpi-main"><b id="kpi-fee">—</b></div>
+          <div class="kpi-sub" id="kpi-fee-currency">—</div>
+        </div>
+      </section>
+
+      <div id="new-node-form" class="panel form-sm" hidden>
+        <label>名称<input id="new-node-name" type="text" maxlength="64" placeholder="例如 vps-hk-1"></label>
+        <label>分组<input id="new-node-group" type="text" maxlength="32" placeholder="例如 香港"></label>
+        <div class="row">
+          <button id="btn-create-node" class="primary">创建并生成安装命令</button>
+          <button id="btn-cancel-node" class="ghost">取消</button>
+        </div>
+      </div>
+
+      <div class="nodes" id="nodes" aria-live="polite"></div>
+      <p id="nodes-empty" class="nodes-empty" hidden>还没有节点。点右上角「添加节点」生成安装命令。</p>
+      <p class="muted">点击卡片进入详情（改名 / 分组 / 排序 / 公开可见性 / 归档 / 删除 / 令牌 / 计费 / 探测目标）。
+        卡片顺序由排序值决定，不会随状态变化跳动。</p>
+    </section>
+
+    <!-- 节点详情 -->
+    <section id="view-node" class="view" hidden>
+      <div class="row">
+        <button id="btn-back-nodes" class="ghost">← 返回列表</button>
+        <h2 id="node-title">节点</h2>
+        <span class="spacer"></span>
+        <button id="btn-reload-node" class="ghost">刷新</button>
+      </div>
+      <div id="node-body"></div>
+    </section>
+
+    <!-- 探测目标 -->
+    <section id="view-targets" class="view" hidden>
+      <div class="row">
+        <h2>探测目标</h2>
+        <span class="spacer"></span>
+        <button id="btn-refresh-targets" class="ghost">刷新</button>
+        <button id="btn-new-target" class="primary">新增目标</button>
+      </div>
+      <p class="muted note">全局目标会下发给所有节点，节点专属目标只下发给被选中的节点；
+        修改后调度器会在 15 秒内同步到各节点（Agent 按上报响应里的 config_version 拉取新配置）。
+        点「编辑」可修改名称 / 运营商 / 主机 / 端口 / 方式 / 超时与启停；编辑专属目标时
+        还能把同一套参数一次同步到多个节点。</p>
+      <div id="new-target-form" class="panel form-sm" hidden>
+        <label>名称<input id="t-name" type="text" maxlength="32" placeholder="例如 电信-上海"></label>
+        <label>分组<select id="t-carrier">
+          <option value="telecom">电信</option><option value="unicom">联通</option>
+          <option value="mobile">移动</option><option value="custom" selected>自定义</option>
+        </select></label>
+        <label>方式<select id="t-method">
+          <option value="tcp" selected>TCP 握手</option><option value="icmp">ICMP Echo</option>
+        </select></label>
+        <label>主机<input id="t-host" type="text" placeholder="example.com 或 1.1.1.1"></label>
+        <label>端口<input id="t-port" type="number" min="1" max="65535" value="443"></label>
+        <label>超时(ms)<input id="t-timeout" type="number" min="100" max="30000" value="2000"></label>
+        <label>范围<select id="t-scope-mode">
+          <option value="global" selected>全局（下发给所有节点）</option>
+          <option value="nodes">指定节点（可多选）</option>
+        </select></label>
+        <div class="full">
+          <p class="muted" id="t-scope-hint">全局目标下发给所有节点；需要只让部分机器探测时选「指定节点」。</p>
+          <div id="t-nodes" class="scope-list" hidden></div>
+        </div>
+        <div class="row">
+          <button id="btn-create-target" class="primary">创建</button>
+          <button id="btn-cancel-target" class="ghost">取消</button>
+        </div>
+      </div>
+      <div class="table-wrap"><table id="targets-table">
+        <thead><tr><th>ID</th><th>名称</th><th>范围</th><th>分组</th><th>目标</th><th>方式</th><th>超时</th><th>状态</th><th>操作</th></tr></thead>
+        <tbody></tbody>
+      </table></div>
+    </section>
+
+    <!-- 告警 -->
+    <section id="view-alerts" class="view" hidden>
+      <div class="row"><h2>告警渠道</h2><span class="spacer"></span>
+        <button id="btn-refresh-alerts" class="ghost">刷新</button>
+        <button id="btn-new-channel" class="primary">新增渠道</button></div>
+      <div id="new-channel-form" class="panel form-sm" hidden>
+        <label>类型<select id="c-type">
+          <option value="telegram" selected>Telegram</option><option value="smtp">SMTP 邮件</option>
+        </select></label>
+        <label>名称<input id="c-name" type="text" maxlength="48" placeholder="例如 运维TG"></label>
+        <div id="c-tg">
+          <label>Bot Token<input id="c-bot-token" type="password" placeholder="123456:ABC..."></label>
+          <label>Chat ID<input id="c-chat-id" type="text" placeholder="-1001234567890 或 @channel"></label>
+          <label>解析模式<select id="c-parse-mode">
+            <option value="HTML" selected>HTML</option><option value="MarkdownV2">MarkdownV2</option>
+          </select></label>
+        </div>
+        <div id="c-smtp" hidden>
+          <label>SMTP 主机<input id="c-host" type="text" placeholder="smtp.example.com"></label>
+          <label>端口<input id="c-port" type="number" value="587"></label>
+          <label>用户名<input id="c-user" type="text"></label>
+          <label>密码<input id="c-pass" type="password"></label>
+          <label>发件人<input id="c-from" type="text" placeholder="probe@example.com"></label>
+          <label>收件人（逗号分隔）<input id="c-to" type="text" placeholder="me@example.com"></label>
+        </div>
+        <div class="row">
+          <button id="btn-create-channel" class="primary">创建</button>
+          <button id="btn-cancel-channel" class="ghost">取消</button>
+        </div>
+      </div>
+      <div class="table-wrap"><table id="channels-table">
+        <thead><tr><th>ID</th><th>类型</th><th>名称</th><th>启用</th><th>操作</th></tr></thead>
+        <tbody></tbody>
+      </table></div>
+
+      <h2>告警规则</h2>
+      <p class="muted note">阈值按百分比，留空表示不启用该项；冷却时间为同一 (节点,事件类型) 的最小发送间隔。</p>
+      <div class="table-wrap"><table id="rules-table">
+        <thead><tr><th>类型</th><th>启用</th><th>阈值(%)</th><th>持续时间(s)</th><th>确认次数</th><th>流量梯级(%)</th><th>冷却(s)</th></tr></thead>
+        <tbody></tbody>
+      </table></div>
+      <div class="row"><span class="spacer"></span><button id="btn-save-rules" class="primary">保存规则</button></div>
+
+      <h2>告警事件</h2>
+      <div class="table-wrap"><table id="events-table">
+        <thead><tr><th>时间</th><th>节点</th><th>类型</th><th>级别</th><th>消息</th><th>已送达</th></tr></thead>
+        <tbody></tbody>
+      </table></div>
+      <div class="pager" id="events-pager"></div>
+    </section>
+
+    <!-- 系统 -->
+    <section id="view-settings" class="view" hidden>
+      <h2>系统设置</h2>
+      <p class="muted note">只有白名单内的设置项可改。改动会影响 Agent 的 config_version，节点会自动重新拉取。</p>
+      <div id="settings-form"></div>
+      <div class="row"><span class="spacer"></span>
+        <button id="btn-reload-settings" class="ghost">重新加载</button>
+        <button id="btn-save-settings" class="primary">保存设置</button></div>
+
+      <h2>主题</h2>
+      <div class="row">
+        <label>当前主题<select id="theme-select"></select></label>
+        <button id="btn-apply-theme" class="primary">切换</button>
+        <span class="muted">切换立即生效，无需重启。第三方主题与注入脚本等同可信代码。</span>
+      </div>
+
+      <h2>外部心跳</h2>
+      <p class="muted note">Master 每 5 分钟向你配置的地址发一次 GET，用于让第三方监控（healthchecks.io / Uptime Kuma 等）在 Master 整体失联时报警。地址在「外部与高级」分组的 heartbeat_url 里配置。</p>
+      <div id="heartbeat-box"></div>
+
+      <h2>数据库备份</h2>
+      <p class="muted note">备份用 <code>VACUUM INTO</code> 在线生成一致快照，不需要停服。自动备份按下方「每日自动备份 / 备份时刻 / 保留份数」三项设置每日执行一次，只保留最新的若干份。</p>
+      <div id="backup-box"></div>
+      <div class="row"><button id="btn-backup" class="primary">立即备份</button>
+        <button id="btn-refresh-backups" class="ghost">刷新列表</button>
+        <span class="muted">备份文件含全部令牌哈希与会话，请与 <code>master.key</code> 分开保存（本目录权限 0700）。</span></div>
+
+      <h2>存储统计</h2>
+      <div id="storage-box"></div>
+    </section>
+
+    <!-- 账户安全 -->
+    <section id="view-account" class="view" hidden>
+      <h2>账户安全</h2>
+      <p class="muted note">两步验证（TOTP）可为登录增加一层保护。启用后登录需要输入认证器 App 里的 6 位动态码；手机不可用时可用一次性恢复码登录。</p>
+      <div id="totp-box"></div>
+      <div id="recovery-box"></div>
+    </section>
+
+    <!-- 发布文件 -->
+    <section id="view-releases" class="view" hidden>
+      <div class="row"><h2>Agent 发布文件</h2><span class="spacer"></span>
+        <button id="btn-refresh-releases" class="ghost">刷新</button></div>
+      <p class="muted note">放在 Master 的 data_dir/dist/&lt;version&gt;/ 下。缺失平台会在下方列出。</p>
+      <div id="releases-box"></div>
+    </section>
+
+    <!-- 审计日志 -->
+    <section id="view-audit" class="view" hidden>
+      <div class="row"><h2>审计日志</h2><span class="spacer"></span>
+        <button id="btn-refresh-audit" class="ghost">刷新</button></div>
+      <div class="table-wrap"><table id="audit-table">
+        <thead><tr><th>时间</th><th>操作者</th><th>动作</th><th title="被操作实体的类型与 ID，例如 node:1 表示节点 #1">对象</th><th>来源 IP</th></tr></thead>
+        <tbody></tbody>
+      </table></div>
+      <div class="pager" id="audit-pager"></div>
+      <p class="muted">说明："对象"列显示被操作实体的类型与 ID（如 node:1 表示节点 #1，billing.update 等无明确对象的动作会显示节点 ID）。</p>
+    </section>
+  </main>
+</div>
+
+<!-- 改密 -->
+<section id="password-modal" class="login-wrap" hidden>
+  <form id="password-form" class="login-card">
+    <h1>修改密码</h1>
+    <label>原密码<input id="pw-old" type="password" autocomplete="current-password" required></label>
+    <label>新密码（至少 12 位）<input id="pw-new" type="password" autocomplete="new-password" minlength="12" required></label>
+    <div class="row"><button type="submit" class="primary">保存</button>
+      <button type="button" id="btn-cancel-password" class="ghost">取消</button></div>
+    <p id="password-error" class="error" role="alert"></p>
+  </form>
+</section>
+
+<!-- 探测目标编辑：站内模态框，替代原来的 window.prompt("新的目标名称")。
+     原来只有一个"改名"按钮 + 原生弹窗，既没法改运营商/主机/端口/方式/超时，
+     也没法一次改多个字段——改三个字段就要弹三次原生框。 -->
+<section id="target-modal" class="modal-wrap" hidden>
+  <form id="target-form" class="modal-card">
+    <h2 id="target-modal-title">编辑探测目标</h2>
+    <p class="muted">修改「主机 / 端口 / 探测方式」会让这条目标的历史延迟曲线与新的
+      探测对象混在一起（同一 target_id）。若这两个值代表的是另一台机器，
+      更稳妥的做法是新建一条目标并停用旧的。</p>
+    <div class="form-grid">
+      <label>名称<input id="tm-name" type="text" maxlength="32" placeholder="例如 电信-上海"></label>
+      <label>运营商分组<select id="tm-carrier">
+        <option value="telecom">电信</option><option value="unicom">联通</option>
+        <option value="mobile">移动</option><option value="custom">自定义</option>
+      </select></label>
+      <label>探测方式<select id="tm-method">
+        <option value="tcp">TCP 握手</option><option value="icmp">ICMP Echo</option>
+      </select></label>
+      <label>主机<input id="tm-host" type="text" placeholder="example.com 或 1.1.1.1"></label>
+      <label>端口<input id="tm-port" type="number" min="1" max="65535"></label>
+      <label>超时(ms)<input id="tm-timeout" type="number" min="100" max="30000"></label>
+      <label class="check-row full"><input id="tm-enabled" type="checkbox"> 启用该目标（停用后不再下发给 Agent）</label>
+      <label class="check-row full"><input id="tm-show-in-bars" type="checkbox" checked> 在公开看板点阵中显示该目标（仅影响访客可见性，不影响探测）</label>
+      <div class="full" id="tm-scope-box">
+        <p class="muted" id="tm-scope"></p>
+        <div id="tm-nodes" class="scope-list" hidden></div>
+      </div>
+    </div>
+    <div class="row">
+      <button type="submit" id="btn-save-target" class="primary">保存</button>
+      <button type="button" id="btn-close-target" class="ghost">取消</button>
+    </div>
+    <p id="target-modal-error" class="error" role="alert"></p>
+  </form>
+</section>
+
+<script src="admin.js"></script>
+</body>
+</html>

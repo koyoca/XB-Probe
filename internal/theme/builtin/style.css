@@ -1,0 +1,838 @@
+/* 内置主题：黑白灰阶 + 深浅双模式，无任何外部资源。
+   CSP 为 script-src 'self'; style-src 'self'，因此样式全部集中在本文件，
+   HTML 里不允许出现 style="..." 内联属性（JS 里对 element.style 赋值可以）。
+
+   ── 风格来源 ─────────────────────────────────────────────────────────
+   本版配色移植自 monitor-theme-default（React 参考主题，theme.json 自述
+   "内置状态面板，黑白配色"）。它的核心主张有三条，本文件逐条落实：
+
+   1. **灰阶承载信息**。全套 UI 只有一个色相——墨的深浅。图表的多序列
+      靠"明度色阶（--c1…--c5）+ 虚线线型"区分；进度条不按阈值变绿变红，
+      "长度本身就是信息"；连 destructive（到期已过）也只是更深的灰。
+      唯一的彩色是 --online 那颗在线状态点（oklch(0.6 .16 150)），它享受
+      3:1 对卡片的对比度，且与离线灰点的间距对红绿色盲也可辨。
+   2. **边框即层次**。卡片与页面同色（亮色下都是白），层次全部交给
+      1px 边框：没有阴影（--shadow 已删）、没有投影浮起，hover 也只是
+      把边框描深一档（--line → --line-strong）。
+   3. **数字是第一公民**。所有会随轮询跳动的数字一律 tabular-nums
+      （见下方 b/.num… 那条规则），避免 0.99→1.00 推挤布局。
+
+   色值由参考主题的 oklch() 逐一换算成 sRGB（chroma=0 的灰阶转换是无损的），
+   换算脚本与原始 oklch 值见 docs/01 的本轮记录。
+
+   布局稳定性（本文件的主要约束）：
+   节点卡片每 3 秒会被重新赋值一次，任何"某个字段有值才渲染、没值就不渲染"
+   的写法都会让卡片高度变化，从而在视觉上"跳动"。因此所有可变内容都放在
+   固定高度的行里，缺值时渲染占位符而不是省略行。 */
+
+:root {
+  color-scheme: light dark;
+  /* 墨与纸：亮色下页面与卡片同为白色，层次交给边框 */
+  --bg: #ffffff;
+  --fg: #121212;          /* oklch(0.18 0 0)，正文/进度条填充 */
+  --muted: #868686;       /* oklch(0.62 0 0)，脚注/占位层级 */
+  --muted-2: #696969;     /* oklch(0.52 0 0)，标签/次级文字 */
+  --card: #ffffff;
+  --line: #dedede;        /* oklch(0.90 0 0)，卡片描边 */
+  --line-strong: #868686; /* oklch(0.62 0 0)，hover / 十字线 */
+  /* 灰阶色阶：图表与点阵的"墨量"刻度。--c1 最重（最醒目），--c5 最淡。
+     暗色下整体反转（--c1 变成近白），"越严重墨越重"的语义在两种模式下
+     都成立。 */
+  --c1: #2e2e2e;          /* oklch(0.30) */
+  --c2: #555555;          /* oklch(0.45) */
+  --c3: #7a7a7a;          /* oklch(0.58) */
+  --c4: #9e9e9e;          /* oklch(0.70) */
+  --c5: #c4c4c4;          /* oklch(0.82) */
+  --online: #139948;      /* oklch(0.60 0.16 150)，唯一的彩色 */
+  --offline: #696969;     /* 离线不是红：不再上报的机器只是"变旧了" */
+  --accent: var(--fg);    /* 进度条填充色 = 前景墨色（单色，长度即信息） */
+  --ok: #868686;          /* 下行曲线的灰（参考主题的 --ok 语义） */
+  --warn: #525252;        /* oklch(0.44)，一周内到期 */
+  --bad: #2e2e2e;         /* destructive = 更深的灰，不做红 */
+  --chip: #f0f0f0;        /* oklch(0.955)，胶囊/轨道底色 */
+  --track: #f0f0f0;
+  --dir-down: var(--ok);  /* 曲线里的下行=灰、上行=重墨（spark 同源） */
+  --dir-up: var(--c1);
+}
+/* ── 手动主题切换 ───────────────────────────────────────────────────
+   data-theme 由 app.js 写在 <html> 上：'light'/'dark' 是访客的显式选择，
+   不写则跟随系统。因此暗色变量要出现在两个入口里，**两块必须逐行一致**，
+   改任何一处都要同步另一处（internal/theme/mono_test.go 有护栏）。 */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0a0a0a;          /* oklch(0.145) */
+  --fg: #f8f8f8;          /* oklch(0.98) */
+  --muted: #717171;       /* oklch(0.55) */
+  --muted-2: #9e9e9e;     /* oklch(0.70) */
+  --card: #161616;        /* oklch(0.20) */
+  --line: rgba(255, 255, 255, .12);
+  --line-strong: #717171; /* oklch(0.55) */
+  --c1: #eeeeee;          /* oklch(0.95)，最重墨=最亮 */
+  --c2: #c4c4c4;          /* oklch(0.82) */
+  --c3: #989898;          /* oklch(0.68) */
+  --c4: #6f6f6f;          /* oklch(0.54) */
+  --c5: #4d4d4d;          /* oklch(0.42)，最淡=最接近底色 */
+  --online: #3fc168;      /* oklch(0.72 0.17 150)，暗底上提亮 */
+  --offline: #717171;
+  --accent: var(--fg);
+  --ok: #868686;
+  --warn: #bababa;        /* oklch(0.79)，暗底反转：warn 比 muted 文字更亮 */
+  --bad: #eeeeee;         /* destructive 同样反转成亮灰 */
+  --chip: #262626;        /* oklch(0.27) */
+  --track: #262626;
+  --dir-down: var(--ok);
+  --dir-up: var(--c1);
+}
+@media (prefers-color-scheme: dark) {
+  /* 跟随系统的暗色：访客显式选了亮色（data-theme="light"）时不生效。
+     ⚠️ 与上面的 :root[data-theme="dark"] 逐行一致，改一处同步另一处。 */
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #0a0a0a;
+    --fg: #f8f8f8;
+    --muted: #717171;
+    --muted-2: #9e9e9e;
+    --card: #161616;
+    --line: rgba(255, 255, 255, .12);
+    --line-strong: #717171;
+    --c1: #eeeeee;
+    --c2: #c4c4c4;
+    --c3: #989898;
+    --c4: #6f6f6f;
+    --c5: #4d4d4d;
+    --online: #3fc168;
+    --offline: #717171;
+    --accent: var(--fg);
+    --ok: #868686;
+    --warn: #bababa;
+    --bad: #eeeeee;
+    --chip: #262626;
+    --track: #262626;
+    --dir-down: var(--ok);
+    --dir-up: var(--c1);
+  }
+}
+
+* { box-sizing: border-box; }
+
+/* 滚动条宽度恒占位（参考主题同款）：从"内容超一屏的详情页"返回列表时，
+   页面宽度不会因滚动条出现/消失而左右跳一下。 */
+html { scrollbar-gutter: stable; }
+
+/* hidden 属性必须真正等于"不显示"。
+   UA 样式表里的 `[hidden] { display: none }` 特异性只有 (0,1,0)，
+   任何作者样式里的 display 声明都能把它盖掉，元素就会"设了 hidden 却还在"。
+   管理后台就因为 .login-wrap{display:flex} 盖掉 [hidden] 而整页登不进去
+   （详见 internal/api/adminui/admin.css 里的同一段注释）。
+   本主题目前恰好没踩到（#list-view / #detail-view / #empty-tip 都没有
+   display 声明），但新增组件时极易复发，这里一并兜住。 */
+[hidden] { display: none !important; }
+
+/* 勾选/单选的选中墨色：用前景墨色，不用浏览器默认蓝——原生 accent 蓝是
+   黑白灰阶界面里唯一的彩色来源。accent-color 可继承，写在通用控件上即可
+   覆盖全站（后台 admin.css 有同一条规则，改要一起改）。 */
+input[type="checkbox"], input[type="radio"] { accent-color: var(--fg); }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+        "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+.wrap { max-width: 1480px; margin: 0 auto; padding: 20px 20px 40px; }
+
+/* 所有数字等宽，避免 0.99→1.00 这类变化把布局推来推去 */
+b, .num, .kpi, .nb-v, .net-row b, .stat .v {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+.muted { color: var(--muted); font-size: 12px; }
+.center { text-align: center; }
+.spacer { flex: 1; }
+
+/* ---------------------------------------------------------------- 顶栏 */
+/* 吸顶 + 毛玻璃（参考主题的 header 版式）：整条通栏贴出视口顶部，
+   下滚时内容从半透明底色后穿过。背景用 --bg 的 80% 而不是纯色——
+   纯色会让"吸顶"这件事失去视觉线索，卡片滑到边界时像是被裁掉。 */
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--bg); /* 不支持 color-mix 的浏览器退化为实色，只是没有毛玻璃 */
+  background: color-mix(in srgb, var(--bg) 82%, transparent);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--line);
+}
+.topbar-in {
+  max-width: 1480px;
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 20px;
+  flex-wrap: wrap;
+}
+
+/* 右侧一组全部**垂直居中**对齐：早期用 align-items: baseline，
+   文本与带边框的按钮各按自己的基线落位，"更新于 17:10:26"和按钮、
+   站名三者看起来高高低低。居中 + 统一字号后整条水平线是稳的。 */
+.topbar-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+/* 更新时间：小一号的辅助文本，等宽数字让"17:10:26"每秒跳动不抖宽。 */
+.topbar-right .muted {
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.topbar-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  /* 图标组与左侧文本之间稍多留一点：图标自带 1px 边框，与等宽数字
+     贴到 10px 时视觉间距会显得比实际窄。 */
+  margin-left: 2px;
+}
+.site-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: .2px;
+  white-space: nowrap;
+}
+
+/* 图标按钮：主题切换（太阳/月亮）与管理后台入口共用的小方钮。
+   28px 见方、1px 边框、图标用 currentColor 描边——与整体"边框即层次"
+   的语言一致，不再用文字按钮挤在顶栏里。 */
+.icon-btn {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  color: var(--muted-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  cursor: pointer;
+  font: inherit;
+}
+.icon-btn:hover {
+  color: var(--fg);
+  border-color: var(--line-strong);
+  background: var(--chip);
+}
+.icon-btn svg { display: block; }
+a.icon-btn { text-decoration: none; }
+
+/* 主题切换：亮色页面显示月亮（点它去暗色），暗色页面显示太阳。
+   图标切换完全由 CSS 完成（JS 不碰 DOM 图标），因此跟随系统、
+   ?theme= 覆盖与手动切换三种来源都能正确显示。 */
+.tgl .ico-sun { display: none; }
+.tgl .ico-moon { display: block; }
+:root[data-theme="dark"] .tgl .ico-sun { display: block; }
+:root[data-theme="dark"] .tgl .ico-moon { display: none; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .tgl .ico-sun { display: block; }
+  :root:not([data-theme="light"]) .tgl .ico-moon { display: none; }
+}
+
+.tabs { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+
+.tab {
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted-2);
+  font: inherit;
+  font-size: 13px;
+  padding: 5px 11px;
+  border-radius: 999px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background .12s ease, color .12s ease;
+}
+.tab:hover { background: var(--chip); color: var(--fg); }
+/* 选中的页签 = 反白墨块（参考主题的 Tab 组件）：bg-primary + text-primary-foreground。
+   灰阶主题里"最重的墨"就是最强的选中信号，不再靠边框和阴影。 */
+.tab[aria-selected="true"] {
+  background: var(--fg);
+  color: var(--bg);
+  border-color: transparent;
+  font-weight: 600;
+}
+.tab[aria-selected="true"] .n { color: var(--bg); opacity: .65; }
+.tab .n { color: var(--muted); font-weight: 400; margin-left: 5px; }
+
+/* 详情页内的标签切换（资源监控 / 探测延迟）。 */
+.tab-bar { display: inline-flex; gap: 4px; background: var(--chip); padding: 3px; border-radius: 8px; }
+.tab-bar .tab {
+  border: 0; background: transparent; color: var(--muted-2); font: inherit;
+  font-size: 13px; padding: 5px 12px; border-radius: 6px; cursor: pointer;
+}
+.tab-bar .tab:hover { color: var(--fg); }
+.tab-bar .tab.active { background: var(--fg); color: var(--bg); font-weight: 600; }
+
+/* ---------------------------------------------------------------- 汇总卡 */
+
+.kpis {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 14px;
+}
+/* 卡片可被 settings.public.cards 逐张关掉，列数必须跟着实际张数走。
+   若把列数写死成 5，关掉两张后末尾会空出两格（与 .dinfo 早期那个坑同源）。
+   前端按可见张数给 .kpis 挂上 n<N> 类，这里只负责"每行正好铺满"。 */
+.kpis.n1 { grid-template-columns: minmax(0, 1fr); }
+.kpis.n2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.kpis.n3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.kpis.n4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.kpis.n5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+/* 窄屏优先按实际张数降列，但不超过 3 / 2 / 1 —— 手机上一行五张卡没法看。
+   每次覆盖都必须把 .kpis.nN 一起列出来：`.kpis`(0,1,0) 的特异性低于
+   `.kpis.n5`(0,2,0)，只写 `.kpis` 是盖不住的。 */
+@media (max-width: 1200px) {
+  .kpis.n4, .kpis.n5 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 860px) {
+  .kpis.n3, .kpis.n4, .kpis.n5 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 560px) {
+  .kpis, .kpis.n1, .kpis.n2, .kpis.n3, .kpis.n4, .kpis.n5 {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.kpi {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 14px;
+  /* 固定高度：汇总卡也会被轮询更新，不能因为内容变化而伸缩 */
+  min-height: 96px;
+  display: flex;
+  flex-direction: column;
+}
+
+.kpi-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  height: 18px;
+}
+.kpi-ico { font-size: 12px; opacity: .8; }
+
+.kpi-main {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  margin-top: 6px;
+  height: 28px;
+}
+.kpi-main b { font-size: 22px; font-weight: 650; }
+.kpi-sep { color: var(--muted); font-size: 15px; }
+.kpi-total { color: var(--muted); font-size: 15px; }
+
+.kpi-pair {
+  display: flex;
+  gap: 14px;
+  margin-top: 6px;
+  height: 28px;
+  align-items: baseline;
+}
+.kpi-pair b { font-size: 16px; font-weight: 600; }
+
+.kpi-sub {
+  margin-top: auto;
+  color: var(--muted);
+  font-size: 12px;
+  height: 16px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 方向箭头：次级墨色。参考主题里 ↑↓ 一律 muted（信息在数字里，箭头只是路标）；
+   彩色箭头是曲线该干的事——曲线里下行=灰、上行=重墨，见 --dir-down/--dir-up。 */
+.dir { margin-right: 3px; font-weight: 600; color: var(--muted-2); }
+
+.spark { width: 100%; height: 22px; margin-top: 2px; display: block; }
+
+/* ---------------------------------------------------------------- 节点网格 */
+
+.grid { display: grid; gap: 12px; }
+
+.nodes {
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  /* 行高等高：卡片内容结构固定，因此行高恒定，不会出现"错位" */
+  grid-auto-rows: 1fr;
+  align-items: stretch;
+}
+
+.node {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 14px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  height: 100%;
+  transition: border-color .12s ease;
+}
+.node:hover { border-color: var(--line-strong); }
+.node:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.node[hidden] { display: none; }
+
+/* 头部：状态点 + 名称 + 状态胶囊。
+   状态色只有两档：在线=唯一的彩色点，其余全部灰阶——参考主题的理由是
+   "不再上报的机器，页面上的数字仍是真实的、只是不再新鲜"，用变灰表达
+   比用红色告警更诚实。探测延迟的三档（ok/warn/bad）则用灰阶色阶表达：
+   越严重墨越重（--c1 最重）。 */
+.n-head { display: flex; align-items: center; gap: 7px; height: 20px; }
+.dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--muted); flex: 0 0 auto;
+}
+.dot.online  { background: var(--online); }
+.dot.warning { background: var(--offline); }
+.dot.offline { background: var(--offline); }
+.dot.archived{ background: var(--muted); }
+/* 探测延迟的状态色：灰阶三档，"越严重墨越重" */
+.dot.ok      { background: var(--c3); }
+.dot.warn    { background: var(--c2); }
+.dot.bad     { background: var(--c1); }
+.dot.unknown { background: var(--muted); }
+
+.n-name {
+  font-weight: 600;
+  font-size: 13.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.n-chip {
+  margin-left: auto;
+  flex: 0 0 auto;
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--chip);
+  color: var(--muted-2);
+  white-space: nowrap;
+}
+.n-chip.online  { color: var(--online); }
+.n-chip.warning { color: var(--muted-2); }
+.n-chip.offline { color: var(--muted-2); }
+
+/* 副行：系统信息 + 到期 */
+.n-sub {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 16px;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+.n-os {
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;
+}
+.n-exp { margin-left: auto; flex: 0 0 auto; white-space: nowrap; }
+.n-exp.warn { color: var(--warn); }
+.n-exp.bad  { color: var(--bad); }
+
+/* 协议栈标识（IPv4/IPv6）：恒占位，节点没有协议栈信息时是 "—"。
+   放在 .n-sub 里、紧跟系统信息，右侧的到期文案靠 margin-left:auto 顶到行尾。
+   灰阶化：v4/v6 靠字母本身区分。参考主题没有这个组件，照它的逻辑
+   "字母即信息，颜色留给唯一的在线点"，不做蓝/绿分色。 */.n-badges { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 4px; }
+.n-badges-none { color: var(--muted); opacity: .65; }
+.ip-badge {
+  display: inline-block;
+  padding: 0 5px;
+  height: 15px;
+  line-height: 15px;
+  border-radius: 3px;
+  font-size: 10px;
+  letter-spacing: .02em;
+  color: var(--muted-2);
+  background: var(--card);
+  border: 1px solid var(--line);
+  white-space: nowrap;
+}
+
+/* 国旗标识：固定在 20×14 的一格里，未设置国家时留空。
+   固定宽度是刻意的——否则"这个节点有没有国家"会让同一行的名称起点左右跳动，
+   而卡片位置固定是本项目的硬约束（README「布局稳定性」）。
+   旗帜本身是 JS 生成的内联 SVG（见 app.js 的 FLAGS 表）：不引外链、不用 data:，
+   因此不受 CSP 影响；这里只负责尺寸与那圈细描边。 */
+.n-flag {
+  flex: 0 0 auto;
+  width: 20px; height: 14px;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.n-flag svg { display: block; border-radius: 2px; box-shadow: 0 0 0 1px rgba(15, 23, 42, .18); }
+/* 详情页标题旁稍大一点：那里的字号比卡片大，同尺寸会显得小气。 */
+.detail-head .n-flag { width: 26px; height: 18px; }
+.detail-head .n-flag svg { width: 26px; height: 18px; }
+
+/* ---- 节点卡片上的"延迟 / 丢包"点阵进度条 ----
+   每条探测目标两行小点（上行延迟、下行丢包），每个点代表时间窗里约 45 分钟。
+   颜色由 JS 按 RTT/丢包级别写入（CSSOM，不受 CSP 的 style-src 限制）。 */
+.n-lat {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--line);
+  /* 高度恒定（等高卡片的硬约束）：标题(13) + 间隙(6) + 4×行(37) + 3×间隙(6)
+     + 上内边距(8) + 顶部分隔线(1) = 194。行内每段的高度都在下面显式钉住
+     （.lb-title 行高 13 / .lb-head 15 / .lb-dots 8 / .lb-row 间隙 3），
+     改任何一处都要同步这里的算式。目标多于 4 条时在块内滚动（细滚动条），
+     少于 4 条由 JS 补占位行。 */
+  height: calc(13px + 6px + 4 * 37px + 3 * 6px + 8px + 1px);
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+.lb-title {
+  font-size: 10.5px;
+  line-height: 13px;
+  color: var(--muted);
+  letter-spacing: .02em;
+}
+/* 一条目标都没有（未配置 / 从未上报）时的占位文案。 */
+.lb-empty {
+  color: var(--muted);
+  opacity: .65;
+  font-size: 11.5px;
+  height: 15px;
+  line-height: 15px;
+}
+.lb-row { display: flex; flex-direction: column; gap: 3px; }
+.lb-row-ph .lb-name { color: var(--muted); font-weight: 400; }
+.lb-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 11.5px;
+  height: 15px;
+}
+.lb-name { color: var(--fg); font-weight: 600; }
+.lb-val { margin-left: auto; font-weight: 600; font-variant-numeric: tabular-nums; }
+.lb-val.muted-v { color: var(--muted); font-weight: 400; }
+.lb-loss { margin-left: 12px; }
+.lb-dots {
+  display: flex;
+  gap: 2px;
+  height: 8px;
+  align-items: stretch;
+}
+.lb-dot {
+  flex: 1 1 0;
+  min-width: 2px;
+  border-radius: 2px;
+  background: var(--track);
+}
+.lb-dot.none { background: var(--track); opacity: .6; }
+
+/* 四条指标：标签行(16) + 进度条(6) + 说明行(14) —— 每块固定 36px + 间距 */
+.n-bars { display: flex; flex-direction: column; gap: 7px; }
+
+.nb { display: block; }
+.nb-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  height: 16px;
+  font-size: 12px;
+  color: var(--muted-2);
+}
+.nb-k { white-space: nowrap; }
+.nb-k b { color: var(--fg); font-weight: 600; }
+.nb-v { margin-left: auto; color: var(--fg); font-weight: 600; }
+
+.track {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--track);
+  overflow: hidden;
+  margin-top: 3px;
+}
+/* 填充 = 前景墨色，单色。参考主题 Meter 组件的原话："Monochrome, since
+   the length of the bar carries the message"——条长到哪，用量就到哪，
+   不再按 75%/90% 阈值变橙变红（app.js 仍会挂 warn/bad 类，这里**故意**
+   不给它们任何规则；阈值分级留给数字与到期文案那两个真正需要它的地方）。 */
+.track i {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: 3px;
+  background: var(--accent);
+  /* 明确只过渡宽度，避免宽度抖动时触发其他属性的动画 */
+  transition: width .35s ease;
+}
+
+/* 说明行固定高度占位：没有值时渲染 "—"，绝不省略整行 */
+.nb-sub {
+  height: 14px;
+  line-height: 14px;
+  margin-top: 2px;
+  font-size: 11.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 续费价格（月均）：与实时速率同行、靠右，行高仍钉 16px（等高约束）。
+   不带分隔线——上下都有分隔块（.n-lat / .n-net 各自有 border-top），
+   再画一条就成"斑马线"了。开关（public.cards 的 node_fee）全局生效，
+   所有卡片同时显隐，等高约束不被破坏。 */
+.n-fee {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  height: 16px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.fee-k { white-space: nowrap; }
+.fee-v {
+  margin-left: auto;
+  color: var(--fg);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* 底部：实时速率 + 周期累计，两行固定高度 */
+.n-net {
+  margin-top: auto;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+/* 第一行 = 速率（左）+ 续费价格（右）。行高 17px 钉死：
+   node_fee / node_net 四种开关组合下卡片高度都不变。 */
+.net-line {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  height: 17px;
+}
+.net-line .net-row { flex: 1 1 auto; min-width: 0; }
+.net-row {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  height: 17px;
+  font-size: 12px;
+}
+.net-row b { font-weight: 600; }
+.net-row .dir { font-size: 11px; }
+.net-row.totals { color: var(--muted-2); font-size: 11.5px; height: 15px; }
+.net-row.totals b { font-weight: 500; }
+/* 上行那块推到右侧，形成两列对齐 */
+.net-row .up-gap { margin-left: 12px; }
+
+/* ---------------------------------------------------------------- 详情 */
+
+.detail-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin: 12px 0 10px;
+  flex-wrap: wrap;
+}
+.detail-head h2 { margin: 0; font-size: 18px; letter-spacing: .2px; }
+
+.chip {
+  font-size: 11.5px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: var(--chip);
+  color: var(--muted-2);
+  white-space: nowrap;
+}
+.chip.online  { color: var(--online); }
+.chip.warning { color: var(--muted-2); }
+.chip.offline { color: var(--muted-2); }
+.chip.archived{ color: var(--muted); }
+.chip.warn { color: var(--warn); }
+.chip.bad  { color: var(--bad); }
+
+/* ---------------------------------------------------------------- 信息条 */
+/* 6 格 × 2 项的紧凑信息块，替代原先 14 张等宽小卡。
+   格子之间用 1px 的父背景色缝隙做分隔线，比给每个格子描边干净。 */
+.dinfo {
+  display: grid;
+  /* 6 个信息卡固定 3 列 × 2 行，auto-fit 在宽屏下会排成 4+2 而留空两格 */
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  background: var(--line);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+  margin-bottom: 18px;
+}
+/* 信息小卡可被 settings.public.cards 逐张关掉，列数同样要跟着张数走。
+   4 张排 2×2、6 张排 3×2；5 张只能排成 3+2，末行留一格——这是 5 这个
+   数量本身的限制，不是布局缺陷（1~4 与 6 都能铺满）。 */
+.dinfo.d1 { grid-template-columns: minmax(0, 1fr); }
+.dinfo.d2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.dinfo.d3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.dinfo.d4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.dinfo.d5 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.dinfo.d6 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+/* 窄屏覆盖必须放在 .dinfo.dN 之后：`.dinfo.d6` 的特异性(0,2,0)高于
+   `.dinfo`(0,1,0)，写在前面会被它盖掉，宽屏列数一路带到手机上。 */
+@media (max-width: 920px) {
+  .dinfo, .dinfo.d2, .dinfo.d3, .dinfo.d4, .dinfo.d5, .dinfo.d6 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .dinfo.d1 { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 560px) {
+  .dinfo, .dinfo.d1, .dinfo.d2, .dinfo.d3, .dinfo.d4, .dinfo.d5, .dinfo.d6 {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.di { background: var(--card); padding: 10px 14px; }
+.di-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  height: 21px;
+  font-size: 13px;
+}
+.di-row:last-child { border-top: 1px dotted var(--line); margin-top: 3px; padding-top: 3px; }
+.di-k { color: var(--muted); font-size: 12px; flex: 0 0 auto; }
+.di-v {
+  margin-left: auto; font-weight: 600; text-align: right;
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* ---------------------------------------------------------------- 图标块 */
+
+.ghost {
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: var(--fg);
+  font: inherit;
+  font-size: 12.5px;
+  padding: 5px 11px;
+  border-radius: 7px;
+  cursor: pointer;
+}
+.ghost:hover { border-color: var(--line-strong); }
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+  gap: 10px;
+  margin-bottom: 18px;
+}
+.cards-3 { grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
+
+.stat {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 10px 12px;
+  min-height: 62px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+.stat .k { color: var(--muted); font-size: 11.5px; display: flex; align-items: center; gap: 6px; }
+.stat .k .dot { flex: 0 0 auto; }
+.stat .v { font-size: 16px; font-weight: 600; margin-top: 4px; }
+
+/* ---------------------------------------------------------------- 图表图例开关 */
+.legend {
+  display: flex; flex-wrap: wrap; gap: 8px;
+  margin-top: 8px; padding: 0 2px;
+}
+.legend .item {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 10px; border-radius: 999px;
+  background: var(--chip); color: var(--fg); font-size: 12px;
+  cursor: pointer; user-select: none;
+  border: 1px solid transparent;
+  transition: opacity .12s ease, border-color .12s ease;
+}
+.legend .item:hover { border-color: var(--line-strong); }
+.legend .item.off { opacity: .45; text-decoration: line-through; }
+.legend .dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  flex: 0 0 auto;
+}
+.stat .sub { color: var(--muted); font-size: 11.5px; margin-top: 3px; }
+
+.section-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 20px 0 10px;
+}
+.section-head h3 { margin: 0; font-size: 14px; font-weight: 600; }
+.inline { font-size: 12.5px; color: var(--muted-2); display: inline-flex; gap: 6px; align-items: center; }
+select {
+  font: inherit;
+  font-size: 12.5px;
+  padding: 4px 8px;
+  border-radius: 7px;
+  border: 1px solid var(--line-strong);
+  background: var(--card);
+  color: var(--fg);
+}
+
+/* 曲线卡片：单列整行排布。参考图就是这个版式——时间序列横向铺满才看得出趋势，
+   两列并排会把每条曲线压到 600px 上下，24 小时的点全挤在一起。
+   高度用 clamp 随视口走，避免在超宽屏上变成一条 14:1 的细缝。 */
+.charts { grid-template-columns: 1fr; }
+
+.chart-card {
+  margin: 0;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px 6px;
+}
+.chart-card figcaption {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 6px;
+  color: var(--muted-2);
+  font-size: 12px;
+}
+.chart-card .cap-t { font-weight: 600; color: var(--fg); white-space: nowrap; }
+.chart-card .cap-m {
+  margin-left: auto; color: var(--muted); font-size: 11.5px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.chart-card.wide { grid-column: 1 / -1; }
+.chart { width: 100%; height: clamp(150px, 13vw, 230px); display: block; }
+.chart-card.wide .chart { height: clamp(180px, 16vw, 280px); }
+
+footer.muted { margin-top: 26px; text-align: center; line-height: 1.7; }
+/* 页脚刷新间隔选择：与提示文字同行、右对齐，避免多一行占高度 */
+.foot-bar { display: flex; align-items: center; justify-content: flex-end; gap: 12px; }
+.foot-refresh { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; }
+.foot-refresh select { width: auto; padding: 2px 6px; font-size: 12px; }

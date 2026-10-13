@@ -1,0 +1,868 @@
+/* 管理后台样式（与公开看板同一套黑白灰阶视觉语言）。
+   2026-10-12 起按用户决策与公开看板统一风格——这推翻了设计文档 5.2 早期
+   "后台固定配色"的设定；两份 CSS 仍是**有意重复**的两份文件（embed 路径不同、
+   公开看板属于可替换主题，后台不随 theme.active 切换），但**调色板必须逐行一致**：
+   改颜色要同时改 internal/theme/builtin/style.css 与本文件（护栏会比对两边的暗色块）。
+   CSP 为 script-src 'self'; style-src 'self'，因此所有样式必须放在本文件里，
+   HTML 中不得出现 style="..." 属性或内联 <style>。 */
+
+:root {
+  color-scheme: light dark;
+  /* 以下色值与公开看板 style.css 的 :root **逐项同值**（护栏
+     internal/theme/unified_theme_test.go 的 TestAdminSharesPublicPalette 直接比对取值）。
+     改颜色请改公开看板那份、再同步这里，不要在这里另调一个色号——
+     早期后台自己调了一套"看起来差不多"的灰（#121212/#8d8d8d/…），
+     结果两个站并排时深浅、边框、在线绿都不一致。
+     后台多出的两个变量是**别名**，不另立色值：
+       --panel     = --card  （后台历史命名，公开看板叫 --card）
+       --accent-fg = --bg    （反白按钮上的文字，深色下自动跟着翻转） */
+  --bg: #ffffff;
+  --fg: #121212;          /* oklch(0.18 0 0)，正文/进度条填充 */
+  --muted: #868686;       /* oklch(0.62 0 0)，脚注/占位层级 */
+  --muted-2: #696969;     /* oklch(0.52 0 0)，标签/次级文字 */
+  --card: #ffffff;
+  --panel: var(--card);
+  --line: #dedede;        /* oklch(0.90 0 0)，卡片描边 */
+  --line-strong: #868686; /* oklch(0.62 0 0)，hover / 十字线 */
+  /* 灰阶色阶 --c1…--c5：最重墨 → 最淡，图表多序列与"越严重墨越重"共用。 */
+  --c1: #2e2e2e;          /* oklch(0.30) */
+  --c2: #555555;          /* oklch(0.45) */
+  --c3: #7a7a7a;          /* oklch(0.58) */
+  --c4: #9e9e9e;          /* oklch(0.70) */
+  --c5: #c4c4c4;          /* oklch(0.82) */
+  --online: #139948;      /* oklch(0.60 0.16 150)，唯一的彩色 */
+  --offline: #696969;     /* 离线不是红：不再上报的机器只是"变旧了" */
+  --accent: var(--fg);    /* 主按钮填充=前景墨色，配反白文字 */
+  --accent-fg: var(--bg);
+  --ok: #868686;          /* 语义色同样灰阶化（越严重墨越重） */
+  --warn: #525252;        /* oklch(0.44)，一周内到期 */
+  --bad: #2e2e2e;         /* destructive = 更深的灰，不做红 */
+  --chip: #f0f0f0;
+  --track: #f0f0f0;
+  --dir-down: var(--ok);
+  --dir-up: var(--c1);
+}
+
+/* 暗色块出现在**两处**（:root[data-theme="dark"] 与下面的媒体查询），
+   两份必须逐行一致——手动切换写 data-theme，跟随系统走媒体查询。
+   internal/theme 的护栏会逐行比对这两块（含与公开看板同值），改一处必须同步另一处。 */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0a0a0a;
+  --fg: #f8f8f8;
+  --muted: #717171;
+  --muted-2: #9e9e9e;
+  --card: #161616;
+  --panel: var(--card);
+  --line: rgba(255, 255, 255, .12);
+  --line-strong: #717171;
+  --c1: #eeeeee;          /* oklch(0.95)，最重墨=最亮 */
+  --c2: #c4c4c4;
+  --c3: #989898;
+  --c4: #6f6f6f;
+  --c5: #4d4d4d;          /* oklch(0.42)，最淡=最接近底色 */
+  --online: #3fc168;
+  --offline: #717171;
+  --accent: var(--fg);
+  --accent-fg: var(--bg);
+  --ok: #868686;
+  --warn: #bababa;
+  --bad: #eeeeee;
+  --chip: #262626;
+  --track: #262626;
+  --dir-down: var(--ok);
+  --dir-up: var(--c1);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #0a0a0a;
+    --fg: #f8f8f8;
+    --muted: #717171;
+    --muted-2: #9e9e9e;
+    --card: #161616;
+    --panel: var(--card);
+    --line: rgba(255, 255, 255, .12);
+    --line-strong: #717171;
+    --c1: #eeeeee;
+    --c2: #c4c4c4;
+    --c3: #989898;
+    --c4: #6f6f6f;
+    --c5: #4d4d4d;
+    --online: #3fc168;
+    --offline: #717171;
+    --accent: var(--fg);
+    --accent-fg: var(--bg);
+    --ok: #868686;
+    --warn: #bababa;
+    --bad: #eeeeee;
+    --chip: #262626;
+    --track: #262626;
+    --dir-down: var(--ok);
+    --dir-up: var(--c1);
+  }
+}
+
+* { box-sizing: border-box; }
+
+/* hidden 属性必须真正等于"不显示"。
+   ---------------------------------------------------------------------------
+   浏览器把 [hidden] 实现为 UA 样式表里的 `[hidden] { display: none }`，
+   特异性只有 (0,1,0)，**任何**作者样式里的 `display: flex/grid/block`
+   都能把它盖掉，元素就会"设了 hidden 却还在"。
+
+   本项目踩过一次，代价是后台直接登不进去：#login 与 #password-modal 都带
+   .login-wrap，而 .login-wrap 是 `position: fixed; inset: 0; z-index: 50`
+   的全屏遮罩。登录本身是成功的（会话 Cookie 正常签发、/auth/me 返回 200），
+   但遮罩始终盖在最上层不肯消失，用户看到的永远是登录框 —— 现象就是"登录不上"。
+   #totp-row 是同一个坑的轻量版（`label { display: block }` 让它常驻显示）。
+
+   所以这里用 !important 兜底，让 [hidden] 永远说得算。
+   下面各组件里的 `.node[hidden]` 之类规则已被本行涵盖，保留仅为局部可读性。 */
+[hidden] { display: none !important; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 13px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+a { color: var(--accent); }
+h1 { font-size: 17px; margin: 0 0 10px; }
+h2 { font-size: 16px; margin: 24px 0 10px; font-weight: 600; letter-spacing: .2px; }
+h2:first-child { margin-top: 0; }
+h3 { font-size: 13px; margin: 0 0 8px; color: var(--muted); font-weight: 500; }
+.muted { color: var(--muted); }
+.note { color: var(--muted); margin: 0 0 10px; }
+.error { color: var(--bad); min-height: 18px; margin: 6px 0 0; }
+.spacer { flex: 1 1 auto; }
+
+/* ---------- 顶栏 ---------- */
+/* 背景用 --bg（与页面同色，像公开看板那样"通栏吸顶"），层次交给下边框；
+   面板/卡片才用 --panel(=--card)。这样暗色下页面是 #0a0a0a、卡片是 #161616，
+   与公开看板的空间观感一致——若顶栏用 --panel，暗色下会浮出一条比页面浅的横带。 */
+.topbar {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 20px; background: var(--bg);
+  border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 10;
+  flex-wrap: wrap;
+}
+.brand { font-weight: 600; letter-spacing: .2px; }
+.topnav { display: flex; gap: 2px; flex-wrap: wrap; }
+.nav {
+  background: transparent; border: 0; color: var(--muted);
+  padding: 6px 10px; border-radius: 6px; cursor: pointer; font: inherit;
+}
+.nav:hover { background: var(--chip); color: var(--fg); }
+/* 当前页签 = 反白墨块（与公开看板的选中页签同一语言）：最重的墨就是最强的选中信号。 */
+.nav.active { background: var(--fg); color: var(--bg); font-weight: 600; }
+.nav:focus-visible { outline: 2px solid var(--fg); outline-offset: 1px; }
+
+main { padding: 20px; max-width: 1400px; margin: 0 auto; }
+
+/* ---------- 控件 ---------- */
+button { font: inherit; cursor: pointer; }
+button.primary {
+  /* 主按钮 = 反白墨块：accent 已是前景墨色，无需再读 --accent-fg 之外的值。 */
+  background: var(--accent); color: var(--accent-fg); border: 1px solid var(--accent);
+  padding: 6px 12px; border-radius: 6px;
+}
+button.primary:hover { opacity: .85; }
+button.ghost {
+  background: transparent; color: var(--fg); border: 1px solid var(--line-strong);
+  padding: 6px 12px; border-radius: 6px;
+}
+button.ghost:hover { background: var(--chip); }
+button.danger { border-color: var(--bad); color: var(--bad); }
+button.mini { padding: 2px 8px; border-radius: 5px; font-size: 12px; }
+button:disabled { opacity: .5; cursor: not-allowed; }
+button:focus-visible { outline: 2px solid var(--fg); outline-offset: 1px; }
+
+input, select, textarea {
+  font: inherit; color: var(--fg); background: var(--bg);
+  border: 1px solid var(--line-strong); border-radius: 6px; padding: 5px 8px;
+  min-height: 34px; box-sizing: border-box;
+}
+input:focus, select:focus, textarea:focus {
+  outline: 2px solid var(--fg); outline-offset: 1px; border-color: var(--fg);
+}
+input[type="checkbox"] { width: auto; }
+/* 勾选/单选的选中墨色：用前景墨色，不用浏览器默认蓝——原生 accent 蓝是
+   黑白灰阶界面里唯一的彩色来源（设置页的开关组、告警渠道勾选等都会踩到）。
+   accent-color 可继承，写在通用控件上即可覆盖全站。 */
+input[type="checkbox"], input[type="radio"] { accent-color: var(--fg); }
+
+/* ---------- 自绘日期选择器（节点计费的到期日） ---------- */
+/* 原生 <input type="date"> 的弹层"清除/今天"在 Chromium 源码里是硬编码的
+   #0078D4（calendar_picker.css 的 .clear-button/.today-button），页面上的
+   任何 CSS 都改不到，只能自己画。格数恒 6×7，弹层高度不随月份跳。 */
+.date-wrap { position: relative; }
+/* 输入框在 .date-wrap 里、不是 label 的直接子元素，吃不到
+   `label > input` 的全宽规则，这里单独补齐（外观与其它字段一致）。 */
+.date-wrap input { display: block; width: 100%; margin-top: 4px; color: var(--fg); }
+.date-pop {
+  position: absolute; top: calc(100% + 4px); left: 0; z-index: 40;
+  width: 224px; padding: 10px;
+  background: var(--card); border: 1px solid var(--line-strong); border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .14);
+}
+.dp-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+.dp-month { font-size: 12.5px; font-weight: 600; color: var(--fg); }
+.dp-nav, .dp-act {
+  font: inherit; font-size: 12px; color: var(--muted-2); background: transparent;
+  border: 1px solid var(--line); border-radius: 5px; cursor: pointer;
+}
+.dp-nav { width: 22px; height: 22px; padding: 0; }
+.dp-act { height: 22px; padding: 0 8px; }
+.dp-nav:hover, .dp-act:hover { border-color: var(--line-strong); color: var(--fg); }
+.dp-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
+.dp-wd { height: 18px; font-size: 10.5px; line-height: 18px; text-align: center; color: var(--muted); }
+.dp-day {
+  height: 26px; font: inherit; font-size: 12px; color: var(--fg);
+  background: transparent; border: none; border-radius: 5px; cursor: pointer;
+  font-variant-numeric: tabular-nums;
+}
+.dp-day:hover { background: var(--chip); }
+/* 今天描边、选中反白墨块：与导航页签同一套选中语言 */
+.dp-day.today { border: 1px solid var(--line-strong); }
+.dp-day.sel { background: var(--fg); color: var(--bg); font-weight: 600; }
+.dp-foot { display: flex; align-items: center; justify-content: space-between; margin-top: 8px; }
+label { display: block; margin: 0 0 10px; color: var(--muted); }
+label > input, label > select, label > textarea { display: block; width: 100%; margin-top: 4px; color: var(--fg); }
+
+.row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.row h2 { margin: 0; }
+/* label 默认是块级 + 下外边距，塞进 flex 行里会把行撑高、按钮与它错位
+   （"当前主题"那一行就是这样）。行内的 label 改成水平排布并去掉外边距。 */
+.row > label {
+  margin: 0; display: inline-flex; align-items: center; gap: 8px; color: var(--muted);
+}
+.row > label > input, .row > label > select, .row > label > textarea {
+  margin-top: 0; width: auto;
+}
+#node-filter { min-width: 220px; }
+.panel {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  padding: 14px 16px; margin: 0 0 16px;
+}
+.panel .row { margin-top: 6px; }
+
+/* 只含一两个字段的新建表单保持窄宽度：拉满整行反而要来回扫视。
+   编辑/计费这类多字段表单则用 .form-grid 铺满并分列。 */
+.panel.form-sm { max-width: 620px; }
+
+/* .form-grid：多字段编辑表单的列布局。
+   -------------------------------------------------------------------------
+   这些 label 以前是纵向逐个堆叠在一个 max-width:720px 的窄条里，
+   在 1200px 宽的页面上右半边整片空白——就是"节点详情 UI 错乱"的观感来源。
+   现在改成自适应列 + 输入框底对齐：字段少时一行多个，窄屏自动退化成单列。 */
+.form-grid {
+  display: grid;
+  gap: 0 16px;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  align-items: start;
+}
+.form-grid > label { margin: 0 0 10px; }
+/* 复选框行与按钮行占满整行，不参与分列 */
+.form-grid > .row, .form-grid > .full { grid-column: 1 / -1; }
+
+/* .field-pair：一个 label 里并排"数值 + 单位"两个控件（如流量额度 100 GB）。
+   label > input 的 width:100% 会让两个控件各占一整行、把字段撑成两倍高；
+   这里改成 flex，数值框吃掉剩余宽度、单位框按内容固定宽度，
+   视觉上仍然是一个字段。 */
+.field-pair { display: flex; gap: 6px; margin-top: 4px; }
+.field-pair > input { flex: 1 1 auto; min-width: 0; margin-top: 0; }
+.field-pair > select { flex: 0 0 auto; width: auto; margin-top: 0; }
+
+/* label 内的补充说明（如到期时间旁边的"当前：…"）。
+   label > input 之后紧跟 span，默认会被当成行内文本挤在输入框右侧，这里改成
+   独占一行的小字，避免在窄列里把输入框压变形。 */
+label > .hint { display: block; margin-top: 3px; font-size: 12px; color: var(--muted); }
+.form-grid > .muted { margin: 0 0 12px; font-size: 12px; }
+
+/* ---------- 表格 ---------- */
+.table-wrap { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th { color: var(--muted); font-weight: 500; background: var(--chip); }
+tbody tr:last-child td { border-bottom: 0; }
+tbody tr:hover { background: var(--chip); }
+td.wrap { white-space: normal; max-width: 420px; }
+
+/* 存储统计表：行数与估算占用右对齐，便于扫读数量级。 */
+.storage-table th:nth-child(3), .storage-table th:nth-child(4),
+.storage-table td:nth-child(3), .storage-table td:nth-child(4) { text-align: right; }
+
+.storage-table td:last-child {
+  text-align: right;
+  font-variant-numeric: tabular-nums;}
+#storage-box .cards { margin-bottom: 14px; }
+#storage-box .card .k { cursor: help; }
+
+/* 外部心跳状态卡。
+   与存储统计卡同构（都复用 .cards/.card），只多两个细节规则：
+   - 心跳地址与错误信息可能很长，要能换行且不撑破网格；
+   - 错误文本用 --bad 着色，一眼能看出是异常而不是普通说明。 */
+#heartbeat-box .cards { margin-bottom: 10px; }
+#heartbeat-box .card .k { cursor: help; }
+#heartbeat-box .row { margin-top: 6px; }
+#heartbeat-box label { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.mono-wrap {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px; color: var(--muted-2);
+  word-break: break-all; white-space: normal; line-height: 1.5;
+}
+.err-text { color: var(--bad); }
+
+/* 节点详情「资产与系统信息」分组卡片 */
+.info-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 18px;
+}
+.info-group {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+.info-group h4 {
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .3px;
+}
+.info-group dl { margin: 0; }
+.info-group dt {
+  color: var(--muted);
+  font-size: 11.5px;
+  margin-top: 8px;
+}
+.info-group dt:first-child { margin-top: 0; }
+.info-group dd {
+  margin: 2px 0 0;
+  font-size: 13px;
+  font-weight: 500;
+  word-break: break-word;
+}
+.info-group dd.muted { color: var(--muted); font-weight: 400; }
+@media (max-width: 1100px) { .info-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 640px)  { .info-grid { grid-template-columns: 1fr; } }
+
+/* ---------- 卡片与徽章 ---------- */
+/* minmax(180px) 在 1200px 宽的页面上正好排 6 列——运行态有 12 张卡，
+   6 列刚好两行整齐；原来 5 列会剩下孤零零的两张挂在第三行。 */
+.cards { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); }
+.cards > .card.full { grid-column: 1 / -1; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; min-width: 0; }
+.section-gap { margin-top: 16px; }
+.card .k {
+  color: var(--muted); font-size: 12px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.card .v {
+  font-size: 17px; margin-top: 4px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.chip {
+  display: inline-block; padding: 1px 7px; border-radius: 999px;
+  background: var(--chip); color: var(--muted); font-size: 12px;
+}
+.chip.online { color: var(--online); }
+.chip.warning { color: var(--warn); }
+.chip.offline { color: var(--muted-2); }
+.chip.archived { color: var(--muted); }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); margin-right: 6px; }
+/* 与公开看板同一规则：唯一的彩色是 --online；离线/疑似离线都是灰点。 */
+.dot.online { background: var(--online); }
+.dot.warning { background: var(--offline); }
+.dot.offline { background: var(--offline); }
+.dot.ok { background: var(--c3); }
+.dot.warn { background: var(--c2); }
+.dot.bad { background: var(--c1); }
+.dot.unknown { background: var(--muted); }
+
+/* 延迟明细小卡与图例（后台详情页「探测延迟」标签）。 */
+.cards-3 { grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
+.stat {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 9px;
+  padding: 10px 12px; min-height: 62px;
+  display: flex; flex-direction: column; justify-content: center;
+}
+.stat .k { color: var(--muted); font-size: 11.5px; display: flex; align-items: center; gap: 6px; }
+.stat .k .dot { flex: 0 0 auto; margin-right: 0; }
+.stat .v { font-size: 16px; font-weight: 600; margin-top: 4px; }
+.stat .sub { color: var(--muted); font-size: 11.5px; margin-top: 3px; }
+.legend {
+  display: flex; flex-wrap: wrap; gap: 8px;
+  margin-top: 8px; padding: 0 2px;
+}
+.legend .item {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 10px; border-radius: 999px;
+  background: var(--chip); color: var(--fg); font-size: 12px;
+  border: 1px solid transparent;
+  cursor: pointer; user-select: none;
+}
+.legend .item:hover { border-color: var(--line-strong); }
+/* 图例可点击开关折线：关闭态与公开看板同款（半透明 + 删除线） */
+.legend .item.off { opacity: .45; text-decoration: line-through; }
+.legend .item .dot { margin-right: 0; }
+
+.bar { height: 6px; background: var(--chip); border-radius: 3px; overflow: hidden; margin-top: 6px; }
+.bar > i { display: block; height: 100%; background: var(--accent); }
+
+.grid2 { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+.kv { display: grid; grid-template-columns: 120px 1fr; gap: 5px 10px; font-size: 12px; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; word-break: break-all; }
+
+pre.code {
+  background: var(--chip); border: 1px solid var(--line); border-radius: 8px;
+  padding: 10px 12px; overflow-x: auto; margin: 6px 0 0; font-size: 12px;
+}
+
+/* ---------- 设置表单 ---------- */
+/* .lbl 固定两行高度，保证同一行四个输入框严格落在同一条水平线上。
+   只为"标签字数是 1 行还是 2 行"这一件事，不能让整个表单错落。 */
+.settings-section { margin-bottom: 22px; }
+.settings-section h4 {
+  margin: 0 0 10px;
+  font-size: 13px;
+  color: var(--muted);
+  font-weight: 600;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 6px;
+}
+.settings-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); align-items: start; }
+.settings-grid label { margin: 0; min-width: 0; }
+.settings-grid .lbl {
+  display: block; min-height: 36px; line-height: 1.4;
+  overflow: hidden;
+}
+
+/* ---------- 站内模态框 ----------
+   用于替换 window.prompt / window.confirm 这类浏览器原生弹窗：原生弹窗不可
+   样式化、在深色主题下刺眼、且一次只能问一个问题（改个目标要连问好几遍）。
+   遮罩用半透明黑而不是 --bg 实心色，与登录页的 .login-wrap 区分开——
+   登录是"整页接管"，这里是"浮在页面上"。 */
+.modal-wrap {
+  position: fixed; inset: 0; z-index: 60;
+  background: rgba(8, 10, 14, .55);
+  display: flex; align-items: center; justify-content: center; padding: 20px;
+}
+.modal-card {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+  padding: 18px 20px; width: 100%; max-width: 620px;
+  max-height: 86vh; overflow: auto;
+}
+.modal-card h2 { margin: 0 0 4px; font-size: 16px; }
+.modal-card > .muted { margin: 0 0 14px; font-size: 12px; line-height: 1.5; }
+.modal-card .form-grid > label { margin-bottom: 10px; }
+.modal-card .row { margin-top: 4px; }
+/* 复选框字段：label 是纵向 flex，勾选框不该被 input{width:100%} 拉长 */
+.check-row { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.check-row > input { width: auto; margin: 0; }
+
+/* ---------- 设置项：卡片勾选组（public.cards）----------
+   .settings-grid 是 auto-fill 多列网格，勾选组要独占一整行，因此用
+   grid-column: 1 / -1 而不是简单地放在网格里当一格。 */
+.setting-wide { grid-column: 1 / -1; margin: 0 0 4px; }
+.setting-wide > .lbl { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+/* 多行设置项（IP 白名单）：textarea 独占一行，等宽字体方便对齐 IP 列表 */
+.settings-grid textarea {
+  width: 100%; min-height: 120px; resize: vertical;
+  font-family: ui-monospace, Consolas, monospace; font-size: 12.5px;
+  line-height: 1.6;
+}
+.card-picker { display: flex; flex-wrap: wrap; gap: 8px; }
+.card-picker .grp {
+  width: 100%; font-size: 12px; color: var(--muted);
+  margin: 4px 0 -2px;
+}
+.card-picker label {
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px;
+  background: var(--panel); font-size: 12.5px; cursor: pointer;
+}
+.card-picker label:hover { border-color: var(--line-strong); }
+.card-picker label.on { border-color: var(--accent); }
+.card-picker label input { margin: 0; }
+.card-picker label.off span { color: var(--muted); }
+
+/* ---------- 登录 ---------- */
+.login-wrap {
+  position: fixed; inset: 0; background: var(--bg);
+  display: flex; align-items: center; justify-content: center; padding: 20px; z-index: 50;
+}
+.login-card {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+  padding: 22px; width: 100%; max-width: 340px;
+}
+.login-card p { margin: 0 0 14px; }
+/* 登录卡标题行：站名在左、深浅切换图标在右（登录态下顶栏也有同一颗按钮，
+   两处共用同一套 .icon-btn/.tgl 规则与同一段 JS）。 */
+.login-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 10px; margin-bottom: 2px;
+}
+.login-head h1 { margin: 0; }
+
+/* 图标按钮：主题切换（太阳/月亮），与公开看板同款的小方钮。 */
+.icon-btn {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  color: var(--muted-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  cursor: pointer;
+  font: inherit;
+}
+.icon-btn:hover {
+  color: var(--fg);
+  border-color: var(--line-strong);
+  background: var(--chip);
+}
+.icon-btn svg { display: block; }
+
+/* 主题切换：亮色显示月亮（点它去暗色），暗色显示太阳。
+   与公开看板同一套规则，CSS 完成切换、JS 只更新无障碍标签。 */
+.tgl .ico-sun { display: none; }
+.tgl .ico-moon { display: block; }
+:root[data-theme="dark"] .tgl .ico-sun { display: block; }
+:root[data-theme="dark"] .tgl .ico-moon { display: none; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .tgl .ico-sun { display: block; }
+  :root:not([data-theme="light"]) .tgl .ico-moon { display: none; }
+}
+
+/* ---------- 浮动提示（保存结果 / 报错）----------
+   为什么不做成原来的"文档流里的一条横条"：
+   系统设置页现在有 20+ 个字段、四五个板块，保存按钮在**页面最底部**。
+   横条挂在 <main> 顶部，管理员点完保存视线停在底部，提示在视口之外——
+   表现为"点了保存没有任何反应"，于是反复点击、甚至以为保存失败。
+   提示必须跟随视口，而不是跟随文档流。
+
+   .toast-wrap 定位在**顶栏下方**而不是右上角：后台的提交按钮分布在页面各处
+   （列表页右上、详情页右上、各表单下方），固定右上角会盖住"添加节点 / 刷新"
+   这些按钮，正好挡住用户下一个要点的东西。横贯顶部的条状提示不遮任何操作区。 */
+.toast-wrap {
+  position: fixed; left: 0; right: 0;
+  /* 顶栏是 sticky 的，其高度随导航换行变化，用 fit-content 容器当锚点
+     比在这里猜一个固定像素值可靠（猜错就会盖住或悬空）。 */
+  top: var(--toast-top, 48px);
+  z-index: 40;
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  padding: 0 20px;
+  /* 容器只是定位壳：空白区域必须让点击穿透到下面的页面，
+     否则这层"看不见的区域"会吃掉页面上半屏的点击。 */
+  pointer-events: none;
+}
+.toast-wrap:empty { display: none; }
+.toast {
+  pointer-events: auto;
+  max-width: min(720px, 100%);
+  background: var(--panel); border: 1px solid var(--line-strong); border-left: 3px solid var(--fg);
+  border-radius: 8px; padding: 8px 14px;
+  animation: toast-in .16s ease-out;
+}
+.toast.err { border-left-color: var(--bad); }
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(-6px); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* 历史曲线：单列整行（与公开看板同版式）。
+   时间序列铺满宽度才看得出趋势；高度用 clamp 跟随视口，
+   否则超宽屏上会拉成一条十几比一的细缝。 */
+.grid { display: grid; gap: 12px; }
+.charts { display: grid; gap: 12px; grid-template-columns: 1fr; }
+.charts .card { padding: 10px 12px 6px; }
+.charts .card .k { margin-bottom: 6px; }
+canvas.chart { width: 100%; height: clamp(150px, 13vw, 230px); display: block; }
+
+/* ===========================================================================
+   节点卡片网格（与公开看板同一套视觉语言）
+   ---------------------------------------------------------------------------
+   注意：这套样式与 internal/theme/builtin/style.css 是**有意重复**的两份文件
+   （embed 路径不同、公开看板属于可替换主题，后台不随 theme.active 切换），
+   但 2026-10-12 起两边的**调色板与视觉语言已按用户决策统一**为黑白灰阶——
+   改调色板要两边同步（护栏会逐行比对两边的暗色块）。
+
+   布局稳定性的约束与公开看板相同：卡片会被定时刷新重复赋值，
+   任何"有值才渲染、没值就省略整行"的写法都会让卡片高度变化，看起来像在跳。
+   因此所有可变内容都放在固定高度的行里，缺值渲染 "—"。
+   =========================================================================== */
+
+.nodes-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+.nodes-head h2 { margin: 0; }
+
+.tabs { display: flex; gap: 4px; flex-wrap: wrap; }
+.tab {
+  border: 1px solid transparent; background: transparent; color: var(--muted-2);
+  font: inherit; font-size: 12.5px; padding: 4px 10px; border-radius: 999px;
+  cursor: pointer; white-space: nowrap;
+}
+.tab:hover { background: var(--chip); color: var(--fg); }
+/* 选中页签 = 反白墨块（与公开看板一致）：不靠边框与阴影。 */
+.tab[aria-selected="true"] {
+  background: var(--fg); color: var(--bg); border-color: transparent;
+  font-weight: 600;
+}
+.tab .n { color: var(--muted); font-weight: 400; margin-left: 5px; }
+
+/* 详情页内的标签切换（资源监控 / 探测延迟）。 */
+.tab-bar { display: inline-flex; gap: 4px; background: var(--chip); padding: 3px; border-radius: 8px; }
+.tab-bar .tab {
+  border: 0; background: transparent; color: var(--muted-2); font: inherit;
+  font-size: 13px; padding: 5px 12px; border-radius: 6px; cursor: pointer;
+}
+.tab-bar .tab:hover { color: var(--fg); }
+.tab-bar .tab.active { background: var(--fg); color: var(--bg); font-weight: 600; }
+
+/* 节点卡片上的 IPv4/IPv6 小标识（灰阶化，与公开看板一致：字母即信息） */
+.ip-badges { display: inline-flex; gap: 4px; margin-left: 6px; align-items: center; }
+.ip-badge { font-size: 10px; padding: 1px 5px; border-radius: 4px; background: var(--chip); border: 1px solid var(--line-strong); color: var(--muted-2); white-space: nowrap; }
+.ip-badges .n-badges-none { font-size: 10px; color: var(--muted); opacity: .65; }
+
+/* 国旗标识：与公开看板同一套尺寸约定（固定 20×14，未设置国家时留空）。
+   固定宽度让"有没有国家"不影响同一行的名称起点。旗帜是 JS 生成的内联 SVG，
+   不引外链、不用 data:，因此不受 CSP 影响。 */
+.n-flag {
+  flex: 0 0 auto;
+  width: 20px; height: 14px;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.n-flag svg { display: block; border-radius: 2px; box-shadow: 0 0 0 1px rgba(15, 23, 42, .18); }
+
+.kpis {
+  display: grid; grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 12px; margin-bottom: 14px;
+}
+@media (max-width: 1200px) { .kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 1080px) { .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 560px)  { .kpis { grid-template-columns: minmax(0, 1fr); } }
+
+.kpi {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  padding: 11px 13px; min-height: 92px;
+  display: flex; flex-direction: column;
+}
+.kpi-head { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; height: 18px; }
+.kpi-ico { font-size: 12px; opacity: .8; }
+.kpi-main { display: flex; align-items: baseline; gap: 4px; margin-top: 6px; height: 28px; }
+.kpi-main b { font-size: 21px; font-weight: 650; }
+.kpi-sep { color: var(--muted); font-size: 15px; }
+.kpi-total { color: var(--muted); font-size: 15px; }
+.kpi-pair { display: flex; gap: 14px; margin-top: 6px; height: 28px; align-items: baseline; }
+.kpi-pair b { font-size: 15.5px; font-weight: 600; }
+.kpi-sub {
+  margin-top: auto; color: var(--muted); font-size: 12px; height: 16px;
+  overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+}
+
+.dir { margin-right: 3px; font-weight: 600; }
+.dir.down { color: var(--dir-down); }
+.dir.up { color: var(--dir-up); }
+.spark { width: 100%; height: 22px; margin-top: 2px; display: block; }
+
+.nodes {
+  display: grid; gap: 12px;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  /* 行高等高 + 结构固定 ⇒ 刷新时不会出现"错位" */
+  grid-auto-rows: 1fr;
+  align-items: stretch;
+}
+
+.node {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  padding: 12px 14px; cursor: pointer;
+  display: flex; flex-direction: column; gap: 8px; height: 100%;
+  transition: border-color .12s ease;
+}
+.node:hover { border-color: var(--line-strong); }
+.node:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
+.node[hidden] { display: none; }
+
+.n-head { display: flex; align-items: center; gap: 7px; height: 20px; }
+.n-name {
+  font-weight: 600; font-size: 13.5px; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; min-width: 0;
+}
+.n-chip {
+  margin-left: auto; flex: 0 0 auto; font-size: 11px; padding: 2px 7px;
+  border-radius: 999px; background: var(--chip); color: var(--muted-2); white-space: nowrap;
+}
+.n-chip.online  { color: var(--online); }
+.n-chip.warning { color: var(--muted-2); }
+.n-chip.offline { color: var(--muted-2); }
+.n-chip.archived{ color: var(--muted); }
+
+.n-sub {
+  display: flex; align-items: center; gap: 8px; height: 16px;
+  color: var(--muted); font-size: 11.5px;
+}
+.n-os { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.n-exp { margin-left: auto; flex: 0 0 auto; white-space: nowrap; }
+.n-exp.warn { color: var(--warn); }
+.n-exp.bad  { color: var(--bad); }
+
+/* 续费价格（月均）：与实时速率同行、靠右，行高仍钉 16px（等高约束）。
+   与公开看板的同名行**同一尺寸语言**
+   （两边必须一起改——卡片等高是硬约束，行高差 1px 两站的卡片就不一样高）。
+   不带分隔线：上下都有自带 border-top 的块，再画一条就成"斑马线"。
+   护栏 TestFeeRowIsIdenticalInBothFrontends 逐字段比对两份规则。 */
+.n-fee {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  height: 16px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.fee-k { white-space: nowrap; }
+.fee-v {
+  margin-left: auto;
+  color: var(--fg);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.n-bars { display: flex; flex-direction: column; gap: 7px; }
+.nb { display: block; }
+.nb-row {
+  display: flex; align-items: baseline; gap: 6px; height: 16px;
+  font-size: 12px; color: var(--muted-2);
+}
+.nb-k { white-space: nowrap; }
+.nb-k b { color: var(--fg); font-weight: 600; }
+.nb-v { margin-left: auto; color: var(--fg); font-weight: 600; }
+
+.track { height: 6px; border-radius: 3px; background: var(--track); overflow: hidden; margin-top: 3px; }
+/* 进度条填充 = 前景墨色：条长本身就是信息，不按 75%/90% 阈值变色
+   （与公开看板的同一条规则）。 */
+.track i {
+  display: block; height: 100%; width: 0; border-radius: 3px;
+  background: var(--fg);
+  /* 只过渡宽度：宽度抖动时不应触发其他属性动画 */
+  transition: width .35s ease;
+}
+
+.nb-sub {
+  height: 14px; line-height: 14px; margin-top: 2px; font-size: 11.5px;
+  color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+.n-net {
+  margin-top: auto; padding-top: 8px; border-top: 1px solid var(--line);
+  display: flex; flex-direction: column; gap: 3px;
+}
+/* 第一行 = 速率（左）+ 续费价格（右）。行高 17px 钉死：
+   与公开看板 .net-line 同一条规则，四种开关组合下卡片高度都不变。 */
+.net-line {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  height: 17px;
+}
+.net-line .net-row { flex: 1 1 auto; min-width: 0; }
+.net-row { display: flex; align-items: baseline; gap: 5px; height: 17px; font-size: 12px; }
+.net-row b { font-weight: 600; }
+.net-row .dir { font-size: 11px; }
+.net-row.totals { color: var(--muted-2); font-size: 11.5px; height: 15px; }
+.net-row.totals b { font-weight: 500; }
+.net-row .up-gap { margin-left: 12px; }
+
+/* 所有数字等宽：0.99→1.00 这类变化不该把布局推来推去 */
+.kpi, .nb-v, .net-row b, .kpi-main b { font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1; }
+
+.nodes-empty { color: var(--muted); margin: 16px 0; }
+
+/* ---------- 账户安全：TOTP 启用流程与恢复码（6.2） ---------- */
+
+/* 页内面板：用于"配置认证器 App"与"请立即保存恢复码"这两处需要强引导的场景。
+   刻意不用模态遮罩——后台已有登录遮罩的教训（[hidden] 被作者样式盖掉会导致
+   整页点不动），能不开遮罩就不开。 */
+.inline-panel {
+  margin-top: 12px; padding: 14px 16px;
+  background: var(--panel); border: 1px solid var(--line-strong);
+  border-radius: 10px;
+}
+.inline-panel h3 { margin: 0 0 8px; font-size: 15px; }
+.inline-panel ol { margin: 0 0 10px; padding-left: 20px; }
+.inline-panel ol li { margin: 3px 0; }
+
+/* 恢复码面板：一次性明文展示，必须显眼且带警示色边框。 */
+.warn-panel { border-color: var(--warn); box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 14%, transparent); }
+
+/* 二维码容器：白底是必须的——深色主题下若沿用面板底色，
+   部分扫码器会把深色背景当成模块从而识别失败。 */
+.qr-wrap {
+  display: inline-block; padding: 12px; margin: 6px 0 12px;
+  background: #ffffff; border: 1px solid var(--line); border-radius: 10px;
+}
+.qr-wrap svg { display: block; width: 212px; height: 212px; }
+.qr-wrap p { margin: 0; max-width: 240px; }
+
+.recovery-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 8px; margin: 10px 0 14px;
+}
+.recovery-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 14px; letter-spacing: .06em; text-align: center;
+  padding: 8px 10px; border-radius: 8px;
+  background: var(--chip); color: var(--fg);
+  border: 1px dashed var(--line-strong);
+  user-select: all; /* 一次点击即可全选，方便抄录/复制 */
+}
+
+/* 文本级状态色（与 .err-text 同族）。 */
+.ok-text { color: var(--ok); }
+.muted-text { color: var(--muted); }
+.warn-text { color: var(--warn); }
+
+/* 备份表格里的"最新"标记（.badge 已有基础样式，这里只补 ok 变体）。 */
+.badge.ok { color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, transparent); }
+
+/* ---------- 节点多选（探测目标的作用域） ----------
+   节点数可能上百，所以固定最大高度 + 滚动：不限制的话弹窗会被撑到超过视口，
+   「保存」按钮滚出屏幕，管理员只能拖着窗口才点得到。
+   固定高度还有一个好处：勾选节点不会让周围元素上下跳动。 */
+.scope-list {
+  display: flex; flex-wrap: wrap; gap: 6px 14px;
+  max-height: 168px; overflow-y: auto;
+  margin-top: 6px; padding: 8px 10px;
+  background: var(--chip); border: 1px solid var(--line); border-radius: 8px;
+}
+.scope-list > .check-row { flex: 0 0 auto; }
+/* 自身所在的节点不允许取消勾选（后端会拒绝把目标移出自身节点），
+   用弱化色表明"这一项是锁定的"，而不是让它看起来可点却点不动。 */
+.scope-list > .check-row > input:disabled { cursor: not-allowed; }
+.scope-list > .check-row > input:disabled ~ span { color: var(--muted); }
+
+/* ---------- 分页条 ----------
+   告警事件与审计日志都是"越翻越旧"的列表，条数无上限，
+   所以必须分页；本文件里两个列表共用这一套。 */
+.pager {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin: 10px 0 0; font-size: 13px;
+}
+.pager > label { display: flex; align-items: center; gap: 6px; margin: 0; color: var(--muted); }
+.pager > label > select { width: auto; margin: 0; }
+.pager .muted { margin: 0; }
+/* 页码是定宽的数字，用等宽数字保证翻页时按钮不左右抖动。 */
+.pager .page-pos { font-variant-numeric: tabular-nums; color: var(--muted); }
+/* 到底/到顶时按钮被禁用，光标要跟着变，否则会被当成"点了没反应"。 */
+.pager button:disabled { opacity: .45; cursor: not-allowed; }

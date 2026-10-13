@@ -1,0 +1,45 @@
+# probe-agent 配置示例（对应文档 3.1 / 7.1 GET /config）
+# 默认路径：Linux /etc/probe-agent/agent.yaml ；权限必须 0600。
+# 注意：本文件由 `probe-agent install` 自动写入，通常无需手工编辑。
+# 仅包含声明式数据，Agent 不解析也不执行任何脚本（3.1 安全边界）。
+
+master_url: "https://m.example.com"
+
+# 节点专属长期令牌（库内只存 SHA-256）。令牌不出现在命令行与日志
+token: "pk_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+
+# 自签证书场景：固定 Master 公钥（SPKI）SHA-256，可多个并存以平滑轮换（13.4.9）
+spki_sha256: []
+# spki_sha256: ["AbCd...=", "EfGh...="]
+
+# 开发专用：允许 http:// 的 Master 地址（仅回环）。生产禁用（S7）
+insecure_http: false
+
+# 上报间隔（秒），与 Master 下发一致
+report_interval_s: 3
+
+# 探测周期（秒），不低于 10（13.4.6）
+probe_interval_s: 30
+
+# 网卡过滤
+nic_include: []
+nic_exclude: ["lo", "docker*", "veth*", "br-*", "virbr*", "tun*", "tap*", "wg*"]
+
+# 磁盘统计路径，空则取根分区/系统盘
+disk_paths: []
+
+# 允许探测目标指向内网/回环（默认 false，防内网扫描跳板，S4 / 13.4.6）
+allow_private_targets: false
+
+# 最近样本本地缓存条数（断网补报，13.4.2）
+buffer_samples: 100
+
+# 探测目标（由 Master 通过 GET /config 下发并覆盖）
+targets:
+  - id: 3
+    name: "电信-上海"
+    host: "example.com"
+    port: 443
+    method: "tcp"        # tcp | icmp
+    timeout_ms: 2000
+    count: 3
