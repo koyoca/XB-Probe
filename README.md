@@ -118,9 +118,33 @@ sudo sh install-master-bin.sh --yes \
 ```
 
 `--help` 看全量参数：`--version` / `--repo` / `--mirror` / `--arch` / `--script-ref` / `--tls-mode` /
-`--public-origin` / `--admin-origin` / `--admin-user` / `--public-listen` / `--admin-listen` / `--dir` /
-`--data` / `--bin-dir` / `--dist-base` / `--no-service` / `--force-config` / `--dry-run` / `--yes` /
-`--uninstall` / `--keep-data`（方式 B 另有 `--ref` / `--src` / `--go-version` / `--goproxy` / `--no-deps`）。
+`--tls-terminator` / `--proxy-domain` / `--public-origin` / `--admin-origin` / `--admin-user` /
+`--public-listen` / `--admin-listen` / `--dir` / `--data` / `--bin-dir` / `--dist-base` / `--no-service` /
+`--force-config` / `--dry-run` / `--yes` / `--uninstall` / `--keep-data`
+（方式 B 另有 `--ref` / `--src` / `--go-version` / `--goproxy` / `--no-deps`）。
+
+脚本的**第一问就是"安装还是卸载"**，直接跑（没带 `--uninstall`）也能从这里进卸载，不需要先找到
+`deploy-master.sh`。答过的内容会记在 `<配置目录>/.answers`（权限 0600），下次运行时自动作为
+方括号里的默认值回填——想重来不用一次次重敲，想彻底重来加 `PROBE_FRESH_ANSWERS=1`。
+**口令类从不下盘**（`ADMIN_PASSWORD` / `ACME_DNS_TOKEN` 一律不写进该文件）。
+
+### 交给 Caddy 代管（一个端口也能直接上 https）
+
+`probe-master` 可以只监听任意端口（甚至纯回环），由部署脚本**自动装好 Caddy、生成 Caddyfile、
+注册 `caddy.service`**——证书申请与续期都交给 Caddy，不用自己再装 Caddy/Nginx 手工配置：
+
+```bash
+sudo sh -c "$(curl -fsSL https://raw.githubusercontent.com/koyoca/XB-Probe/main/install-master-bin.sh)" xb \
+  --tls-terminator caddy --proxy-domain status.example.com \
+  --public-listen 127.0.0.1:8080 --admin-listen 127.0.0.1:8081 \
+  --public-origin https://status.example.com
+```
+
+此时 Master 侧自动改成 `tls.mode: none`（只监听回环），反代来源网段自动填进 `trusted_proxies`。
+`--tls-terminator master`（默认）表示仍由 Master 自己终结 TLS。
+
+若证书申请失败，脚本会**先申请、边申请边反馈，失败即中止安装并回滚本次新建的一切**
+（systemd 单元、二进制、配置、数据、系统用户），不会留下一个半成品。
 
 ## 部署（Windows）
 
@@ -157,10 +181,10 @@ Master 自带 HTTPS，不强制依赖前置代理。`tls.mode`：
 
 | mode         | 适用场景                             | 说明                                                                    |
 | ------------ | -------------------------------- | --------------------------------------------------------------------- |
-| `none`       | 前置 Caddy/Nginx 卸载 TLS；本机/内网调试    | 需配 `trusted_proxies` 才认 `X-Forwarded-Proto`                           |
+| `none`       | 前置 Caddy/Nginx 卸载 TLS；本机/内网调试    | 需配 `trusted_proxies` 才认 `X-Forwarded-Proto`；用部署脚本的 `--tls-terminator caddy` 会**自动装好 Caddy 与反代** |
 | `files`      | 已有证书：商业证书、企业内网 CA、别处签发的          | 读 `cert_file` / `key_file`，**变更热加载**（30 秒节流，读失败保留旧证书）                   |
 | `selfsigned` | 内网 / 私有 IP 上想要"IP 证书"            | 本进程生成并落盘，SAN 覆盖 `hosts` 里的域名与 **IP**；Agent 侧用 SPKI 指纹固定即可安全使用        |
-| `acme`       | 有公网 IP、想自动申请与续期                  | 内置**零依赖 ACME v2 客户端**，域名证书 + **RFC 8738 IP 证书**，`http-01` / `tls-alpn-01` / `dns-01` |
+| `acme`       | 有公网 IP、想自动申请与续期                  | 内置**零依赖 ACME v2 客户端**，域名证书 + **RFC 8738 IP 证书**，`http-01` / `tls-alpn-01` / `dns-01`；部署时 `acme.sync_obtain: true` 让首张证书**前台申请**、拿到确定结果 |
 
 ```yaml
 tls:
@@ -172,8 +196,13 @@ tls:
     http_addr: ":80"                  # 80 被反代占用且反代会转发 /.well-known/ 时写 off
     domains: ["status.example.com"]
     ips: ["203.0.113.10"]             # RFC 8738 IP 证书（可选）
+    sync_obtain: false                # true = 启动时前台申请首张证书，失败则进程起不来
   hsts: { enabled: true, max_age: 31536000, include_subdomains: false, preload: false }
 ```
+
+`sync_obtain` 的两种取值各有用途：**默认 `false`** 时首张证书在后台申请（不阻塞启动），
+申请期间站点暂时不可用但进程能起来，适合日常重启；**部署时脚本会临时置 `true`**，
+让申请在前台完成、拿到明确成败，申请成功后自动改回 `false`——否则每次重启都要等 CA 响应。
 
 三种挑战方式的前提条件不同，**选错会在申请时才失败**，所以先看清楚：
 
@@ -292,6 +321,10 @@ $f="$env:TEMP\xb-uninstall.ps1"; irm https://raw.githubusercontent.com/koyoca/XB
 ```bash
 sudo sh install-master.sh --uninstall --keep-data       # 或 install-master-bin.sh --uninstall
 ```
+
+**直接重跑安装脚本也会先问"安装还是卸载"**（第 1 问），所以即使当初是用一行命令装的、
+本机并没有 `deploy-master.sh`，也照样能从这里进卸载。安装收尾时脚本会根据你是从哪个入口进来的，
+打印一条**可原样粘贴**的卸载命令。
 
 Windows 同理：`powershell -File install-master.ps1 -Uninstall -KeepData`。
 

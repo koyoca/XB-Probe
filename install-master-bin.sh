@@ -441,6 +441,17 @@ fi
 # ---------------------------------------------------------------------------
 
 say "开始部署（接下来的输出来自 scripts/deploy-master.sh）"
+# 告诉部署脚本"用户是怎么把这一串叫起来的"：收尾的卸载提示据此还原出一条
+# **用户能直接粘贴执行**的命令。不这么做的话，那句提示只能是本地路径
+# `sh deploy-master.sh --uninstall`——而对 `curl … | sh` 的人来说本机没有这个文件。
+# 用环境变量而不是命令行参数：老版本的部署脚本对未知参数硬失败（exit 2），
+# 而环境变量新旧都能安全接收（老脚本忽略它）。与 --yes → PROBE_NO_ASK 同一个理由。
+PROBE_SELF_ENTRY=bin
+export PROBE_SELF_ENTRY
+# 入口脚本自己的 URL：一条命令式的跑法（`sh -c "$(curl …)"`）没有 $0 可用，
+# 所以这里按 --repo 与 --script-ref 拼回去——它就是要用户复制的那个地址。
+PROBE_SCRIPT_ENTRY_URL="https://raw.githubusercontent.com/$REPO/main/install-master-bin.sh"
+export PROBE_SCRIPT_ENTRY_URL
 # 刻意不用 exec 顶替进程：exec 之后 EXIT trap 不会跑，临时目录（含那个几十 MB
 # 的二进制）就永远留在 /tmp 里。让本进程等它结束，退出时 trap 负责清理。
 # $PASSTHRU 不加引号是有意的——它是要按空白切成多个参数传递的，不是一整段文本。

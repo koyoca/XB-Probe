@@ -43,6 +43,14 @@ trusted_proxies: []
 # ---------------------------------------------------------------------------
 # 6.3 TLS 与证书：四种取证书方式任选其一
 # ---------------------------------------------------------------------------
+# 谁来终结 TLS？两种常见组合：
+#   ① 本进程自己终结：mode 取 files / selfsigned / acme（选 acme 即自动申请与续期）。
+#   ② 交给前置反代终结：mode 取 none，本进程只监听回环（如 127.0.0.1:8080），
+#      由 Caddy/Nginx 对外提供 https。部署脚本（deploy-master.sh）的
+#      `--tls-terminator caddy` 会**自动装好 Caddy、生成 Caddyfile、注册
+#      caddy.service**，证书申请与续期全部由 Caddy 完成，无需手工配置。
+#      此时务必把反代的来源网段填进下面的 trusted_proxies，否则服务端拿不到
+#      真实客户端 IP、也认不出 https（脚本会自动回填回环网段）。
 tls:
   # none        不启用 TLS（交给前置 Caddy/Nginx，或本机/内网调试）
   # files       自定义证书：直接读 cert_file / key_file（商业证书、企业内网 CA、
@@ -50,8 +58,9 @@ tls:
   # selfsigned  自签证书：本进程生成并落盘，SAN 覆盖域名与 **IP**。
   #             这是"IP 证书"在私有地址下唯一可用的形态（公网 CA 不会给私有地址签证书）。
   # acme        自动申请：内置零依赖 ACME v2 客户端，支持**域名证书**与
-  #             **RFC 8738 IP 证书**，挑战方式可选 http-01 / tls-alpn-01。
-  #             首张证书在后台申请（不阻塞启动），已缓存的证书先顶上。
+  #             **RFC 8738 IP 证书**，挑战方式可选 http-01 / tls-alpn-01 / dns-01。
+  #             默认首张证书在后台申请（不阻塞启动），已缓存的证书先顶上；
+  #             想让部署过程拿到确定结果，把 acme.sync_obtain 设为 true（见下）。
   mode: none
 
   # 最低 TLS 版本：1.2 | 1.3（写错会直接报错，不会静默退化成 1.2）
@@ -75,11 +84,23 @@ tls:
   # acme:
   #   email: "ops@example.com"        # 可选，用于 CA 的到期提醒
   #   ca: "letsencrypt"               # letsencrypt | letsencrypt-staging | zerossl | <目录URL>
-  #   challenge: "http-01"            # http-01 | tls-alpn-01（后者不需要 80 端口）
+  #   challenge: "http-01"            # http-01 | tls-alpn-01 | dns-01
+  #                                   #   http-01     需要 80 端口可达
+  #                                   #   tls-alpn-01 需要 443 端口可达，且本进程直接
+  #                                   #               对外终结 TLS（不能躲在反代后面）
+  #                                   #   dns-01      不需要任何入站端口，适合只开 DNS
+  #                                   #               的机器；凭据**只从环境变量或交互
+  #                                   #               提示读**（不提供命令行参数，避免
+  #                                   #               落进 shell 历史）
   #   http_addr: ":80"                # http-01 的明文监听；80 被反代占用、且反代会
   #                                   # 转发 /.well-known/ 进来时写 off
   #   domains: ["status.example.com"] # 域名证书（可多个）
   #   ips: ["203.0.113.10"]           # IP 证书（RFC 8738，可多个）
+  #   sync_obtain: false              # true = 启动时**前台**申请首张证书，失败则进程
+  #                                   # 直接起不来（部署脚本据此中止安装并回滚）。
+  #                                   # 部署脚本会在申请成功后自动改回 false，日常
+  #                                   # 重启就不会再被 CA 阻塞。默认 false = 后台申请，
+  #                                   # 申请期间站点暂不可用但不影响进程启动。
   #
   # 兼容旧键：顶层 acme_domains 会并入 acme.domains（建议改用上面的写法）
   acme_domains: []

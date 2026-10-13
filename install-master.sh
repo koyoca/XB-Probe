@@ -80,6 +80,10 @@ TLS_IPS=""
 ACME_EMAIL=""
 ACME_CA=""
 ACME_CHALLENGE=""
+# 谁终结 TLS：master（Master 自己）/ caddy（部署脚本装 Caddy 反代）。
+# 留空 = 由 deploy-master.sh 按 TLS 方式给出建议值并提问（默认值只有一处来源）。
+TLS_TERMINATOR=""
+PROXY_DOMAINS=""
 NO_SERVICE=""
 FORCE_CONFIG=""
 UNINSTALL=""
@@ -108,7 +112,8 @@ install-master.sh —— XB-Probe Master 整机一键部署
   其余参数透传给 scripts/deploy-master.sh：
   --public-origin/--admin-origin/--admin-user/--public-listen/--admin-listen/
   --dir/--data/--bin-dir/--dist-base/--no-service/--force-config/
-  --tls-mode/--tls-cert/--tls-key/--tls-domain/--tls-ip/--acme-email/--acme-ca/--acme-challenge
+  --tls-mode/--tls-cert/--tls-key/--tls-domain/--tls-ip/--acme-email/--acme-ca/--acme-challenge/
+  --tls-terminator/--proxy-domain
 
   dns-01 的凭据用环境变量：PROBE_ACME_DNS_PROVIDER、PROBE_ACME_DNS_TOKEN
 EOF
@@ -153,6 +158,8 @@ while [ $# -gt 0 ]; do
 	--acme-email) ACME_EMAIL="${2:-}"; shift 2 ;;
 	--acme-ca) ACME_CA="${2:-}"; shift 2 ;;
 	--acme-challenge) ACME_CHALLENGE="${2:-}"; shift 2 ;;
+	--tls-terminator) TLS_TERMINATOR="${2:-}"; shift 2 ;;
+	--proxy-domain) PROXY_DOMAINS="${2:-}"; shift 2 ;;
 	--no-service) NO_SERVICE="1"; shift ;;
 	--force-config) FORCE_CONFIG="1"; shift ;;
 	--uninstall) UNINSTALL="1"; shift ;;
@@ -432,10 +439,14 @@ if [ -z "$NON_INTERACTIVE" ]; then
 	echo >&2
 	cat >&2 <<'EOF'
 TLS 方式：
-  1) none        由前置 Caddy/Nginx 终结 TLS（默认；也适合本机/内网调试）
-  2) acme        内置 ACME 客户端自动申请证书（需要一个已解析到本机的域名）
-  3) selfsigned  自签证书（用纯 IP 访问时，这是唯一可行的加密方式）
-  4) files       使用你已有的证书与私钥
+  1) none       由前置反代终结 TLS。选它时本脚本会**自动装好 Caddy 并配好反代**
+                （自动申请与续期证书），所以这是最省事的一种
+  2) acme       Master 自己申请证书（需要一个已解析到本机的域名）
+  3) selfsigned 自签证书（用纯 IP 访问时，这是唯一可行的加密方式）
+  4) files      使用你已有的证书与私钥
+
+四种方式都**不需要你自己装 Caddy 或 Nginx 并手写配置**：选 1 时脚本会把反代
+连同证书申请一起配好；选 2 是 Master 自己终结 TLS。
 EOF
 fi
 
@@ -487,6 +498,69 @@ if [ "$TLS_MODE" = "files" ]; then
 			exit 2
 		fi
 	done
+fi
+
+# ---------------------------------------------------------------------------
+# 1b) 谁终结 TLS：Master 自己，还是由本脚本装的 Caddy 反代
+# ---------------------------------------------------------------------------
+#
+# 这一问就是"选 2/3/4 时别让我自己装反代"那条反馈的落点。
+#
+# 为什么它是一个**独立于 TLS 方式**的问题：这两件事经常被当成一件事，其实不是——
+#   · TLS 方式 回答"证书从哪来"（不要证书 / 自动申请 / 自签 / 已有证书）；
+#   · 终结者   回答"谁拿着证书监听 443"（Master 进程自己 / 前面的 Caddy）。
+# 之前只问了前者，于是选了 acme 的人以为"自动"了，实际还得自己解决 80/443 的占用、
+# 自己装反代、自己保证续期——这一步没人替他做。
+#
+# 默认值按 TLS 方式给：
+#   · none      → caddy（"由前置反代终结"，那就由我们把这个反代装上）
+#   · 其它      → master（证书就是给 Master 自己用的）
+# 非交互时**不猜**：直接取这个默认值，与"问了再回车"的结果一致。
+if [ -z "$TLS_TERMINATOR" ]; then
+	case "$TLS_MODE" in
+	none) _term_default="caddy" ;;
+	*) _term_default="master" ;;
+	esac
+	if [ -z "$NON_INTERACTIVE" ]; then
+		cat >&2 <<'EOF'
+
+TLS 由谁终结：
+  1) caddy   本脚本自动安装 Caddy，生成反代配置 → 证书申请与续期全自动
+             你需要做的只有：把域名解析到本机、确认 80/443 没被别的服务占用
+  2) master  Master 进程自己监听 443（内置 ACME / 自签 / 你给的证书）
+
+EOF
+		ask "选择终结者（1=caddy / 2=master）" "$_term_default"
+		case "$ASK_REPLY" in
+		1 | caddy | CADDY | Caddy) TLS_TERMINATOR="caddy" ;;
+		2 | master | MASTER | Master) TLS_TERMINATOR="master" ;;
+		*) TLS_TERMINATOR="$ASK_REPLY" ;;
+		esac
+	else
+		TLS_TERMINATOR="$_term_default"
+	fi
+fi
+
+# caddy 终结时，TLS 由 Caddy 负责，Master 侧必须**不终结**（否则两个进程抢 443，
+# 而 cmaster 报出的 "address already in use" 会被误读成"端口被别的程序占了"）。
+# 这里就地纠正而不是只给个警告：用户选了"不要证书"之外的选项时就落进这个组合，
+# 让他自己去想"那我该把 --tls-mode 改成什么"是没道理的。
+if [ "$TLS_TERMINATOR" = "caddy" ]; then
+	if [ "$TLS_MODE" != "none" ]; then
+		printf '注意：选了 caddy 终结 TLS，则 Master 侧不终结（--tls-mode none）。' >&2
+		printf '你选的 --tls-mode %s 的证书相关参数将被忽略。\n' "$TLS_MODE" >&2
+		TLS_MODE="none"
+		TLS_CERT=""
+		TLS_KEY=""
+		TLS_DOMAINS=""
+		TLS_IPS=""
+	fi
+	# Caddy 需要一个域名（HTTP-01/TLS-ALPN 都要能解析到本机）。这里问的是
+	# **反代哪些域名**——同站部署时公开站与后台在同一个域名下，只有一个。
+	if [ -z "$PROXY_DOMAINS" ] && [ -z "$PUBLIC_ORIGIN" ] && [ -z "$NON_INTERACTIVE" ]; then
+		ask "要反代的域名（逗号分隔可多个；必须已解析到本机）" ""
+		PROXY_DOMAINS="$ASK_REPLY"
+	fi
 fi
 
 if [ "$TLS_MODE" = "selfsigned" ] && [ -z "$TLS_DOMAINS$TLS_IPS" ]; then
@@ -712,8 +786,19 @@ set -- "$@" --tls-mode "$TLS_MODE"
 [ -n "$ACME_EMAIL" ] && set -- "$@" --acme-email "$ACME_EMAIL"
 [ -n "$ACME_CA" ] && set -- "$@" --acme-ca "$ACME_CA"
 [ -n "$ACME_CHALLENGE" ] && set -- "$@" --acme-challenge "$ACME_CHALLENGE"
+# 谁终结 TLS（master 自己 / 由部署脚本装的 Caddy）。这两个参数必须**转发出去**：
+# 参数集护栏（internal/dist/deploy_flags_test.go）会逐项比对"部署脚本认识的每个
+# 参数都要被安装脚本转发"，少一个就红——而它红了正是对的，因为不转发等于
+# 用户在安装脚本里做的选择会被静默丢弃。
+[ -n "$TLS_TERMINATOR" ] && set -- "$@" --tls-terminator "$TLS_TERMINATOR"
+[ -n "$PROXY_DOMAINS" ] && set -- "$@" --proxy-domain "$PROXY_DOMAINS"
 
 say "开始部署（接下来的输出来自 scripts/deploy-master.sh）"
+# 与 install-master-bin.sh 同一个机制：告诉部署脚本"用户是怎么把这一串叫起来的"，
+# 收尾的卸载提示才还原得出可粘贴执行的命令。
+PROBE_SELF_ENTRY=src
+PROBE_SCRIPT_ENTRY_URL="https://raw.githubusercontent.com/koyoca/XB-Probe/main/install-master.sh"
+export PROBE_SELF_ENTRY PROBE_SCRIPT_ENTRY_URL
 sh "$SRC/scripts/deploy-master.sh" "$@"
 
 cat <<EOF

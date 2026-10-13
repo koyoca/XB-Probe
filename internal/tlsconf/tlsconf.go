@@ -170,6 +170,27 @@ func Setup(cfg config.TLSConfig, dataDir string, logger *slog.Logger) (*Provider
 		} else if !errors.Is(err, os.ErrNotExist) {
 			p.lastErr = err.Error()
 			logger.Warn("缓存的 ACME 证书不可用，将重新申请", "err", err.Error())
+		} else if cfg.ACME.SyncObtain {
+			// 同步申请：**只有部署脚本会打开它**（见 deploy-master.sh 的证书步骤）。
+			//
+			// 平时刻意不这么做：一个 DNS 或网络问题不该让整个 Master 起不来，
+			// 所以首次申请历来在后台跑。但部署那一刻是例外——那时用户正等着
+			// 一个确定答案（"到底能不能用 https"），而后台申请给出的是一段
+			// 没有任何反馈的空窗，他只能靠猜。
+			//
+			// 打开它之后的语义是"申请不成功就不启动"：申请失败时 Setup 返回
+			// 错误，服务退出，部署脚本据此**停止安装并回滚**。成功时证书已经在
+			// 手里，服务起来立刻就能握手——不必再等一次后台重试。
+			ctx, cancel := context.WithTimeout(context.Background(), acmeObtainTimeout)
+			err := p.obtainACMESync(ctx)
+			cancel()
+			if err != nil {
+				// 状态先落盘再返回：部署脚本的 tls status 要靠它报出原因，
+				// 而服务已经退出了，没有别的地方能提供这个原因。
+				p.writeStatus()
+				return nil, fmt.Errorf("申请证书失败: %w", err)
+			}
+			logger.Info("证书已在前台申请成功（tls.acme.sync_obtain）")
 		}
 
 	default:
@@ -670,6 +691,54 @@ func (p *Provider) renewACME(ctx context.Context) {
 	s := summarize(pair.Leaf)
 	p.log.Info("ACME 证书已就绪", "subject", s.Subject, "issuer", s.Issuer,
 		"not_after", pair.Leaf.NotAfter.Format(time.RFC3339), "sans", strings.Join(s.SANs, ","))
+}
+
+// obtainACMESync 同步申请一张证书并返回结果（失败时返回错误）。
+//
+// 与 renewACME 的关系：两者跑的是同一套申请流程，区别只在"错误往哪去"。
+// renewACME 是后台循环的一部分，失败只能记进状态、等下一轮重试；这里被
+// Setup 调用（部署脚本打开的 tls.acme.sync_obtain），失败要**变成返回错误**
+// 让进程起不来，部署脚本才能据此回滚。
+//
+// 不直接复用 renewACME 的原因：它先判 needsRenewal()，而"还没有证书"时的
+// 续期判断走的是另一条分支（nextRenewal 为零值），并且它把错误吞进日志。
+// 硬套会得到一个"部署时永远申请不到证书"的静默失败——所以这里把流程
+// 单独写一遍，但**共用** loadOrCreateCertKey / identifiers / installCert，
+// 保证密钥复用与标识符计算不会出现两份实现。
+func (p *Provider) obtainACMESync(ctx context.Context) error {
+	if !p.renewMu.TryLock() {
+		// 走到这里说明后台循环已经在申请了（Run 与 Setup 不会并发到这个点，
+		// 但真发生时应当等它，而不是再发一次请求去撞 CA 的速率限制）。
+		return fmt.Errorf("已有一次申请在进行中")
+	}
+	defer p.renewMu.Unlock()
+	p.markAttempt()
+
+	key, err := p.loadOrCreateCertKey()
+	if err != nil {
+		p.setErr(err)
+		return fmt.Errorf("加载证书私钥失败: %w", err)
+	}
+	certPEM, err := p.acmeClient.Obtain(ctx, p.identifiers(), key, p.challenge)
+	if err != nil {
+		p.setErr(err)
+		return err
+	}
+	if err := writeFile(p.acmeCertPath(), certPEM, 0o644); err != nil {
+		// 这里**不**当成失败：证书已经拿到手、本次部署就能用 https，
+		// 只是重启后需要重新申请。把它报成失败会让一次成功的部署被回滚。
+		p.log.Warn("证书落盘失败（本次仍可用，重启后会重新申请）", "err", err.Error())
+	}
+	pair, err := keyPairFromPEM(certPEM, key)
+	if err != nil {
+		p.setErr(err)
+		return fmt.Errorf("解析签发结果失败: %w", err)
+	}
+	p.installCert(pair, renewAt(pair.Leaf, time.Now()))
+	s := summarize(pair.Leaf)
+	p.log.Info("ACME 证书已就绪", "subject", s.Subject, "issuer", s.Issuer,
+		"not_after", pair.Leaf.NotAfter.Format(time.RFC3339), "sans", strings.Join(s.SANs, ","))
+	return nil
 }
 
 // ---------------------------------------------------------------------------

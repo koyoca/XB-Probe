@@ -89,6 +89,15 @@ type ACMEConfig struct {
 	Domains   []string `yaml:"domains"`
 	IPs       []string `yaml:"ips"`
 
+	// SyncObtain 让首次申请**在启动时前台完成**，失败则进程直接起不来。
+	//
+	// 默认 false：一个 DNS 或网络问题不该让整个 Master 起不来，所以首次申请
+	// 历来在后台跑、结果落进 status.json。部署脚本会在生成配置时把它设为
+	// true——那一刻用户正在等一个确定答案（"到底能不能用 https"），
+	// 而后台申请给出的是一段没有任何反馈的空窗。申请成功后部署脚本会把它
+	// 改回 false（见 deploy-master.sh），于是正常重启不再被证书阻塞。
+	SyncObtain bool `yaml:"sync_obtain"`
+
 	// ---- challenge=dns-01 专用 ----
 	//
 	// DnsAPIProvider 目前只认 cloudflare；DnsAPIToken 是 Cloudflare 的

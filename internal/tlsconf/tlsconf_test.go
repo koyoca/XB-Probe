@@ -514,3 +514,82 @@ func TestSanityOfSourceOf(t *testing.T) {
 		}
 	}
 }
+
+// SyncObtain 让首次申请**在 Setup 里前台完成**，失败时 Setup 直接返回错误。
+//
+// 为什么这条不变量值得钉住：部署脚本靠它把"证书到底成没成"变成一个**确定的
+// 结果**（成了就继续、没成就回滚）。少了它，部署脚本只能等一段时间然后猜，
+// 而用户看到的正是"脚本结束了，https 还是打不开，也不知道为什么"。
+//
+// 两条必须同时成立，缺一条这条通路就是坏的：
+//
+//	① 默认（false）**不得**阻塞启动 —— 一次 DNS 抖动不该让 Master 起不来；
+//	② 打开 true 时**必须**阻塞并且失败要冒泡 —— 否则部署脚本的回滚分支永远
+//	   不会触发，用户拿到的是一个"部署成功"但 https 不可用的部署。
+func TestACMEObtainSyncBlocksAndBubblesUpErrors(t *testing.T) {
+	broken := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer broken.Close()
+
+	base := config.ACMEConfig{
+		Domains:   []string{"a.example.com"},
+		Challenge: acme.ChallengeTLSALPN01,
+		HTTPAddr:  "off",
+		CA:        broken.URL,
+	}
+
+	// ② 打开 sync_obtain：申请失败必须**让 Setup 失败**。
+	acfg := base
+	acfg.SyncObtain = true
+	if _, err := setup(t, config.TLSConfig{Mode: "acme", ACME: acfg}, t.TempDir()); err == nil {
+		t.Fatal("sync_obtain=true 时，申请失败必须让 Setup 返回错误（部署脚本据此回滚）")
+	}
+
+	// ① 默认关闭：同样的坏 CA，Setup 必须**立刻成功返回**（申请在后台做）。
+	xcfg := base
+	xcfg.SyncObtain = false
+	if _, err := setup(t, config.TLSConfig{Mode: "acme", ACME: xcfg}, t.TempDir()); err != nil {
+		t.Fatalf("sync_obtain 关闭时 Setup 不该被网络阻塞，实际报错：%v", err)
+	}
+}
+
+// 申请失败时，错误必须已经**落进状态文件**。
+//
+// 这条容易被忽略但很关键：sync_obtain 失败时服务会退出，此时唯一能告诉用户
+// "为什么失败"的就是 status.json。不落盘的话，部署脚本的 `tls status` 只能
+// 报一句"还没结果"——而真正的原因（CA 返回了什么）就永远丢了。
+func TestACMEObtainSyncWritesStatusBeforeFailing(t *testing.T) {
+	broken := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer broken.Close()
+
+	dir := t.TempDir()
+	cache := filepath.Join(dir, "tls")
+	cfg := config.TLSConfig{
+		Mode:     "acme",
+		CacheDir: cache,
+		ACME: config.ACMEConfig{
+			Domains:    []string{"a.example.com"},
+			Challenge:  acme.ChallengeTLSALPN01,
+			HTTPAddr:   "off",
+			CA:         broken.URL,
+			SyncObtain: true,
+		},
+	}
+	if _, err := setup(t, cfg, dir); err == nil {
+		t.Fatal("预期 Setup 失败")
+	}
+
+	st, err := ReadStatus(StatusPath(cfg, dir))
+	if err != nil {
+		t.Fatalf("申请失败后必须留下状态文件（部署脚本的 tls status 靠它报原因）：%v", err)
+	}
+	if st.LastError == "" {
+		t.Fatal("状态文件里没有 LastError —— 用户拿不到失败原因")
+	}
+	if st.LastAttemptAt == 0 {
+		t.Fatal("状态文件里没有 LastAttemptAt —— tls status 无法区分「本轮失败」与「上次遗留」")
+	}
+}
