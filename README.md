@@ -57,6 +57,15 @@ sudo sh -c "$(curl -fsSL https://raw.githubusercontent.com/koyoca/XB-Probe/main/
 > less install-master.sh && sudo sh install-master.sh
 > ```
 
+**要在一行式里带参数，必须先插一个占位名**——`sh -c` 之后的第一个词会成为 `$0`，不会被当作参数：
+
+```bash
+sudo sh -c "$(curl -fsSL https://raw.githubusercontent.com/koyoca/XB-Probe/main/install-master.sh)" xb \
+  --yes --no-service --dir ./probe-master --data ./probe-master/data --bin-dir ./probe-master/bin
+```
+
+若写成 `…"$(curl …)" --yes`，`--yes` 会被拼进脚本正文而不是当作参数，表现为莫名其妙的"需要 root"报错。
+
 支持 Linux（systemd / OpenRC / procd / SysV 自动探测）与 FreeBSD（只做取源码 + 编译）。
 容器或没有 systemd、没有 root 时可以不用 root：
 
