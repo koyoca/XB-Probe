@@ -235,28 +235,38 @@ func TestAnswersFileNeverStoresSecrets(t *testing.T) {
 func TestCaddyfileIsNotKeptJustBecauseItExists(t *testing.T) {
 	body := readRepoFile(t, "../../scripts/deploy-master.sh")
 
-	// 判据一：不许出现"文件存在就保留"这种短路，必须同时看域名。
+	// 判据一：不许出现"只看文件存在就保留"。
 	//
-	// 只看**行首的 if**：修正后的写法里有好几个分支也带这个子串
-	// （`elif [ -f "$CADDYFILE" ] && [ -z "$FORCE_CONFIG" ]; then` 是"追加"分支，
-	// 它本来就该在"没有目标域名"时走到）。用全行 Contains 判会把正确实现也判红。
+	// 结构在第七轮改过：现在"保留"由 `elif Caddyfile_has_domain "$_caddy_dom"; then`
+	// 触发（在此之前的 elif 处理"是我们写的"与 --force-config）。
+	// 所以判据不再是"某个 if 的形式"，而是"**保留这个动作必须经过域名判据**"。
+	//
+	// 只看**行首的 if/elif**：分支体里也会出现同样的子串（例如
+	// `elif grep -Eq "^[[:space:]]*[^#{]" "$CADDYFILE"` 是"追加"分支，它本来就该
+	// 在"没有目标域名"时走到）。用全行 Contains 判会把正确实现也判红。
 	sawGuardedIf := false
 	for _, line := range strings.Split(body, "\n") {
 		trimmed := strings.TrimLeft(line, " \t")
-		if strings.HasPrefix(trimmed, "if [ -f \"$CADDYFILE\" ] && [ -z \"$FORCE_CONFIG\" ]") {
-			if !strings.Contains(trimmed, "Caddyfile_has_domain") {
-				t.Error("Caddyfile 的保留判据只看「文件存在」——\n" +
-					"  本机 Caddy 常是别人装的（发行版包、x-ui、更早的 nginx 迁移），\n" +
-					"  那份配置里没有我们要反代的域名，保留它等于 Caddy 不开 443、拿不到证书。\n" +
-					"  判据要换成「里面有没有本次要用的域名」（见 Caddyfile_has_domain）。\n" +
-					"  实际写法：" + trimmed)
-			} else {
-				sawGuardedIf = true
-			}
+		if !strings.HasPrefix(trimmed, "if ") && !strings.HasPrefix(trimmed, "elif ") {
+			continue
+		}
+		if strings.Contains(trimmed, "Caddyfile_has_domain") {
+			sawGuardedIf = true
+		}
+		// "文件存在 + 未 force-config"这种组合如果出现在分支条件里、且没有域名判据，
+		// 那就是回到了"存在就保留"的老路。
+		if strings.Contains(trimmed, `-f "$CADDYFILE"`) &&
+			strings.Contains(trimmed, "FORCE_CONFIG") &&
+			!strings.Contains(trimmed, "Caddyfile_has_domain") {
+			t.Error("Caddyfile 的保留判据只看「文件存在」——\n" +
+				"  本机 Caddy 常是别人装的（发行版包、x-ui、更早的 nginx 迁移），\n" +
+				"  那份配置里没有我们要反代的域名，保留它等于 Caddy 不开 443、拿不到证书。\n" +
+				"  判据要换成「里面有没有本次要用的域名」（见 Caddyfile_has_domain）。\n" +
+				"  实际写法：" + trimmed)
 		}
 	}
 	if !sawGuardedIf {
-		t.Fatal("没找到「存在 + 未 force-config」这个判据的 if 分支：\n" +
+		t.Fatal("「保留既有站点块」不再经过域名判据：\n" +
 			"  判据与脚本写法脱节了（脚本改过结构却没同步这里），这条护栏已经形同虚设。")
 	}
 
@@ -452,12 +462,18 @@ func TestTLSPromptDoesNotCallTheHTTPSOptionNone(t *testing.T) {
 			"  说明里列了第 5 项却解析不到，用户选 5 会被当成一个未知值塞给 tls.mode。")
 	}
 
-	// ③ 反向钉：选项 1（auto，内部仍是 none）必须映射到 caddy 终结者。
-	// 只改文案、没改默认值链路的话，"选 1 = 自动办证书"这句说明就是假的。
-	if !strings.Contains(body, `1 | auto | AUTO | Auto) TLS_MODE="none"`) {
-		t.Error("选项 1（auto）没有映射到 tls.mode=none：\n" +
-			"  auto 的语义是「HTTPS 由脚本装的 Caddy 终结」，而 Caddy 终结时\n" +
-			"  Master 侧本来就该是 none——两条链路必须接上。")
+	// ③ 反向钉：选项 1（内部是 none）必须映射到 caddy 终结者——现在这一问
+	// 直接决定终结者（用户要求："选择 1 直接是 caddy 反代，选择 2 直接是
+	// Master 反代"），所以解析分支里必须同时带上 caddy 这个别名。
+	if !strings.Contains(body, `1 | auto | AUTO | Auto | caddy | CADDY | Caddy) TLS_MODE="none"`) {
+		t.Error("选项 1 没有映射到 tls.mode=none（并接受 caddy 作为别名）：\n" +
+			"  这一问的语义是「谁做反代」——选 1 就是本脚本装的 Caddy 终结 TLS，\n" +
+			"  而 Caddy 终结时 Master 侧本来就该是 none；选 2~4 才是 Master 自己终结。\n" +
+			"  两条链路必须接上。")
+	}
+	if !strings.Contains(body, `2 | acme | ACME | Acme | master | MASTER | Master) TLS_MODE="acme"`) {
+		t.Error("选项 2 没有映射到 tls.mode=acme（并接受 master 作为别名）：\n" +
+			"  选 2 的语义是「Master 自己终结 TLS」，对应 acme 模式。")
 	}
 }
 
@@ -732,5 +748,178 @@ func TestScriptFetchBypassesCDNCache(t *testing.T) {
 	if !strings.Contains(body, `for _mark in binary_supports_config_key Caddyfile_has_domain CADDY_MARK PLAIN_HTTP`) {
 		t.Error("修复标记清单不完整：\n" +
 			"  每一项都对应一个已修的真机缺陷，少一项就少一次「你拿到旧脚本」的提醒。")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 第七轮（后半）：三个都来自真机实测
+// ---------------------------------------------------------------------------
+
+// 用户原话："修改下部署脚本 选择 1 直接是 caddy 反代，选择 2 直接是 Master 反代"。
+//
+// 背景：这两件事本来是同一件事的两种说法（谁做反代 = 谁持有证书、谁监听 443），
+// 却被拆成两问。真机上因此产出过至少两种自相矛盾的组合：
+//
+//	· 第一问标签是 `none`（字面"不要证书"）、第二问却默认 caddy 去申请证书；
+//	· 选 2) acme + 2) master，清单里却是"公开站监听 0.0.0.0:8080"。
+//
+// 这条钉三件事：
+//
+//	① 终结者由第一问**推导**，不再有第二问；
+//	② 推导链路：none→caddy，plain→空，其余→master；
+//	③ 公开站监听的默认值随终结者走（caddy→回环 8080，master→443）。
+func TestAccessModeQuestionDecidesTerminator(t *testing.T) {
+	body := readRepoFile(t, "../../scripts/deploy-master.sh")
+
+	// ① 第二问必须消失。留着它，用户就会按出上面那种组合。
+	if strings.Contains(body, `ask "选择终结者（1=caddy / 2=master）"`) {
+		t.Error("仍在单独提问「TLS 由谁终结」：\n" +
+			"  这一问与「对外访问方式」是同一件事的两种说法，拆开只会让用户\n" +
+			"  按出一个自相矛盾的组合（真机上出现过）。用户要求：选 1 就是\n" +
+			"  Caddy 反代、选 2 就是 Master 反代，一问到底。")
+	}
+
+	// ② 推导链路必须在（这是"选 1 = caddy、选 2 = master"的落点）。
+	// 判据取 case 的三条分支臂——它们是这段逻辑唯一的表现形式。
+	for _, arm := range []string{
+		`none) TLS_TERMINATOR="caddy" ;;`,
+		`plain) TLS_TERMINATOR="" ;;`,
+		`*) TLS_TERMINATOR="master" ;;`,
+	} {
+		if !strings.Contains(body, arm) {
+			t.Errorf("终结者推导缺少分支 %q：\n"+
+				"  终结者必须由对外访问方式推导出来（选 1=caddy、选 2/3/4=master、选 5 为空），\n"+
+				"  否则就又回到了「两个问题各自给默认值」那种会打架的状态。", arm)
+		}
+	}
+
+	// ③ 公开站监听的默认值必须随终结者变。
+	// 之前两种终结者都是 0.0.0.0:8080，于是选了 master 的人拿到一份
+	// "把自己监听在 8080、对外却宣告 https"的配置——https://域名（443）永远打不开。
+	if !strings.Contains(body, `master) _pl_default="0.0.0.0:443"`) {
+		t.Error("Master 自己终结 TLS 时，公开站监听的默认值不是 0.0.0.0:443：\n" +
+			"  Master 要自己监听 443 终结 TLS，默认给 8080 的话 https://域名 打不开。")
+	}
+	if !strings.Contains(body, `caddy) _pl_default="127.0.0.1:8080"`) {
+		t.Error("Caddy 终结 TLS 时，公开站监听的默认值不是 127.0.0.1:8080：\n" +
+			"  Caddy 反代过来，Master 只需监听回环；写 0.0.0.0 会把 8080 暴露到公网。")
+	}
+
+	// ④ install-master.sh 是同一套问答的镜像：那边也必须没有第二问。
+	inst := readRepoFile(t, "../../install-master.sh")
+	if strings.Contains(inst, `ask "选择终结者（1=caddy / 2=master）"`) {
+		t.Error("install-master.sh 里仍在单独提问「TLS 由谁终结」：\n" +
+			"  两个入口的问答必须一致，否则源码安装与免编译安装会给出不同的问题序列。")
+	}
+	if !strings.Contains(inst, `none) TLS_TERMINATOR="caddy" ;;`) {
+		t.Error("install-master.sh 没有把终结者改成推导式。")
+	}
+}
+
+// 用户原话："probe-master 启动，由于公开和后台是同一个域名，caddy 好像只反代了
+// 8080 端口，并没有反代 8081 导致访问管理端 404 page not found"，
+// 并附上了机器上的 Caddyfile —— 那是**上一版脚本**写的，里面没有分流规则。
+//
+// 根因不是"没修"，而是修了**没生效**：升级时判据说"已有该域名的站点块 → 保留"，
+// 于是旧块（无 /admin 分流）被原样留下，Caddy 永远不会用到新生成的规则。
+//
+// 这条钉：判据必须能区分"这个块是谁写的"——含我们的指纹就意味着**可以替换**。
+func TestCaddyfileFromOlderVersionGetsReplaced(t *testing.T) {
+	body := readRepoFile(t, "../../scripts/deploy-master.sh")
+
+	// ① 要有"这是不是我们写的"这个判据。
+	if !strings.Contains(body, `_caddy_ours="1"`) {
+		t.Error("没有判断「文件里有没有本脚本写的内容」：\n" +
+			"  只看「有没有目标域名的站点块」会把**上一版脚本自己写的**旧块也当成\n" +
+			"  「别人的配置」保留下来——真机上就是这样：脚本说部署完成，\n" +
+			"  /admin/ 还是 404，而 Caddyfile 里明明有一个看起来正常的站点块。")
+	}
+	// ② 判据要认两种形态：追加段的 CADDY_MARK 与整份生成的头部 CADDY_HEAD。
+	//
+	// ⚠ 这里必须钉**安装段**那一处，不能全文搜 `$CADDY_HEAD`：卸载段里有一份
+	// 同名的判据（caddyfile_restore），它会替安装段作证——把安装段的 CADDY_HEAD
+	// 识别删掉，全文搜索照样命中，护栏仍然全绿，而真机上"升级时旧站点块被保留"
+	// 的老问题原封不动地回来了（脚本说部署完成、/admin/ 还是 404）。
+	// 所以判据取**带安装段缩进**的那两行：安装段是 2 个 tab，卸载段是 3 个。
+	const installOwnsCheck = "\t\tif grep -qF \"$CADDY_MARK\" \"$CADDYFILE\" 2>/dev/null || " +
+		"grep -qF \"$CADDY_HEAD\" \"$CADDYFILE\" 2>/dev/null; then\n\t\t\t_caddy_ours=\"1\""
+	if !strings.Contains(body, installOwnsCheck) {
+		t.Error("安装段没有用 CADDY_HEAD（+ CADDY_MARK）认出「这个块是不是我们写的」：\n" +
+			"  已部署机器上的 Caddyfile 正是「整份由上一版脚本生成」的形态\n" +
+			"  （头部一行 `# 由 …生成` + 站点块，没有 CADDY_MARK）。\n" +
+			"  认不出来就只能整份保留，本轮的分流修复在升级时永远不会生效。\n" +
+			"  （注意：卸载段里有一份同名判据，别让它替你作证。）")
+	}
+	// ③ 认出来之后必须**真的替换**（重写），而不是只打印一句提示。
+	if !strings.Contains(body, "已按当前版本重写 $CADDYFILE") {
+		t.Error("认出旧块之后没有重写：\n" +
+			"  这条路径必须真的把旧站点块换成本版本生成的内容。")
+	}
+	// ④ 追加形态要用 CADDY_END 精确界定，否则摘除会留残（或删掉后面的用户站点）。
+	if !strings.Contains(body, `CADDY_END="# ---- 以上由 scripts/deploy-master.sh 生成 ----"`) {
+		t.Error("没有 CADDY_END 结束标记：\n" +
+			"  我们追加的那一段没有结束位置，「摘掉我们写的、保留别人的」就无从谈起。")
+	}
+	// ⑤ 反向：**同一个** awk 程序里 END 与「行首 }」不能同时当结束判据——会打架。
+	// 站点块收尾的 `}` 会先结束跳过，紧跟其后的 END 行就残留下来（实测踩过）。
+	//
+	// ⚠ 判据不能写成"某个固定缩进的两行子串"：早先的写法把续行缩进写死成 4 个
+	// tab，而安装段那一处在 5 个 tab 上——真把混用改回去也不会变红（假绿）。
+	// 所以逐个 awk 程序看：只要**同一个**程序里同时出现 `$0 == end` 与 `/^\}/`，
+	// 就是混用（卸载段那条只认 `}` 的规则是合法的，不会被误伤）。
+	for idx, off := 0, 0; ; idx++ {
+		j := strings.Index(body[off:], "awk -v mark=")
+		if j < 0 {
+			break
+		}
+		j += off
+		k := strings.Index(body[j:], `' "$CADDYFILE"`)
+		if k < 0 {
+			t.Fatalf("第 %d 个摘除用 awk 程序的结束位置找不到：结构变了，判据要跟着改。", idx+1)
+		}
+		prog := body[j : j+k]
+		if strings.Contains(prog, "$0 == end") && strings.Contains(prog, `/^\}/`) {
+			t.Error("同一个 awk 程序里同时用 CADDY_END 与行首 `}` 当结束判据：\n" +
+				"  两者会打架——站点块收尾的 `}` 先结束跳过，紧跟的 END 行残留（实测踩过）。\n" +
+				"  按「文件里有没有 END」分流成两条互斥的规则。")
+		}
+		off = j + 1
+	}
+}
+
+// 选了 Master 自己终结 TLS，而本机还有本脚本装的 Caddy 在跑：两个进程都要 443，
+// 后启动的必然 `bind: address already in use`。真机上出现过，而且被报成
+// "启动后立即退出"，等回滚之后用户才知道真正的原因。
+//
+// 这条钉：动手之前就要发现并给出选择。
+func TestMasterTerminatorChecksForCaddyPortConflict(t *testing.T) {
+	body := readRepoFile(t, "../../scripts/deploy-master.sh")
+
+	const marker = "Master 自己终结 TLS 时的端口冲突预检"
+	start := strings.Index(body, marker)
+	if start < 0 {
+		t.Fatal("没有「Master 自己终结 TLS」的端口冲突预检：\n" +
+			"  先按选项 1 装了 Caddy、再按选项 2 让 Master 自己终结，Caddy 仍占着 80/443，\n" +
+			"  Master 启动必然失败，而失败信息离真正的原因很远。")
+	}
+	// ⚠ 判据必须落在**这一段区间里**：`systemctl is-active caddy` 与
+	// `/etc/systemd/system/caddy.service` 在文件里各有两份（卸载段的
+	// caddyfile_restore 还有一份）。全文搜索会被那一份满足——变异只删预检里的
+	// 调用、护栏照样全绿，等于什么都没验。所以先切出预检段（到下一个
+	// `if [ -n "$ASK" ]; then` 之前），再在段内找。
+	end := strings.Index(body[start:], "\nif [ -n \"$ASK\" ]; then")
+	if end < 0 {
+		t.Fatal("找不到端口冲突预检段的结束位置：结构变了，判据要跟着改" +
+			"（别把 end 放宽成 -1，那会让区间变成整份文件，又回到「替身作证」）。")
+	}
+	region := body[start : start+end]
+
+	if !strings.Contains(region, "systemctl is-active caddy") {
+		t.Error("预检没有真的去看 Caddy 在不在跑。")
+	}
+	// 只许动"本脚本自己装的 Caddy"。停掉别人装的服务比"装不上"严重得多。
+	if !strings.Contains(region, "grep -q 'Server Probe' /etc/systemd/system/caddy.service") {
+		t.Error("预检没有区分「Caddy 是不是本脚本装的」：\n" +
+			"  无条件停掉 caddy 会把别人（发行版包、x-ui）的服务也停掉。")
 	}
 }

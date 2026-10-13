@@ -438,23 +438,25 @@ if [ -z "$NON_INTERACTIVE" ]; then
 	echo "下面几个问题决定对外访问方式，直接回车取方括号里的默认值。" >&2
 	echo >&2
 	cat >&2 <<'EOF'
-TLS 方式：
-  1) none       由前置反代终结 TLS。选它时本脚本会**自动装好 Caddy 并配好反代**
-                （自动申请与续期证书），所以这是最省事的一种
-  2) acme       Master 自己申请证书（需要一个已解析到本机的域名）
-  3) selfsigned 自签证书（用纯 IP 访问时，这是唯一可行的加密方式）
-  4) files      使用你已有的证书与私钥
+对外访问方式：
+  1) caddy      使用 HTTPS。证书自动申请与续期，反代也一并配好——本脚本会装好
+                Caddy 并把请求转给 Master，你只需要把域名解析到本机。
+                **最省事，推荐**
+  2) master     使用 HTTPS。证书由 Master 进程自己申请（内置 ACME 客户端），
+                Master 自己监听 443 并终结 TLS（需要一个已解析到本机的域名）
+  3) selfsigned 使用 HTTPS，但用自签证书（用纯 IP 访问时，这是唯一可行的加密
+                方式；浏览器会提示证书不受信任）。Master 自己终结
+  4) files      使用 HTTPS，证书与私钥用你已有的文件。Master 自己终结
 
-四种方式都**不需要你自己装 Caddy 或 Nginx 并手写配置**：选 1 时脚本会把反代
-连同证书申请一起配好；选 2 是 Master 自己终结 TLS。
+选 1 不需要你自己装 Caddy 或 Nginx 并手写配置；选 2~4 由 Master 自己扛下 443。
 EOF
 fi
 
 if [ -z "$TLS_MODE" ]; then
-	ask "选择 TLS 方式（1/2/3/4）" "1"
+	ask "选择对外访问方式（1/2/3/4）" "1"
 	case "$ASK_REPLY" in
-	1 | none | NONE | None) TLS_MODE="none" ;;
-	2 | acme | ACME | Acme) TLS_MODE="acme" ;;
+	1 | none | NONE | None | caddy | CADDY | Caddy) TLS_MODE="none" ;;
+	2 | acme | ACME | Acme | master | MASTER | Master) TLS_MODE="acme" ;;
 	3 | selfsigned | SelfSigned | SELF_SIGNED) TLS_MODE="selfsigned" ;;
 	4 | files | FILES | Files) TLS_MODE="files" ;;
 	*) TLS_MODE="$ASK_REPLY" ;;
@@ -501,44 +503,22 @@ if [ "$TLS_MODE" = "files" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 1b) 谁终结 TLS：Master 自己，还是由本脚本装的 Caddy 反代
+# 1b) 谁终结 TLS：由上面那一问**推导**，不再单独提问
 # ---------------------------------------------------------------------------
 #
-# 这一问就是"选 2/3/4 时别让我自己装反代"那条反馈的落点。
+# 这两件事本来是同一件事的两种说法：选了 1) caddy 就是"证书交给反代去办"，
+# 选了 2~4 就是"Master 自己拿着一份证书监听 443"。拆成两问只会让用户按出一个
+# 自相矛盾的组合（真机上确实出现过"终结者=master 却仍然监听 8080"）。
+# 用户的原话：**"选择 1 直接是 caddy 反代，选择 2 直接是 Master 反代"**。
 #
-# 为什么它是一个**独立于 TLS 方式**的问题：这两件事经常被当成一件事，其实不是——
-#   · TLS 方式 回答"证书从哪来"（不要证书 / 自动申请 / 自签 / 已有证书）；
-#   · 终结者   回答"谁拿着证书监听 443"（Master 进程自己 / 前面的 Caddy）。
-# 之前只问了前者，于是选了 acme 的人以为"自动"了，实际还得自己解决 80/443 的占用、
-# 自己装反代、自己保证续期——这一步没人替他做。
-#
-# 默认值按 TLS 方式给：
-#   · none      → caddy（"由前置反代终结"，那就由我们把这个反代装上）
-#   · 其它      → master（证书就是给 Master 自己用的）
-# 非交互时**不猜**：直接取这个默认值，与"问了再回车"的结果一致。
+# `--tls-terminator` 仍然可以显式给出，那时以它为准；只有这一处给默认值
+# （scripts/deploy-master.sh 里是同一个规则的镜像，两处必须一致）。
 if [ -z "$TLS_TERMINATOR" ]; then
 	case "$TLS_MODE" in
-	none) _term_default="caddy" ;;
-	*) _term_default="master" ;;
+	none) TLS_TERMINATOR="caddy" ;;
+	plain) TLS_TERMINATOR="" ;;
+	*) TLS_TERMINATOR="master" ;;
 	esac
-	if [ -z "$NON_INTERACTIVE" ]; then
-		cat >&2 <<'EOF'
-
-TLS 由谁终结：
-  1) caddy   本脚本自动安装 Caddy，生成反代配置 → 证书申请与续期全自动
-             你需要做的只有：把域名解析到本机、确认 80/443 没被别的服务占用
-  2) master  Master 进程自己监听 443（内置 ACME / 自签 / 你给的证书）
-
-EOF
-		ask "选择终结者（1=caddy / 2=master）" "$_term_default"
-		case "$ASK_REPLY" in
-		1 | caddy | CADDY | Caddy) TLS_TERMINATOR="caddy" ;;
-		2 | master | MASTER | Master) TLS_TERMINATOR="master" ;;
-		*) TLS_TERMINATOR="$ASK_REPLY" ;;
-		esac
-	else
-		TLS_TERMINATOR="$_term_default"
-	fi
 fi
 
 # caddy 终结时，TLS 由 Caddy 负责，Master 侧必须**不终结**（否则两个进程抢 443，

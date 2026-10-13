@@ -209,10 +209,22 @@ CADDYFILE="$CADDY_DIR/Caddyfile"
 # 这样用户自己加的站点不会被牵连；反过来，文件里没有这一行就意味着
 # "我们没动过它"（或者整份都是我们写的，见下面的判据）。
 CADDY_MARK="# ---- 以下由 scripts/deploy-master.sh 追加 ----"
+# 我们生成的内容的"头部指纹"。整份文件由我们写时，render_caddyfile 的第一行
+# 就是它；追加到别人的文件里时，它出现在 CADDY_MARK 之后。
+#
+# 为什么需要一个**头部**指纹而不只是 CADDY_MARK：已部署的机器上，Caddyfile
+# 往往是上一版脚本**整份生成**的（没有 CADDY_MARK），而升级时必须能认出
+# "这是我写的、可以替换"。否则旧站点块会被原样保留——真机上就出现了
+# "脚本说部署完成、/admin/ 依然 404"（旧块里没有分流规则）。
+CADDY_HEAD="# 由 scripts/deploy-master.sh 生成"
+# 我们那一段的结束标记。有了它，"替换我们写的段落"才能既精确又不牵连别人。
+CADDY_END="# ---- 以上由 scripts/deploy-master.sh 生成 ----"
 # "用户是否显式给过"这几个标记，用来区分"没给"和"给了一个恰好等于默认值的值"。# 缺了它们，像 TLS_MODE / PUBLIC_LISTEN 这种自带默认值的项就永远分不清
 # "来自默认值"还是"人来指定过"，结果是该问的没问、不该问的反复问。
 PUBLIC_LISTEN_GIVEN=""
 ADMIN_LISTEN_GIVEN=""
+# 公开监听这个值是不是来自"上次的答案"（见 ans_get PUBLIC_LISTEN 那一段）。
+PUBLIC_LISTEN_FROM_ANSWERS=""
 TLS_MODE_GIVEN=""
 ADMIN_USER_GIVEN=""
 ACME_CHALLENGE_GIVEN=""
@@ -267,8 +279,9 @@ deploy-master.sh —— Master 一键部署
 
 TLS：
   --tls-mode <none|files|selfsigned|acme>   默认 none
-  --tls-terminator <master|caddy>           谁终结 TLS：Master 自己 / 本脚本装的 Caddy
-                                            反代（默认：选了 none 就是 caddy，否则 master）
+  --tls-terminator <master|caddy>           谁终结 TLS（**默认由对外访问方式推导**：
+                                            选 1 = caddy，选 2/3/4 = master，选 5 为空；
+                                            一般不需要显式给）
   --proxy-domain <域名[,域名]>              与 --tls-terminator caddy 同用：反代哪些域名
   --tls-cert <文件> --tls-key <文件>          mode=files
   --tls-domain <域名[,域名]>                  mode=acme/selfsigned
@@ -441,7 +454,13 @@ known_nonempty() {
 # （记忆值自身用 known_nonempty 过一遍，免得把上次的空串当成一个选择。）
 if [ -z "$FRESH_ANSWERS" ]; then
 	_v="$(ans_get PUBLIC_LISTEN)"
-	if [ -z "$PUBLIC_LISTEN_GIVEN" ] && known_nonempty "$_v"; then PUBLIC_LISTEN="$_v"; fi
+	if [ -z "$PUBLIC_LISTEN_GIVEN" ] && known_nonempty "$_v"; then
+		PUBLIC_LISTEN="$_v"
+		# 记下来源：公开监听的默认值要随"谁终结 TLS"变（caddy→回环 8080，
+		# master→443）。区分"这个值来自记忆"与"还是内置默认"，才不至于把
+		# 用户上次答的端口悄悄改掉。
+		PUBLIC_LISTEN_FROM_ANSWERS="1"
+	fi
 	_v="$(ans_get ADMIN_LISTEN)"
 	if [ -z "$ADMIN_LISTEN_GIVEN" ] && known_nonempty "$_v"; then ADMIN_LISTEN="$_v"; fi
 	_v="$(ans_get TLS_MODE)"
@@ -770,14 +789,30 @@ if [ -n "$UNINSTALL" ]; then
 			if [ -f "$CADDYFILE.bak" ]; then echo "    ⚠ 残留：$CADDYFILE.bak（请手工处理）"
 			else echo "    已还原 $CADDYFILE（来自 $CADDYFILE.bak）"; fi
 		elif [ -f "$CADDYFILE" ]; then
-			if grep -q "$CADDY_MARK" "$CADDYFILE" 2>/dev/null; then
-				# 摘掉本脚本追加的那一段（从速记行到文件末尾）。
-				# 用 awk 而不是 sed：速记行里含 `#`，而 sed 的地址里写 `#` 会与
-				# 分隔符打架；awk 的字符串比较没有这个问题。
-				awk -v mark="$CADDY_MARK" '
-					$0 == mark { skip = 1; next }
-					!skip { print }
-				' "$CADDYFILE" >"$CADDYFILE.tmp" 2>/dev/null || true
+			# 判据要认**两种**我们的形态：CADDY_MARK（追加段）与 CADDY_HEAD
+			# （整份生成时的头部）。只认前者的话，在"整份由我们生成"的机器上
+			# 卸载会落到"像是你自己的配置，保留"——Caddyfile 留着、Caddy 继续
+			# 拿着旧域名申请证书，而用户以为已经卸干净了。
+			if grep -qF "$CADDY_MARK" "$CADDYFILE" 2>/dev/null || grep -qF "$CADDY_HEAD" "$CADDYFILE" 2>/dev/null; then
+				# 摘掉本脚本写的那一段。与安装段同一套分流规则（两处必须一致）：
+				#   · 有 CADDY_END → "追加"形态，精确摘除 MARK/HEAD..END；
+				#   · 没有 CADDY_END → "整份生成"形态，以**行首的 `}`**
+				#     （站点块收尾）为界。**不能**一路删到文件末尾，否则用户
+				#     加在我们后面的站点会被一起删掉。
+				# 用 awk 而不是 sed：速记行里含 `#`，在 sed 的地址里会与分隔符打架。
+				if grep -qF "$CADDY_END" "$CADDYFILE" 2>/dev/null; then
+					awk -v mark="$CADDY_MARK" -v head="$CADDY_HEAD" -v end="$CADDY_END" '
+						$0 == mark || $0 == head { skip = 1; next }
+						skip && $0 == end { skip = 0; next }
+						!skip { print }
+					' "$CADDYFILE" >"$CADDYFILE.tmp" 2>/dev/null || true
+				else
+					awk -v mark="$CADDY_MARK" -v head="$CADDY_HEAD" '
+						$0 == mark || $0 == head { skip = 1; next }
+						skip && /^\}/ { skip = 0; next }
+						!skip { print }
+					' "$CADDYFILE" >"$CADDYFILE.tmp" 2>/dev/null || true
+				fi
 				mv -f "$CADDYFILE.tmp" "$CADDYFILE" 2>/dev/null || true
 				# 摘完之后只剩空行/注释时，文件留着没有意义，删掉更诚实。
 				if ! grep -Eq '^[[:space:]]*[^#{[:space:]]' "$CADDYFILE" 2>/dev/null; then
@@ -915,10 +950,21 @@ if [ -z "$PUBLIC_ORIGIN" ] && [ -n "$ASK" ]; then PUBIP="$(detect_public_ip)"; f
 # 用户看出的矛盾是文案的错，不是他的错。改法是把两件事摆到台面上各占一个选项：
 #   1) auto  —— 要 HTTPS，证书交给本脚本装好的 Caddy 自动办（最省事）
 #   2) acme  —— 要 HTTPS，证书由 Master 进程自己申请
+#   1) caddy  —— 要 HTTPS，证书与反代都交给本脚本装好的 Caddy（最省事）
+#   2) master —— 要 HTTPS，证书由 Master 进程自己申请（内置 ACME），Master 自己终结
 #   3) selfsigned —— 要 HTTPS，自签（没有域名、只有 IP 时唯一可行）
 #   4) files —— 要 HTTPS，用你已有的证书
 #   5) plain —— 不要 HTTPS，只有纯 HTTP（**这种模式下脚本不会装任何反代**）
-# 选 1 与选 2~4 的差别只是"谁去申请证书"，都会终结 TLS；选 5 才是真正的 none。
+#
+# ⚠ 这一问**同时决定"证书从哪来"和"谁做反代"**，因为这两件事本来是同一件事的
+# 两种说法。曾经把它们拆成两问（TLS 方式 / 终结者），结果是：
+#   · 第一问选 1（标签是 `none`，字面"不要证书"）、第二问却默认 caddy 去申请证书，
+#     用户看到"选 1 = 没有 https"与"会去申请证书"直接矛盾；
+#   · 第二问的默认值随第一问变化，用户按回车取到的组合未必是他想要的；
+#   · 两次真机实测里，两问的组合至少产出了"终结者=master 却仍然监听 8080"这种
+#     配置形状说不通的结果。
+# 用户的原话：**"选择 1 直接是 caddy 反代，选择 2 直接是 Master 反代"**。
+# 所以现在一问到底，终结者由这一问的答案**推导**（见下面的 case），不再单独问。
 if [ -z "$TLS_MODE_GIVEN" ]; then
 	if [ -n "$ASK" ]; then
 		cat >&2 <<'EOF'
@@ -926,21 +972,23 @@ if [ -z "$TLS_MODE_GIVEN" ]; then
 下面几个问题决定对外访问方式，直接回车取方括号里的默认值。
 
 对外访问方式：
-  1) auto       使用 HTTPS。证书自动申请与续期（本脚本会装好 Caddy 并配好反代，
-                证书由 Caddy 负责），你只需要把域名解析到本机。**最省事，推荐**
-  2) acme       使用 HTTPS。证书由 Master 进程自己申请（需要一个已解析到本机的域名）
+  1) caddy      使用 HTTPS。证书自动申请与续期，反代也一并配好——本脚本会装好
+                Caddy 并把请求转给 Master，你只需要把域名解析到本机。
+                **最省事，推荐**
+  2) master     使用 HTTPS。证书由 Master 进程自己申请（内置 ACME 客户端），
+                Master 自己监听 443 并终结 TLS（需要一个已解析到本机的域名）
   3) selfsigned 使用 HTTPS，但用自签证书（没有域名、只能用纯 IP 访问时，这是
-                唯一可行的加密方式；浏览器会提示证书不受信任）
-  4) files      使用 HTTPS，证书与私钥用你已有的文件
+                唯一可行的加密方式；浏览器会提示证书不受信任）。Master 自己终结
+  4) files      使用 HTTPS，证书与私钥用你已有的文件。Master 自己终结
   5) plain      不使用 HTTPS，只提供纯 HTTP（不装任何反代，证书与 443 都不涉及）
 
-四种 HTTPS 方式都不需要你自己去装 Caddy/Nginx 并手写反代配置。
+选 1 不需要你自己去装 Caddy/Nginx 并手写反代配置；选 2~4 由 Master 自己扛下 443。
 EOF
 	fi
 	ask "选择对外访问方式（1/2/3/4/5）" "1"
 	case "$ASK_REPLY" in
-	1 | auto | AUTO | Auto) TLS_MODE="none" ;;
-	2 | acme | ACME | Acme) TLS_MODE="acme" ;;
+	1 | auto | AUTO | Auto | caddy | CADDY | Caddy) TLS_MODE="none" ;;
+	2 | acme | ACME | Acme | master | MASTER | Master) TLS_MODE="acme" ;;
 	3 | selfsigned | SelfSigned | SELF_SIGNED) TLS_MODE="selfsigned" ;;
 	4 | files | FILES | Files) TLS_MODE="files" ;;
 	5 | plain | PLAIN | Plain | none | NONE | None) TLS_MODE="plain" ;;
@@ -949,39 +997,20 @@ EOF
 	ans_put TLS_MODE "$TLS_MODE"
 fi
 
-# ---- 谁终结 TLS：Master 自己，还是由本脚本装的 Caddy 反代 ----
+# ---- 谁终结 TLS：由上面那一问**推导**，不再单独提问 ----
 #
-# 与上面那个问题是**两个维度**，之前混作了一个，这正是"选 2/3/4 还得自己装反代"
-# 的根源：
-#   · TLS 方式 回答"证书从哪来"（不要证书 / 自动申请 / 自签 / 已有证书）；
-#   · 终结者   回答"谁拿着证书监听 443"（Master 进程自己 / 前面的 Caddy）。
-#
-# 默认值按 TLS 方式给，且**只有这一处**给默认值（install-master.sh 里那份是同一个
-# 规则的镜像，两处都改了才一致；见 deploy_flags 护栏）：
-#   · 1=auto（脚本内部是 none）→ caddy：这一项的含义就是"证书交给本脚本装的
-#                                        反代去办"，所以终结者只能是 caddy；
-#   · plain（纯 HTTP）           → 不留终结者，见下面的"矛盾组合"处理；
-#   · 其它                        → master：证书就是给 Master 自己用的。
+# 两个维度曾经被拆成两个问题（"证书从哪来" / "谁拿着证书监听 443"），但它们
+# 其实是一一对应的，拆开只会让用户按出一个自相矛盾的组合：
+#   · 1=caddy（内部是 tls.mode=none）→ caddy：这一项的含义就是"证书交给反代去办"；
+#   · 5=plain（纯 HTTP）              → 不留终结者（见下面的归一化）；
+#   · 其余（acme/selfsigned/files）   → master：证书本来就是给 Master 自己用的。
+# `--tls-terminator` 仍然可以显式给出（命令行或环境变量），那时以它为准——
+# 只有这一处给默认值。
 if [ -z "$TLS_TERMINATOR" ]; then
 	case "$TLS_MODE" in
 	none) TLS_TERMINATOR="caddy" ;;
 	plain) TLS_TERMINATOR="" ;;
 	*) TLS_TERMINATOR="master" ;;
-	esac
-fi
-if [ -z "$TLS_TERMINATOR_GIVEN" ] && [ -n "$ASK" ] && [ "$TLS_MODE" != "plain" ]; then
-	cat >&2 <<'EOF'
-
-TLS 由谁终结（证书由谁拿着、由谁监听 443）：
-  1) caddy   本脚本自动安装 Caddy、生成反代配置，证书申请与续期全自动。
-             你只需保证：域名已解析到本机、80/443 没被别的服务占用
-  2) master  Master 进程自己监听 443 并终结 TLS（用你上面选的那种证书）
-EOF
-	ask "选择终结者（1=caddy / 2=master）" "$TLS_TERMINATOR"
-	case "$ASK_REPLY" in
-	1 | caddy | CADDY | Caddy) TLS_TERMINATOR="caddy" ;;
-	2 | master | MASTER | Master) TLS_TERMINATOR="master" ;;
-	*) TLS_TERMINATOR="$ASK_REPLY" ;;
 	esac
 fi
 ans_put TLS_TERMINATOR "$TLS_TERMINATOR"
@@ -1110,6 +1139,39 @@ if [ "$TLS_MODE" = "selfsigned" ] && [ -z "$TLS_DOMAINS$TLS_IPS" ]; then
 	fi
 fi
 
+# 公开站监听的默认值取决于**谁终结 TLS** —— 这两件事必须一致，否则装出来的
+# 是一份"把自己监听在 8080 上、对外却宣告 https"的配置：
+#   · caddy 终结  → Master 只需监听回环，443 由 Caddy 拿着（默认 127.0.0.1:8080）；
+#   · master 终结 → Master 自己监听 443 终结 TLS（默认 0.0.0.0:443）。
+#
+# 之前无论哪种终结者，默认值都是 0.0.0.0:8080。真机上选了 2) master 的用户，
+# 清单里看到的就是"公开站监听 0.0.0.0:8080"——Master 会在 8080 上提供 https，
+# 而 https://<域名>（443）永远打不开。
+#
+# 只在"没被显式指定"时调整；来自上次答案的值**不动**，但把后果说清楚
+# （他可能就是想 https://域名:8080，那是合法的，只是要知道代价）。
+if [ -z "$PUBLIC_LISTEN_GIVEN" ]; then
+	case "$TLS_TERMINATOR" in
+	caddy) _pl_default="127.0.0.1:8080" ;;
+	master) _pl_default="0.0.0.0:443" ;;
+	*) _pl_default="" ;;
+	esac
+	if [ -n "$_pl_default" ] && [ -z "$PUBLIC_LISTEN_FROM_ANSWERS" ]; then
+		PUBLIC_LISTEN="$_pl_default"
+	elif [ -n "$_pl_default" ] && [ "$PUBLIC_LISTEN" != "$_pl_default" ]; then
+		_pl_port="$(split_port "$PUBLIC_LISTEN")"
+		printf '\n注意：终结者=%s 时公开站监听一般是 %s，而你上次答的是 %s。\n' \
+			"$TLS_TERMINATOR" "$_pl_default" "$PUBLIC_LISTEN" >&2
+		if [ "$TLS_TERMINATOR" = "master" ] && [ "$_pl_port" != "443" ]; then
+			printf '      Master 会在 %s 上终结 TLS，而 https://<域名>（443）打不开。\n' \
+				"$PUBLIC_LISTEN" >&2
+		elif [ "$TLS_TERMINATOR" = "caddy" ] && [ "$_pl_port" = "443" ]; then
+			printf '      443 要留给 Caddy，Master 监听 443 会与它抢端口、启动即失败。\n' >&2
+		fi
+		printf '      想改用默认值：加 PROBE_FRESH_ANSWERS=1 重跑；或在这里直接回车后按提示改。\n' >&2
+	fi
+fi
+
 # 先问端口，再据此给"公开访问地址"一个像样的默认值。顺序反过来的话，
 # 默认地址里的端口会和用户刚选的端口对不上（提示 8080、实际听 9000）。
 if [ -z "$PUBLIC_LISTEN_GIVEN" ] && [ -n "$ASK" ]; then
@@ -1119,6 +1181,12 @@ if [ -z "$PUBLIC_LISTEN_GIVEN" ] && [ -n "$ASK" ]; then
 公开站监听：Caddy 会反代到这个地址，所以这里**只需监听回环**
 （推荐 127.0.0.1:8080）。写 0.0.0.0 的话 8080 会直接暴露在公网上，
 绕过 Caddy 的 https 与访问控制。
+EOF
+	elif [ "$TLS_TERMINATOR" = "master" ]; then
+		cat >&2 <<'EOF'
+
+公开站监听：Master 自己终结 TLS，所以要监听**对外的 443**（推荐 0.0.0.0:443）。
+        写别的端口也能用，但地址里必须带上端口（如 https://你的域名:8443）。
 EOF
 	fi
 	ask "公开站监听（端口，或 IP:端口；0.0.0.0 表示所有网卡）" "$PUBLIC_LISTEN"
@@ -1244,6 +1312,42 @@ ans_put TLS_KEY "$TLS_KEY"
 ans_put PROXY_DOMAINS "$PROXY_DOMAINS"
 # 口令与 ACME Token 一概不记：它们不进答案文件，理由与"不做命令行参数"相同。
 
+# ---------------------------------------------------------------------------
+# Master 自己终结 TLS 时的端口冲突预检
+# ---------------------------------------------------------------------------
+#
+# 443 只能有一个主人。真机上出现过：用户先按选项 1 装了 Caddy 反代，过一会儿
+# 又按选项 2 让 Master 自己终结——Caddy 还在跑着占 80/443，Master 启动必然
+# `bind: address already in use`，而脚本把它报成"启动后立即退出"，等回滚之后
+# 用户才知道真正的原因。
+#
+# 与其等到回滚，不如在**动手之前**说清楚并给他一个选择。只动"本脚本自己装的
+# Caddy"（判据与卸载段一致：服务单元里带 Server Probe 标记）；别人装的
+# Caddy/Nginx 只提示、不动手——停掉别人的服务是比"装不上"严重得多的错误。
+if [ "$TLS_TERMINATOR" = "master" ] && [ -z "$DRY_RUN" ] && command -v systemctl >/dev/null 2>&1; then
+	if systemctl is-active caddy >/dev/null 2>&1; then
+		_caddy_ours=""
+		if [ -f /etc/systemd/system/caddy.service ] &&
+			grep -q 'Server Probe' /etc/systemd/system/caddy.service 2>/dev/null; then
+			_caddy_ours="1"
+		fi
+		echo >&2
+		echo "注意：本机的 Caddy 正在运行，而 Master 自己终结 TLS 需要 443（以及 80 给 ACME）。" >&2
+		echo "      两个进程都要 443，后启动的那个必然报 address already in use。" >&2
+		if [ -n "$_caddy_ours" ]; then
+			if confirm "现在停掉并禁用本脚本装的 Caddy？"; then
+				systemctl stop caddy >/dev/null 2>&1 || true
+				systemctl disable caddy >/dev/null 2>&1 || true
+				echo "      已停止并禁用 caddy（配置仍在 $CADDYFILE，随时可以再启用）" >&2
+			else
+				echo "      保留 Caddy —— Master 启动时会因 443 被占用而失败并回滚。" >&2
+			fi
+		else
+			echo "      这台机器上的 Caddy 不是本脚本装的：请自行停掉它（systemctl stop caddy）后重跑。" >&2
+		fi
+	fi
+fi
+
 if [ -n "$ASK" ]; then
 	echo >&2
 	echo "即将执行：" >&2
@@ -1263,9 +1367,14 @@ if [ -n "$ASK" ]; then
 	elif [ "$TLS_MODE" = "none" ] && [ "$TLS_TERMINATOR" = "caddy" ]; then
 		_tls_note="HTTPS，证书由 Caddy 自动申请与续期"
 	else
-		_tls_note="$TLS_MODE"
-		if [ "$TLS_MODE" = "acme" ]; then _tls_note="$TLS_MODE（challenge=$ACME_CHALLENGE）"; fi
-		_tls_note="$_tls_note（终结者=$TLS_TERMINATOR）"
+		# 不再显示"终结者=xxx"——那是内部概念，用户选的就是"谁做反代"，
+		# 用结果说话即可。
+		case "$TLS_MODE" in
+		acme) _tls_note="HTTPS，证书由 Master 自己向 CA 申请（challenge=$ACME_CHALLENGE）" ;;
+		selfsigned) _tls_note="HTTPS，自签证书（浏览器会提示不受信任）" ;;
+		files) _tls_note="HTTPS，使用你提供的证书文件" ;;
+		*) _tls_note="$TLS_MODE（终结者=$TLS_TERMINATOR）" ;;
+		esac
 	fi
 	printf '  %s：%s\n' "对外访问" "$_tls_note" >&2
 	if [ "$TLS_TERMINATOR" = "caddy" ]; then
@@ -1665,7 +1774,7 @@ render_caddyfile() {
 	_need_split_admin=""
 	if [ "$_adm_target" != "$_pub_target" ]; then _need_split_admin="1"; fi
 
-	echo "# 由 scripts/deploy-master.sh 生成"
+	echo "$CADDY_HEAD"
 	echo "# Caddy 负责 https（证书自动申请与续期）并把请求反代给 Master。"
 	echo "# 公开站 $PUBLIC_LISTEN、管理端 $ADMIN_LISTEN（都是明文，证书与 443 由 Caddy 管）。"
 	echo
@@ -2219,6 +2328,21 @@ if [ "$TLS_TERMINATOR" = "caddy" ]; then
 	# 那份配置里根本没有我们要反代的域名——保留它的结果不是"尊重既有配置"，
 	# 而是**Caddy 没有 443 站点、不开 443、也拿不到证书**，用户看到的却是
 	# "反代已配好、部署完成"。所以判据换成：里面**有没有本次要用的那个域名**。
+	# 已有 Caddyfile 怎么办？这里**不能**只看"文件存在"就保留，也不能只看
+	# "有没有目标域名的站点块"就保留——后者漏掉了最关键的一种情况：
+	# **那个块是上一版脚本自己写的**。
+	#
+	# 真机踩过：上一版脚本写过 `mo.319082.xyz` 的站点块（那时还没有 /admin 分流），
+	# 升级时判据只说"已有该域名的站点块 → 保留"，于是本轮修复根本没生效——
+	# 用户看到的现象是"脚本说部署完成，/admin/ 还是 404 page not found"，
+	# 而且 Caddyfile 里明明有一个看起来完全正常的站点块。
+	#
+	# 所以判据是**这个块是谁写的**：
+	#   ① 文件里有我们的指纹（CADDY_MARK 段，或整份生成时的 CADDY_HEAD）
+	#      → 摘掉我们写的那一段，写入当前版本生成的内容（升级要让修复生效）；
+	#   ② 没有我们的痕迹、但有同名站点块 → 别人写的，保留并说明；
+	#   ③ 没有我们的痕迹、也没有同名站点 → 追加（保留别人的站点）；
+	#   ④ 文件不存在 → 直接写。
 	_caddy_dom="$(render_caddyfile | sed -n 's/^\([^ {]*\) {.*/\1/p' | head -n1)"
 	Caddyfile_has_domain() {
 		[ -f "$CADDYFILE" ] || return 1
@@ -2227,28 +2351,88 @@ if [ "$TLS_TERMINATOR" = "caddy" ]; then
 		# 不匹配注释里顺嘴提到的域名——否则一句注释就能让判据失效。
 		grep -Eq "^[[:space:]]*$1(:[0-9]+)?[[:space:]]*\{" "$CADDYFILE" 2>/dev/null
 	}
-	if [ -f "$CADDYFILE" ] && [ -z "$FORCE_CONFIG" ] && Caddyfile_has_domain "$_caddy_dom"; then
-		echo "    $CADDYFILE 已有 $_caddy_dom 的站点块，保留（要覆盖请加 --force-config）"
-	elif [ -f "$CADDYFILE" ] && [ -z "$FORCE_CONFIG" ]; then
-		# 有文件但没有目标域名：备份后并入我们的站点块，而不是整份覆盖——
-		# 里面可能有别人的站点（这台机器上就常见）。
+	# 文件里有没有**我们写的**内容。
+	_caddy_ours=""
+	if [ -f "$CADDYFILE" ]; then
+		if grep -qF "$CADDY_MARK" "$CADDYFILE" 2>/dev/null || grep -qF "$CADDY_HEAD" "$CADDYFILE" 2>/dev/null; then
+			_caddy_ours="1"
+		fi
+	fi
+	if [ ! -f "$CADDYFILE" ]; then
+		render_caddyfile >"$CADDYFILE"
+		chmod 0644 "$CADDYFILE"
+		echo "    已写入 $CADDYFILE"
+	elif [ -n "$_caddy_ours" ]; then
+		# 我们自己写的（可能是**上一版**写的）：摘掉旧段、写入新段。
+		# 这是"升级后修复真的生效"的关键一步。
 		cp -f "$CADDYFILE" "$CADDYFILE.bak" 2>/dev/null || true
-		if [ -n "$_caddy_dom" ] && grep -Eq "^[[:space:]]*[^#{]" "$CADDYFILE" 2>/dev/null; then
-			{
-				printf '\n%s\n' "$CADDY_MARK"
-				render_caddyfile
-			} >>"$CADDYFILE"
-			echo "    $CADDYFILE 里没有 $_caddy_dom 的站点块 → 已追加（原内容备份为 $CADDYFILE.bak）"
+		# 摘除分两种历史形态，规则**不能混用**（混用会打架）：
+		#   · 有 CADDY_END → 是"追加"形态：从 CADDY_MARK（或 CADDY_HEAD）到
+		#     CADDY_END 精确摘除。这里**不能**再看行首 `}`——站点块收尾的 `}`
+		#     会先结束跳过，紧跟其后的 END 行就残留下来了（实测踩过）。
+		#   · 没有 CADDY_END → 是"整份生成"形态（上一版的写法：头部一行
+		#     CADDY_HEAD + 站点块，没有结束标记）。这种文件整份都是我们写的，
+		#     直接按当前版本重写最可预测；试图用 `}` 规则去摘会在**分离形态**
+		#     （两个站点块）下摘不干净，留下重复的站点定义让 Caddy 起不来。
+		if grep -qF "$CADDY_END" "$CADDYFILE" 2>/dev/null; then
+			awk -v mark="$CADDY_MARK" -v head="$CADDY_HEAD" -v end="$CADDY_END" '
+				$0 == mark || $0 == head { skip = 1; next }
+				skip && $0 == end { skip = 0; next }
+				!skip { print }
+			' "$CADDYFILE" >"$CADDYFILE.tmp" 2>/dev/null || true
+			mv -f "$CADDYFILE.tmp" "$CADDYFILE" 2>/dev/null || true
+			if grep -Eq "^[[:space:]]*[^#{[:space:]]" "$CADDYFILE" 2>/dev/null; then
+				# 摘完之后还有别人的站点：追加我们这一版，并用首尾标记界定。
+				{
+					printf '\n%s\n' "$CADDY_MARK"
+					render_caddyfile
+					printf '%s\n' "$CADDY_END"
+				} >>"$CADDYFILE"
+				echo "    已更新 $CADDYFILE 里本脚本写的站点块（旧内容备份为 $CADDYFILE.bak）"
+			else
+				render_caddyfile >"$CADDYFILE"
+				echo "    已按当前版本重写 $CADDYFILE（旧内容备份为 $CADDYFILE.bak）"
+			fi
 		else
+			# "整份生成"形态（上一版的写法：头部一行 CADDY_HEAD + 站点块，
+			# 没有结束标记）。这种文件**整份都是我们写的**，按当前版本重写是
+			# 最可预测的做法。
+			#
+			# 为什么不用"以行首 `}` 为界摘除"：旧版在**分离形态**下会写两个
+			# 站点块（公开域名 + 管理域名），而 CADDY_HEAD 只有开头那一个。
+			# 摘除会在第一个 `}` 处停下，第二个块残留下来——结果是配置里同时
+			# 有旧的管理域名块与新生成的块，**重复的站点定义会让 Caddy 直接
+			# 起不来**。半个配置比"用户自己加的站点被覆盖"严重得多，所以这里
+			# 一律重写；真有人在里面加过自己的站点，原文件在 $CADDYFILE.bak。
 			render_caddyfile >"$CADDYFILE"
-			echo "    $CADDYFILE 原内容无有效站点 → 已写入（备份为 $CADDYFILE.bak）"
+			echo "    已按当前版本重写 $CADDYFILE（旧内容备份为 $CADDYFILE.bak）"
+			echo "      这次会带上按路径分流的规则（/admin/ 与 /api/admin/ 转给管理端）。"
 		fi
 		chmod 0644 "$CADDYFILE"
+	elif [ -n "$FORCE_CONFIG" ]; then
+		if [ -f "$CADDYFILE" ]; then cp -f "$CADDYFILE" "$CADDYFILE.bak" 2>/dev/null || true; fi
+		render_caddyfile >"$CADDYFILE"
+		chmod 0644 "$CADDYFILE"
+		echo "    已写入 $CADDYFILE（--force-config）"
+	elif Caddyfile_has_domain "$_caddy_dom"; then
+		echo "    $CADDYFILE 已有 $_caddy_dom 的站点块（**不是本脚本写的**），保留。"
+		echo "      若那个块不是你要的，加 --force-config 覆盖。"
+	elif grep -Eq "^[[:space:]]*[^#{]" "$CADDYFILE" 2>/dev/null; then
+		# 有文件但没有目标域名、也没有我们的痕迹：里面可能是别人的站点
+		# （这台机器上就常见），追加而不是整份覆盖。
+		cp -f "$CADDYFILE" "$CADDYFILE.bak" 2>/dev/null || true
+		{
+			printf '\n%s\n' "$CADDY_MARK"
+			render_caddyfile
+			printf '%s\n' "$CADDY_END"
+		} >>"$CADDYFILE"
+		chmod 0644 "$CADDYFILE"
+		echo "    $CADDYFILE 里没有 $_caddy_dom 的站点块 → 已追加（原内容备份为 $CADDYFILE.bak）"
 	else
 		if [ -f "$CADDYFILE" ]; then cp -f "$CADDYFILE" "$CADDYFILE.bak" 2>/dev/null || true; fi
 		render_caddyfile >"$CADDYFILE"
 		chmod 0644 "$CADDYFILE"
-		echo "    已写入 $CADDYFILE"
+		echo "    $CADDYFILE 原内容无有效站点 → 已写入（备份为 $CADDYFILE.bak）"
 	fi
 	# 反代域名必须解析到本机，否则 Caddy 申请证书会失败（而失败信息出现在
 	# caddy 的日志里，不在本脚本的输出里，用户基本找不到）。
