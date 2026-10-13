@@ -36,6 +36,10 @@
 # 其余参数原样透传给 scripts/deploy-master.sh（--public-origin、--admin-origin、
 # --admin-user、--public-listen、--admin-listen、--dir、--data、--bin-dir、
 # --dist-base、--no-service、--force-config，以及全部 --tls-* 与 --acme-* 参数）。
+#
+# 问答分两处，不是漏了：TLS 方式、对外地址、管理员账号在这里问（排在装依赖与编译
+# 之前，答案错了就不必动系统）；**监听端口**由 scripts/deploy-master.sh 在落盘前问。
+# 端口的默认值只有部署脚本那一份来源，跟着它问才不会出现"提示写 8080、实际听 8081"。
 
 set -eu
 
@@ -108,7 +112,15 @@ while [ $# -gt 0 ]; do
 	--go-version) GO_VERSION="${2:-}"; shift 2 ;;
 	--goproxy) GOPROXY_OVERRIDE="${2:-}"; shift 2 ;;
 	--no-deps) NO_DEPS="1"; shift ;;
-	--yes | -y) NON_INTERACTIVE="1"; shift ;;
+	# --yes 除了让本脚本不提问，还要让**部署脚本**也别问（它还会问监听端口，
+	# 那些项本脚本不收集）。用环境变量而不是把 --yes 透传：部署脚本可能来自用户
+	# 指定的旧 ref，而旧版本对未知参数是硬失败（exit 2），环境变量则新旧都能收。
+	--yes | -y)
+		NON_INTERACTIVE="1"
+		PROBE_NO_ASK=1
+		export PROBE_NO_ASK
+		shift
+		;;
 	--dry-run) DRY_RUN="1"; shift ;;
 	--public-origin) PUBLIC_ORIGIN="${2:-}"; shift 2 ;;
 	--admin-origin) ADMIN_ORIGIN="${2:-}"; shift 2 ;;
@@ -472,6 +484,9 @@ if [ -z "$NON_INTERACTIVE" ]; then
 	printf '  %-10s %s\n' "源码" "$SRC（git clone $REPO，分支 $REF）" >&2
 	printf '  %-10s %s\n' "公开地址" "$PUBLIC_ORIGIN" >&2
 	printf '  %-10s %s\n' "管理地址" "${ADMIN_ORIGIN:-与公开地址相同}" >&2
+	# 监听端口不在这里问：默认值只有部署脚本那一份来源，问题与默认值必须同源，
+	# 所以端口由部署脚本在落盘前问（这里只说明"还会问一次"）。
+	printf '  %-10s %s\n' "监听端口" "随后确认（默认 8080 / 8081）" >&2
 	printf '  %-10s %s\n' "管理员" "$ADMIN_USER（口令随后交互输入）" >&2
 	printf '  %-10s %s\n' "TLS" "$TLS_MODE" >&2
 	if [ -n "$NO_SERVICE" ]; then

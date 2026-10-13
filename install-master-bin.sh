@@ -22,11 +22,16 @@
 #   # 表现为莫名其妙的"需要 root"：
 #   sudo sh -c "$(curl -fsSL <URL>)" xb --version v0.1.0 --tls-mode acme --tls-domain status.example.com
 #
+# 交互问答：**校验通过后会问你**——TLS 方式（要不要 https）、公开站与管理端各监听
+# 哪个端口、对外访问地址、管理员账号与口令。所以不会出现"下载校验都成功、配置文件
+# 里却没有 public_origin"这种半成品；不想被问就加 --yes 并把参数显式给全。
+#
 # 常用参数：
 #   --version <vX.Y.Z>   指定版本（默认取最新 Release）
 #   --repo <owner/repo>  仓库（默认 koyoca/XB-Probe）
 #   --mirror <URL前缀>   加速下载（如 https://ghfast.top/https://github.com）
 #   --arch <amd64|arm64> 覆盖架构探测（默认按 uname -m）
+#   --script-ref <ref>   取 scripts/deploy-master.sh 的 ref（默认 main）
 #   --no-service         只装不注册服务（容器里用；不需要 root）
 #   --yes                不提问，全部取给定参数/默认值
 #   --dry-run            下载并校验，但不安装、不改动系统
@@ -35,6 +40,10 @@
 # 其余参数原样透传给 scripts/deploy-master.sh（--public-origin、--admin-origin、
 # --admin-user、--public-listen、--admin-listen、--dir、--data、--bin-dir、
 # --dist-base、--force-config，以及全部 --tls-* 与 --acme-* 参数）。
+#
+# 为什么部署脚本取自 --script-ref（默认 main）而不是二进制的那个标签：二进制按版本
+# 钉死（要可复现），脚本允许独立演进——修一句提问、补一条诊断，不该逼所有人换版本号
+# 重发一版。需要"二进制与脚本严格同版"的场景，把它设成 --script-ref v0.1.1 即可。
 
 set -eu
 
@@ -42,6 +51,9 @@ REPO_RAW="${XB_REPO:-koyoca/XB-Probe}"
 VERSION="${XB_VERSION:-}"
 MIRROR="${XB_MIRROR:-}"
 ARCH_OVERRIDE="${XB_ARCH:-}"
+# 取 scripts/deploy-master.sh 用哪个 ref（默认 main，不是二进制那个标签）。
+# 与 VERSION 分开：一个管"装哪一版的二进制"，一个管"用哪一版的部署脚本"。
+SCRIPT_REF="${XB_SCRIPT_REF:-main}"
 NO_SERVICE=""
 NON_INTERACTIVE=""
 DRY_RUN=""
@@ -59,6 +71,7 @@ install-master-bin.sh —— XB-Probe Master 免编译部署（从 Releases 取�
   --repo <owner/repo>   仓库（默认 koyoca/XB-Probe）
   --mirror <URL前缀>    加速下载
   --arch <amd64|arm64>  覆盖架构探测
+  --script-ref <ref>    取部署脚本的 ref（默认 main）
   --no-service          只装不注册服务（不需要 root）
   --yes                 不提问
   --dry-run             只下载校验，不安装
@@ -68,6 +81,8 @@ install-master-bin.sh —— XB-Probe Master 免编译部署（从 Releases 取�
   --public-origin/--admin-origin/--admin-user/--public-listen/--admin-listen/
   --dir/--data/--bin-dir/--dist-base/--force-config/
   --tls-mode/--tls-cert/--tls-key/--tls-domain/--tls-ip/--acme-email/--acme-ca/--acme-challenge
+
+不加 --yes 时会交互提问（TLS 方式、监听端口、公开/管理端地址、管理员与口令）。
 EOF
 }
 
@@ -129,11 +144,19 @@ while [ $# -gt 0 ]; do
 	--repo) REPO_RAW="${2:-}"; shift 2 ;;
 	--mirror) MIRROR="${2:-}"; shift 2 ;;
 	--arch) ARCH_OVERRIDE="${2:-}"; shift 2 ;;
+	--script-ref) SCRIPT_REF="${2:-}"; shift 2 ;;
 	--no-service) NO_SERVICE="1"; PASSTHRU="$PASSTHRU --no-service"; shift ;;
-	# --yes 只影响本脚本的"是否允许交互"判断，**不能透传**：
-	# deploy-master.sh 对未知参数是硬失败（"未知参数" + exit 2），
+	# --yes 只影响本脚本的判断，**不能用 --yes 透传**给部署脚本：
+	# 老版本的 deploy-master.sh 对未知参数是硬失败（"未知参数" + exit 2），
 	# 于是"加了 --yes 反而装不上"——一个只在非交互场景才出现的坑。
-	--yes | -y) NON_INTERACTIVE="1"; shift ;;
+	# 改用它认得的环境变量 PROBE_NO_ASK：新旧部署脚本都能安全接收（老脚本忽略它），
+	# 子进程自然继承，也不必去维护一份"哪些参数能透传"的清单。
+	--yes | -y)
+		NON_INTERACTIVE="1"
+		PROBE_NO_ASK=1
+		export PROBE_NO_ASK
+		shift
+		;;
 	--dry-run) DRY_RUN="1"; shift ;;
 	-h | --help) usage; exit 0 ;;
 	--)
@@ -311,17 +334,23 @@ fi
 say "二进制自检通过：$("$TMP/$BIN_NAME" version)"
 
 # ---------------------------------------------------------------------------
-# 3) 取同一标签的部署脚本
+# 3) 取部署脚本
 # ---------------------------------------------------------------------------
 
-# 部署逻辑只有一份（scripts/deploy-master.sh），这里按**同一个标签**取回来执行。
-# 这样做有两个好处：① 不必把 600 行配置/服务逻辑抄第二遍（抄了就是两处要一起改）；
-# ② 二进制与部署脚本版本严格一致——拿新二进制配旧脚本是"配置键对不上"的经典来源。
-say "取部署脚本（$TAG）"
+# 部署逻辑只有一份（scripts/deploy-master.sh），取回来直接执行——不把 600 行
+# 配置/服务逻辑抄第二遍（抄了就是两处要一起改）。
+#
+# 取的 ref 默认是 main，而不是二进制那个标签：**二进制按版本钉死（要可复现），
+# 脚本允许独立演进**。修一句提问、补一条诊断就不该逼所有人换版本号，所以这里
+# 默认跟 main；要严格同版用 --script-ref "$TAG"。
+# 代价是可能出现"新脚本 + 旧二进制"，而写错配置键会让 Master 启动即失败
+# （LoadMaster 是严格解析，会点名是哪个键），不是静默失效；脚本这一侧还有
+# internal/config 的 TestDeployScriptsOnlyWriteKnownConfigKeys 逐项比对。
+say "取部署脚本（$SCRIPT_REF）"
 DEPLOY="$TMP/deploy-master.sh"
-download "$RAW_BASE/$TAG/scripts/deploy-master.sh" >"$DEPLOY" || {
-	err "取不到 $RAW_BASE/$TAG/scripts/deploy-master.sh"
-	err "旧版本标签里可能还没有这个脚本（它是与免编译部署一起加的）。"
+download "$RAW_BASE/$SCRIPT_REF/scripts/deploy-master.sh" >"$DEPLOY" || {
+	err "取不到 $RAW_BASE/$SCRIPT_REF/scripts/deploy-master.sh"
+	err "早期标签里可能还没有这个脚本（它与免编译部署一起加的）；用 --script-ref 换一个 ref。"
 	exit 1
 }
 if ! grep -q '^#!/bin/sh' "$DEPLOY"; then
@@ -332,9 +361,11 @@ fi
 if [ -n "$DRY_RUN" ]; then
 	echo >&2
 	say "（dry-run）下载与校验已完成，未安装、未改动系统。"
-	printf '  %-10s %s\n' "二进制" "${TMP}/${BIN_NAME}（已通过 sha256 与 version 自检）" >&2
-	printf '  %-10s %s\n' "部署脚本" "$DEPLOY" >&2
-	printf '  %-10s %s\n' "下一步" "去掉 --dry-run 即执行：sh $DEPLOY --bin <二进制> $PASSTHRU" >&2
+	# 不打印临时路径：EXIT trap 马上会把临时目录删掉，给一个立刻不存在的路径
+	# 只会让人照着敲一遍，再吃一个"文件不存在"。
+	printf '  %-10s %s\n' "二进制" "$BIN_NAME（sha256 与 version 自检均通过）" >&2
+	printf '  %-10s %s\n' "部署脚本" "scripts/deploy-master.sh @ $SCRIPT_REF（已取到）" >&2
+	printf '  %-10s %s\n' "下一步" "去掉 --dry-run 重跑本脚本（其余参数照旧）" >&2
 	exit 0
 fi
 

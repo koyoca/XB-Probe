@@ -46,6 +46,9 @@ sh install-master-bin.sh --dry-run --version v0.1.0
 
 只发布 `linux/amd64` 与 `linux/arm64`。其它架构（含 FreeBSD）请用方式 B，它会现场编译。
 
+部署脚本取自 `main`（可用 `--script-ref` 换成某个标签）：**二进制按版本钉死、脚本独立演进**，
+这样修一句提问或补一条诊断不必重发一版。
+
 ### 方式 B：取源码现场编译
 
 在**全新机器**上一条命令完成：检查/安装依赖（git、Go）→ `git clone` 拉取源码 → 编译 →
@@ -59,8 +62,18 @@ sudo sh -c "$(curl -fsSL https://raw.githubusercontent.com/koyoca/XB-Probe/main/
 
 ### 两种方式共同的注意事项
 
-脚本会依次问你：TLS 方式、域名与邮箱、公开站/管理端地址、管理员账号与口令等，**直接回车取默认值**。
+脚本会依次问你：**TLS 方式（`none` / `acme` / `selfsigned` / `files`）**、域名与邮箱、**公开站与管理端
+各监听哪个端口**、公开站与管理端地址、管理员账号与口令，**每一步直接回车取方括号里的默认值**。
+最后会把将要做的事列一遍让你确认。
+
+也就是说：**不需要事后手改 `master.yaml`**。想先看看会写成什么样，用部署脚本自己的预览：
+
+```bash
+sudo sh /path/to/deploy-master.sh --bin ./probe-master --dry-run    # 打印将要写入的 master.yaml
+```
+
 全程幂等——**再执行一次就是升级**（不会重建数据目录，也不会覆盖已有 `master.yaml`）。
+参数给全了就不问（`--yes` 等价于"全部别问"），所以同样的脚本也适合自动化。
 
 > **为什么不是 `curl … | sudo sh`**：管道会把 stdin 占掉，脚本里的 `read` 立刻拿到 EOF，
 > 于是所有交互项都静默取默认值（甚至空口令）——这正是"一键装完却登不进后台"的常见原因。
@@ -94,10 +107,10 @@ sudo sh install-master-bin.sh --yes \
   --tls-mode acme --tls-domain status.example.com --acme-email ops@example.com
 ```
 
-`--help` 看全量参数：`--version` / `--repo` / `--mirror` / `--arch` / `--tls-mode` / `--public-origin` /
-`--admin-origin` / `--admin-user` / `--public-listen` / `--admin-listen` / `--dir` / `--data` / `--bin-dir` /
-`--dist-base` / `--no-service` / `--force-config` / `--dry-run` / `--yes`（方式 B 另有 `--ref` / `--src` /
-`--go-version` / `--goproxy` / `--no-deps`）。
+`--help` 看全量参数：`--version` / `--repo` / `--mirror` / `--arch` / `--script-ref` / `--tls-mode` /
+`--public-origin` / `--admin-origin` / `--admin-user` / `--public-listen` / `--admin-listen` / `--dir` /
+`--data` / `--bin-dir` / `--dist-base` / `--no-service` / `--force-config` / `--dry-run` / `--yes`
+（方式 B 另有 `--ref` / `--src` / `--go-version` / `--goproxy` / `--no-deps`）。
 
 ## 部署（Windows）
 
