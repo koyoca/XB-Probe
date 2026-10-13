@@ -635,8 +635,12 @@ MUTANTS = [
      "./internal/config/", "TestLoadMasterRejectsUnknownKey"),
     # 部署脚本必须只写 MasterConfig 认识的顶层键。这里把已经修掉的
     # `install:` 段塞回去——install.* 是数据库设置，写进配置只会静默失效。
+    # 锚点必须带上下文：`echo 'tls:'` 现在每个 TLS 分支各一份（none/files/selfsigned/acme），
+    # 只写它会在 deploy-master.sh 里命中 4 次（不变量 20 的坑 ③：锚点打偏）。
+    # 下面钉的是 none 分支那两行，唯一。
     ("部署脚本塞回不存在的 install: 段（Linux）", "scripts/deploy-master.sh",
-     "echo 'tls:'", "echo \"install:\"\n\t\techo 'tls:'",
+     "\t\t\techo 'tls:'\n\t\t\techo '  mode: \"none\"",
+     "\t\t\techo \"install:\"\n\t\t\techo 'tls:'\n\t\t\techo '  mode: \"none\"",
      "./internal/config/", "TestDeployScriptsOnlyWriteKnownConfigKeys"),
     ("部署脚本塞回不存在的 install: 段（Windows）", "scripts/deploy-master.ps1",
      '[void]$lines.Add("tls:")', '[void]$lines.Add("install:")\n    [void]$lines.Add("tls:")',
@@ -724,6 +728,19 @@ MUTANTS = [
     ("站点形态设置项没有中文标签", "internal/api/adminui/admin.js",
      "'site.layout': ['站点形态'", "'site.layout': ['site.layout'",
      "./internal/theme/", "TestAdminSiteLayoutSettingsHaveChineseLabels"),
+    # --- Agent install：显式 --dir 的 root 判定（Linux 非 root 才触发，本机验不到） ---
+    # 规则本身：把 --no-service 那条短路抹掉，就退回"只看 init 名字"的旧规则，
+    # 于是 `install --no-service --dir <可写目录>` 在 Linux 非 root 上又被拒。
+    ("显式 --dir 的 root 判定忽略 --no-service", "internal/agent/cli/cli.go",
+     "\tif noService {\n\t\treturn false\n\t}",
+     "\tif false {\n\t\treturn false\n\t}",
+     "./internal/agent/cli/", "TestExplicitDirRootRuleTruthTable"),
+    # 接线：真值表只验规则本身，若 resolvePaths 把 --no-service 写成常量 false，
+    # 规则再对也没用——这类"只定义不调用"只能钉文本。
+    ("--no-service 传参被写死成 false", "internal/agent/cli/cli.go",
+     "needsRootForExplicitDir(noService, service.Detect().Name(), isRoot())",
+     "needsRootForExplicitDir(false, service.Detect().Name(), isRoot())",
+     "./internal/agent/cli/", "TestResolvePathsForwardsNoService"),
 ]
 
 

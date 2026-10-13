@@ -21,6 +21,13 @@
 # 4. **smoke-test 只在 ubuntu-latest 跑。** 脚本本身在 Windows/Git Bash 下
 #    也能跑（会跳过"优雅退出"一项，因为 MSYS 的 kill 无法向原生 PE 投递
 #    POSIX 信号），但 CI 上多一个平台就多一份 flaky，收益不及成本。
+#
+# 5. **Go 版本显式钉 1.27.2，不写 `go-version-file: go.mod`。**
+#    `go.mod` 的 go 指令是**下限**（1.26.0），不是我们发布时用的工具链。
+#    若让 setup-go 去读它，CI 会在 1.26.x 上构建，而发布产物是 1.27.2 编的——
+#    于是 "CI 绿" 与 "发布产物" 用的是两个编译器，出了问题两边对不上账。
+#    历史上这里正是从 go.mod 取版本（当年是 1.22），CI 于是用 1.22.x 构建，
+#    govulncheck 报出标准库里的 GO-2026-6617 才发现口径早就漂了。
 
 name: CI
 
@@ -59,7 +66,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: "1.27.2"
           cache: true
 
       # 把"取依赖"独立成一步：网络/代理/校验和的问题要在这里就带着清晰的错误失败，
@@ -103,7 +110,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: "1.27.2"
           cache: true
 
       # 把"取依赖"独立成一步：网络/代理/校验和的问题要在这里就带着清晰的错误失败，
@@ -135,7 +142,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: "1.27.2"
           cache: true
 
       # 把"取依赖"独立成一步：网络/代理/校验和的问题要在这里就带着清晰的错误失败，
@@ -182,7 +189,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: "1.27.2"
           cache: true
 
       # 把"取依赖"独立成一步：网络/代理/校验和的问题要在这里就带着清晰的错误失败，
@@ -211,7 +218,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: "1.27.2"
           cache: true
 
       # 把"取依赖"独立成一步：网络/代理/校验和的问题要在这里就带着清晰的错误失败，

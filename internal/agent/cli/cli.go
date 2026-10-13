@@ -167,7 +167,7 @@ func cmdInstall(args []string, version string) int {
 		return 2
 	}
 
-	cfgPath, binPath, err := resolvePaths(*dir)
+	cfgPath, binPath, err := resolvePaths(*dir, *noService)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "错误：", err)
 		return 1
@@ -375,16 +375,37 @@ func (m *multiFlag) Set(v string) error {
 	return nil
 }
 
-func resolvePaths(dir string) (cfgPath, binPath string, err error) {
+// needsRootForExplicitDir 判定"把 Agent 装进一个用户显式指定的目录（--dir）"是否需要 root。
+//
+// 抽成纯函数、并且把环境事实（是否 root、init 是不是 systemd）当参数传进来，
+// 有两个理由：
+//  1. 这条规则**只在 Linux 非 root 上才会被触发**。原地写条件就等于"只有 CI 验得到"，
+//     本机（Windows）永远测不出问题——它确实在 CI 上红过一次。
+//  2. 不读环境才能用一张真值表把它钉死（见 cli_test.go 的 TestExplicitDirRootRuleTruthTable）。
+//
+// 关键是 noService：**只有注册系统服务才需要 root**，而 --no-service 明确表示不注册
+// （容器 / 无 init / 只前台运行；install.sh 会按 /proc/1/comm 自动加它）。
+// 早先的实现只看 init 名字、完全不理 --no-service，于是
+// `probe-agent install --no-service --dir <可写目录>` 在 Linux 非 root 下被误判成
+// "安装为系统服务需要 root 权限"而直接失败——正是它自己的帮助文本承诺的用法。
+func needsRootForExplicitDir(noService bool, initName string, root bool) bool {
+	if noService {
+		return false
+	}
+	return initName == "systemd" && !root
+}
+
+func resolvePaths(dir string, noService bool) (cfgPath, binPath string, err error) {
 	if dir != "" {
-		svc := service.Detect().Name()
-		if svc == "systemd" && !isRoot() {
-			return "", "", fmt.Errorf("安装为系统服务需要 root 权限")
+		if needsRootForExplicitDir(noService, service.Detect().Name(), isRoot()) {
+			return "", "", fmt.Errorf("安装为系统服务需要 root 权限（或加 --no-service 只放文件）")
 		}
 		return filepath.Join(dir, "agent.yaml"), filepath.Join(dir, "probe-agent"), nil
 	}
+	// 缺省路径是系统目录（/usr/local/bin、/etc/probe-agent）：能不能写进去本身
+	// 就取决于权限，与是否注册服务无关，所以这条不看 noService。
 	if !isRoot() && runtime.GOOS != "windows" {
-		return "", "", fmt.Errorf("安装需要 root 权限（请使用 sudo）")
+		return "", "", fmt.Errorf("安装需要 root 权限（请使用 sudo，或用 --dir 指定可写目录）")
 	}
 	return agentconfig.DefaultPath(), filepath.Join(agentconfig.DefaultBinaryDir(), "probe-agent"), nil
 }

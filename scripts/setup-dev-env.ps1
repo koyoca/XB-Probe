@@ -102,11 +102,11 @@ if ($existing) {
     Write-Ok "已检测到 go：$v（$($existing.Source)）"
     if ($v -match 'go1\.(\d+)\.(\d+)') {
         $major = [int]$Matches[1]; $minor = [int]$Matches[2]
-        if ($major -gt 1 -or ($major -eq 1 -and $minor -ge 22)) {
-            Write-Ok "版本满足 go.mod 要求（>= 1.22），跳过安装。"
+        if ($major -gt 1 -or ($major -eq 1 -and $minor -ge 26)) {
+            Write-Ok "版本满足 go.mod 要求（>= 1.26），跳过安装。"
             $needInstall = $false
         } else {
-            Write-Warn2 "版本过低（需要 >= 1.22），将安装 $GoVersion 到用户目录并在本次会话中前置。"
+            Write-Warn2 "版本过低（需要 >= 1.26），将安装 $GoVersion 到用户目录并在本次会话中前置。"
         }
     }
 }
@@ -239,7 +239,7 @@ if (Test-UrlExists -Url 'https://goproxy.cn/github.com/gin-gonic/gin/@v/list') {
 } else {
     Write-Warn2 "goproxy.cn 不可达，未修改 GOPROXY（用默认 proxy.golang.org）"
 }
-# go.mod 只声明 go 1.22，不需要自动下载工具链；锁死可避免内网/CI 意外联网
+# go.mod 声明 go 1.26（下限），1.27.2 已满足，不需要自动下载工具链；锁死可避免内网/CI 意外联网
 & $goExe env -w GOTOOLCHAIN=local
 Write-Ok "GOTOOLCHAIN = local"
 Write-Ok ("GOMODCACHE = " + (& $goExe env GOMODCACHE))

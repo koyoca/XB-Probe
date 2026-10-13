@@ -51,7 +51,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 # go.mod 声明的最低 Go 版本，低于它构建会直接失败，所以在依赖检查阶段就拦下来。
-$MinGo = "1.22"
+$MinGo = "1.26"
 
 function Write-Step { param([string]$Msg) Write-Host "==> $Msg" -ForegroundColor Cyan }
 function Write-Warn2 { param([string]$Msg) Write-Host "警告：$Msg" -ForegroundColor Yellow }

@@ -73,8 +73,8 @@ __pycache__/
 # ---------------------------------------------------------------------------
 # vendor/：**不随仓库提交**（取舍理由见 docs/03 §3.2）
 #   `go mod vendor` 会把 modernc.org/libc / modernc.org/sqlite 各架构的生成代码
-#   一并落盘，实测 197 MB（其中 modernc.org 占 190 MB），压缩后仍要几十 MB，
-#   每次克隆都付这个体积；而依赖一共只有 18 个模块，走 GOPROXY 几 MB 就取全。
+#   一并落盘，实测约 208 MB（其中 modernc.org 占大头），压缩后仍要几十 MB，
+#   每次克隆都付这个体积；而依赖一共只有 32 个模块，走 GOPROXY 几 MB 就取全。
 #   所以仓库只提交 go.mod + go.sum，构建与 CI 一律 `go mod download`。
 #
 #   ⚠️ 本机可以自己执行 `go mod vendor` 以便离线构建（那份 vendor/ 只属于你的机器，

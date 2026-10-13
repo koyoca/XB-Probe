@@ -272,9 +272,10 @@ else
 		if [ -n "$ADMIN_ORIGIN" ]; then echo "admin_origin: \"$ADMIN_ORIGIN\""; fi
 		# 这里**绝不能**写 install: 段。install.mode / install.master_url /
 		# install.dist_base 都是**数据库设置**（读取方式是 repo.GetSettingDefault），
-		# 不是配置文件的字段：MasterConfig 里没有 install 这个键，而 YAML 解析
-		# 是非严格的——写了不报错，却**永远不生效**。这类"静默失效"最难发现：
-		# 配置文件里白纸黑字写着，后台设置页却是空的，只能靠人去比对。
+		# 不是配置文件的字段：MasterConfig 里没有 install 这个键，而 LoadMaster 走
+		# **严格解析**（KnownFields(true)）——写了它会**直接启动失败并点名是哪个键**。
+		# 之所以值得写这么长一段，是因为旧版解析是非严格的：脚本写进去的这一段
+		# 会被整段静默吞掉，配置文件里白纸黑字、后台设置页却是空的，只能靠人比对。
 		# 它们的唯一入口是后台「设置 → 安装与下载」。
 		# master_url 未设置时会回落到 public_origin（见 cmd/probe-master/main.go
 		# 的 MasterURL 闭包），所以给了 --public-origin 就不必再单独设它。

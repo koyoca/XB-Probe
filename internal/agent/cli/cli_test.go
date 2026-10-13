@@ -267,7 +267,10 @@ func TestInstallReadsCodeFromEnv(t *testing.T) {
 	t.Setenv("PROBE_CODE", "ENV-CODE")
 
 	dir := t.TempDir()
-	code, _, errOut := runCLI(t, "install", "--master", "://bad", "--dir", dir)
+	// --no-service 是**必须的隔离**：不隔离的话，Linux 非 root 上会先撞在
+	// "注册服务需要 root"那道门上，返回码同样是 1、stderr 同样带"错误："，
+	// 断言照样通过——但验的已经不是环境变量这条路了。
+	code, _, errOut := runCLI(t, "install", "--master", "://bad", "--dir", dir, "--no-service")
 	if code == 2 {
 		t.Fatalf("环境变量未被当作注册码（返回 2）：stderr=%q", errOut)
 	}
@@ -281,7 +284,10 @@ func TestInstallReadsCodeFromEnv(t *testing.T) {
 
 func TestInstallRejectsPlainHTTPWithoutFlag(t *testing.T) {
 	dir := t.TempDir()
-	code, _, errOut := runCLI(t, "install", "--master", "http://127.0.0.1:1", "--code", "ABC", "--dir", dir)
+	// 同 TestInstallReadsCodeFromEnv：加 --no-service 把权限门摘出这条断言，
+	// 否则在 Linux 非 root 上验的是"需要 root"而不是"拒绝明文 http"。
+	code, _, errOut := runCLI(t, "install", "--master", "http://127.0.0.1:1", "--code", "ABC",
+		"--dir", dir, "--no-service")
 	if code != 1 {
 		t.Fatalf("http:// 未加 --insecure-http 应返回 1，得到 %d", code)
 	}
@@ -554,16 +560,63 @@ func TestUninstallPromptDefaultsToCancel(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestResolvePathsWithExplicitDir(t *testing.T) {
+	// 显式 --dir + --no-service：文件只落进用户指定的目录、不注册任何系统服务，
+	// 所以非 root 也必须放行。（这条曾经是生产缺陷：Linux 非 root 上被误判成
+	// "安装为系统服务需要 root 权限"，见 TestExplicitDirRootRuleTruthTable。）
 	dir := t.TempDir()
-	cfgPath, binPath, err := resolvePaths(dir)
+	cfgPath, binPath, err := resolvePaths(dir, true)
 	if err != nil {
-		t.Fatalf("指定 --dir 不应报错：%v", err)
+		t.Fatalf("指定 --dir 且 --no-service 不应报错：%v", err)
 	}
 	if cfgPath != filepath.Join(dir, "agent.yaml") {
 		t.Errorf("配置路径不对：%q", cfgPath)
 	}
 	if binPath != filepath.Join(dir, "probe-agent") {
 		t.Errorf("二进制路径不对：%q", binPath)
+	}
+}
+
+// TestExplicitDirRootRuleTruthTable 用一张真值表钉死"显式 --dir 何时需要 root"。
+//
+// 为什么必须做成真值表、而不是直接跑 resolvePaths：这条规则只在
+// "非 root + init 是 systemd" 同时成立时才触发，而这恰恰是**开发机（Windows）
+// 构造不出来的环境**（Windows 上 service.Detect() 不是 systemd）。
+// 上一版把这个条件就地写在 resolvePaths 里、没人试过真值表里 noService=true 那一行，
+// 于是它自己的帮助文本承诺的容器用法（--no-service + 显式 --dir，非 root）
+// 在 CI 的 Linux 上直接失败——本机怎么跑都是绿的。
+func TestExplicitDirRootRuleTruthTable(t *testing.T) {
+	cases := []struct {
+		noService bool
+		initName  string
+		root      bool
+		want      bool
+	}{
+		{true, "systemd", false, false}, // 容器 / 前台跑：不注册服务 → 不需要 root（曾误判为 true）
+		{true, "systemd", true, false},  // 同上，是 root 也无所谓
+		{true, "openrc", false, false},  // 同上，换 init 也一样
+		{false, "systemd", false, true}, // 注册 systemd 服务 → 必须 root
+		{false, "systemd", true, false}, // root 下放行
+		{false, "openrc", false, false}, // 不注册 systemd 单元 → 不拦（与旧行为一致）
+	}
+	for _, c := range cases {
+		if got := needsRootForExplicitDir(c.noService, c.initName, c.root); got != c.want {
+			t.Errorf("needsRootForExplicitDir(noService=%v, init=%q, root=%v) = %v，期望 %v",
+				c.noService, c.initName, c.root, got, c.want)
+		}
+	}
+}
+
+// TestResolvePathsForwardsNoService 是**接线断言**：真值表只验了规则本身，
+// 如果 resolvePaths 忘了把 --no-service 传下去（或传成常量），规则再对也没用——
+// 这类"只定义不调用"的缺陷在源码里最难看出来，只能钉文本。
+func TestResolvePathsForwardsNoService(t *testing.T) {
+	src, err := os.ReadFile("cli.go")
+	if err != nil {
+		t.Fatalf("读 cli.go 失败：%v", err)
+	}
+	if !strings.Contains(string(src),
+		"needsRootForExplicitDir(noService, service.Detect().Name(), isRoot())") {
+		t.Fatal("resolvePaths 没有把 noService 传进权限判定——--no-service 会被静默忽略")
 	}
 }
 
@@ -575,9 +628,19 @@ func TestResolvePathsDefaultsPerPlatform(t *testing.T) {
 		t.Setenv("ProgramData", fakeProgramData)
 	}
 
-	cfgPath, binPath, err := resolvePaths("")
+	cfgPath, binPath, err := resolvePaths("", false)
+
+	// 非 Windows 且非 root 时缺省路径是系统目录（/usr/local/bin、/etc/probe-agent），
+	// **必须**被拒。这一层以前只在 Windows 上跑过，于是 Linux 非 root（也就是 CI）
+	// 上一直没被断言到——那时它验证的其实是"默认路径要 root"，而不是"不要 root"。
+	if runtime.GOOS != "windows" && !isRoot() {
+		if err == nil {
+			t.Fatal("非 root 且缺省路径指向系统目录时必须被拒，实际放行了")
+		}
+		return
+	}
 	if err != nil {
-		t.Fatalf("Windows/root-less 默认路径不应报错：%v", err)
+		t.Fatalf("缺省路径不应报错：%v", err)
 	}
 	if cfgPath != agentconfig.DefaultPath() {
 		t.Errorf("配置路径未采用平台默认：%q vs %q", cfgPath, agentconfig.DefaultPath())

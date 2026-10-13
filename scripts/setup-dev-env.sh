@@ -87,11 +87,11 @@ if command -v go >/dev/null 2>&1; then
   c_ok "已检测到 $CUR（$(command -v go)）"
   V=${CUR#go1.}
   V=${V%%.*}
-  if [ -n "$V" ] && [ "$V" -ge 22 ] 2>/dev/null; then
-    c_ok "版本满足 go.mod 要求（>= 1.22），跳过安装。"
+  if [ -n "$V" ] && [ "$V" -ge 26 ] 2>/dev/null; then
+    c_ok "版本满足 go.mod 要求（>= 1.26），跳过安装。"
     NEED_INSTALL=0
   else
-    c_warn "版本过低（需要 >= 1.22），将安装 Go $GO_VERSION。"
+    c_warn "版本过低（需要 >= 1.26），将安装 Go $GO_VERSION。"
   fi
 fi
 
@@ -256,7 +256,7 @@ if url_ok "https://goproxy.cn/github.com/gin-gonic/gin/@v/list"; then
 else
   c_warn "goproxy.cn 不可达，未修改 GOPROXY"
 fi
-"$GO_BIN/go" env -w GOTOOLCHAIN=local       # go.mod 只声明 1.22，锁死避免意外联网
+"$GO_BIN/go" env -w GOTOOLCHAIN=local       # go.mod 声明 1.26（下限），锁死避免意外联网
 c_ok "GOTOOLCHAIN = local"
 c_ok "GOMODCACHE = $("$GO_BIN/go" env GOMODCACHE)"
 
