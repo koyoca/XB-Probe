@@ -25,19 +25,20 @@
 # 只升级 Master 本体（照旧编译，但**不再问**站点/证书/管理员那一套）：
 #   powershell -ExecutionPolicy Bypass -File install-master.ps1 -UpgradeOnly
 #
+# 只更新 Agent 发布文件（查 GitHub 最新 Release 拉进 data_dir\dist\；不动 Master）：
+#   powershell -ExecutionPolicy Bypass -File install-master.ps1 -ReleaseOnly
+#
 # 只重置管理员密码（不卸载、不清数据、不重写配置）：
 #   powershell -ExecutionPolicy Bypass -File install-master.ps1 -ResetPassword
 #   口令按 $env:PROBE_ADMIN_PASSWORD / 交互的先后取（也可先给 deploy-master.ps1
 #   的 -AdminPassword）；用户名默认 ops，可用 -AdminUser 指定。
 #
-# 卸载与重置密码**不碰源码与 Go**：它们从仓库取回 scripts\deploy-master.ps1 执行
-# -Uninstall / -ResetPassword，所以不需要先装一套工具链，也不会因为 -Src 不在而失败。
+# 卸载与这三个"只做一件事"的模式**不碰源码与 Go**：它们从仓库取回 scripts\deploy-master.ps1
+# 执行对应的开关，所以不需要先装一套工具链，也不会因为 -Src 不在而失败。
+# 只升级本体（-UpgradeOnly）**要编译**——它换的二进制就来自现场编译。
 #
-# ⚠ 与 shell 入口（install-master.sh）的一处**有意的不对称**：那边会先弹一张
-# 「1 安装 / 2 卸载 / 3 只更新发布文件 / 4 只升级本体 / 5 重置密码」的菜单，本脚本
-# **没有菜单**——上面那两个新模式只走命令行开关。原因是菜单里的第 3 项
-# （只更新 Agent 发布文件）在 Windows 侧还没有对应实现，现在就把菜单搬过来，用户
-# 答 3 会被引导到"什么也没做"或"当成安装"，那比没有菜单更糟。等第 3 项补齐再搬。
+# 不加 -Yes 时会先弹一张「1 安装/升级 · 2 卸载 · 3 只更新发布文件 · 4 只升级本体 ·
+# 5 重置密码」的菜单（菜单只有一份，在部署脚本里），按答案决定要不要下载/编译。
 #
 # 问答分两处，不是漏了：TLS 方式、对外地址、管理员账号在这里问（排在装依赖与编译
 # 之前，答案错了就不必动系统）；**监听端口**由 scripts\deploy-master.ps1 在落盘前问。
@@ -60,6 +61,9 @@ param(
     # 只升级 Master 本体：照旧取源码 + 编译（本脚本的意义就在这），但**不再问**
     # 站点/证书/管理员那一套，编译完只把二进制换上去。
     [switch]$UpgradeOnly,
+    # 只更新 Agent 发布文件：不需要源码、不需要 Go，所以和卸载一样走"编译之前"
+    # 的早退通路（逻辑只有一份，在 scripts\deploy-master.ps1 的 -ReleaseOnly）。
+    [switch]$ReleaseOnly,
     # 只重置管理员密码：不需要源码、不需要 Go，所以和卸载一样走"编译之前"的早退通路。
     [switch]$ResetPassword,
 
@@ -182,37 +186,85 @@ function Install-Go {
 # 安安静静地卸载，用户以为自己在升级本体。
 $oneShotIn = @()
 if ($Uninstall) { $oneShotIn += "-Uninstall" }
+if ($ReleaseOnly) { $oneShotIn += "-ReleaseOnly" }
 if ($UpgradeOnly) { $oneShotIn += "-UpgradeOnly" }
 if ($ResetPassword) { $oneShotIn += "-ResetPassword" }
 if ($oneShotIn.Count -gt 1) {
     Write-Err2 "这几项都只做一件事，不能同时使用：$($oneShotIn -join " ")"
-    Write-Host "  「卸载」「只升级本体」「重置密码」一次只能选一个。" -ForegroundColor Red
+    Write-Host "  「卸载」「只更新发布文件」「只升级本体」「重置密码」一次只能选一个。" -ForegroundColor Red
     exit 2
 }
 
-if ($Uninstall -or $ResetPassword) {
+# Get-RawBase：把 GitHub 仓库地址换算成 raw 内容前缀（不带尾斜杠）。推导不出来
+# 就返回空——调用方据此"报错并给替代命令"，而不是瞎猜一个地址去下载一个可能不是
+# 我们要的脚本。**下载并执行一个来源不明的脚本**是这条链路上最危险的一步，
+# 宁可失败也不猜。
+function Get-RawBase {
+    param([string]$RepoUrl, [string]$GitRef)
+    if ($RepoUrl -notmatch "^https://github\.com/") { return "" }
+    $r = $RepoUrl -replace "^https://github\.com/", ""
+    $r = $r -replace "\.git$", ""
+    if ($r -notmatch "^[^/]+/[^/]+$") { return "" }
+    return "https://raw.githubusercontent.com/$r/$GitRef"
+}
+
+# ---------------------------------------------------------------------------
+# 0) 先问"做什么"（同样排在装依赖与编译之前）
+# ---------------------------------------------------------------------------
+#
+# 菜单只有一份（scripts\deploy-master.ps1 的 -AskMode），这里用 `-AskMode` 把答案
+# 取回来——**不自己画第二份菜单**。抄一份的话，将来加第 6 个模式这边不会跟着变，
+# 用户会看到一个缺项的菜单，而且不报任何错。
+#
+# 先问后做在这个入口上最值钱：这里的代价是"装一套 Go 工具链 + 克隆 + 编译几分钟"。
+# 选卸载 / 只更新发布文件 / 重置密码的人不该先付这个代价。
+#
+# 问不到就**什么都不做**，退回原来的行为（安装）：网络不通、-Repo 不是 GitHub 地址、
+# -Ref 指到了还没有 -AskMode 的旧标签——这些都不该让安装直接失败，因为"多问一次"
+# 只是体验差一点，而"因此装不上"是真损失。
+if ($oneShotIn.Count -eq 0 -and -not $Yes -and -not $DryRun) {
+    $askBase = Get-RawBase $Repo $Ref
+    if ($askBase) {
+        $askUrl = "$askBase/scripts/deploy-master.ps1"
+        $askDir = Join-Path $env:TEMP ("xb-ask-" + [Guid]::NewGuid().ToString("N").Substring(0, 8))
+        New-Item -ItemType Directory -Force -Path $askDir | Out-Null
+        $askScript = Join-Path $askDir "deploy-master.ps1"
+        $askOk = $false
+        try {
+            Invoke-WebRequest -Uri $askUrl -OutFile $askScript -UseBasicParsing -TimeoutSec 120
+            $askOk = (Test-Path $askScript) -and ((Get-Item $askScript).Length -gt 0)
+        } catch { $askOk = $false }
+        if ($askOk) {
+            # 菜单与提示走控制台（直接显示给用户），答案走 stdout——只可能是 1~5。
+            $ans = ""
+            try {
+                $ans = (& powershell -NoProfile -ExecutionPolicy Bypass -File $askScript -AskMode) | Select-Object -First 1
+            } catch { $ans = "" }
+            $ans = "$ans".Trim()
+            switch ($ans) {
+                "2" { $Uninstall = $true }
+                "3" { $ReleaseOnly = $true }
+                "4" { $UpgradeOnly = $true }
+                "5" { $ResetPassword = $true }
+                default { }
+            }
+        }
+        Remove-Item $askDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+if ($Uninstall -or $ResetPassword -or $ReleaseOnly) {
     $earlyWhat = "卸载"
     if ($ResetPassword) { $earlyWhat = "重置管理员密码" }
+    if ($ReleaseOnly) { $earlyWhat = "更新 Agent 发布文件" }
 
-    # 两者都要管理员：卸载要注销计划任务、删 ProgramData 下的目录；重置密码要写
-    # 数据目录里的数据库。只有"只看不删"的 -DryRun 例外。
+    # 三者都要管理员：卸载要注销计划任务、删 ProgramData 下的目录；重置密码要写
+    # 数据目录里的数据库；更新发布文件要往 data_dir\dist\ 里写。
+    # 只有"只看不做"的 -DryRun 例外。
     if (-not $DryRun -and -not (Test-Admin)) {
         Write-Err2 "$earlyWhat需要管理员权限（-DryRun 不需要）。"
         Write-Host "      请用「以管理员身份运行」的 PowerShell 重跑。" -ForegroundColor Red
         exit 1
-    }
-
-    # Get-RawBase：把 GitHub 仓库地址换算成 raw 内容前缀（不带尾斜杠）。推导不出来
-    # 就返回空——调用方据此"报错并给替代命令"，而不是瞎猜一个地址去下载一个可能不是
-    # 我们要的脚本。**下载并执行一个来源不明的脚本**是这条链路上最危险的一步，
-    # 宁可失败也不猜。
-    function Get-RawBase {
-        param([string]$RepoUrl, [string]$GitRef)
-        if ($RepoUrl -notmatch "^https://github\.com/") { return "" }
-        $r = $RepoUrl -replace "^https://github\.com/", ""
-        $r = $r -replace "\.git$", ""
-        if ($r -notmatch "^[^/]+/[^/]+$") { return "" }
-        return "https://raw.githubusercontent.com/$r/$GitRef"
     }
 
     $rawBase = Get-RawBase $Repo $Ref
@@ -249,14 +301,17 @@ if ($Uninstall -or $ResetPassword) {
         Write-Err2 "$rawUrl 看起来不是部署脚本（没有 -Uninstall 开关）。"
         exit 1
     }
-    # 同理，-ResetPassword 也要先探一下对面认不认识：本脚本来自仓库当前 ref，而
-    # 部署脚本从同一 ref 取——正常情况下两者同源。用户把 -Ref 指到某个旧标签时就不
-    # 同源了，那时 PowerShell 会抛一句「找不到与参数名 ResetPassword 匹配的参数」，
-    # 那句话既不说明原因、也不说明"这次什么都没做"。先探再传，报错才说得清。
-    if ($ResetPassword -and $deployText -notmatch "ResetPassword") {
-        Write-Err2 "取回的部署脚本不认识 -ResetPassword（大概 -Ref 指到了较早的提交）。"
-        Write-Host "      这次什么都没做。请改用 -Ref main，或先升级仓库再重跑。" -ForegroundColor Red
-        exit 2
+    # 同理，这几个新模式都要先探一下对面认不认识：本脚本来自仓库当前 ref，而部署
+    # 脚本从同一 ref 取——正常情况下两者同源。用户把 -Ref 指到某个旧标签时就不同源
+    # 了，那时 PowerShell 会抛一句「找不到与参数名 X 匹配的参数」，那句话既不说明
+    # 原因、也不说明"这次什么都没做"。先探再传，报错才说得清。
+    foreach ($probe in @("ResetPassword", "ReleaseOnly")) {
+        $probeOn = ($probe -eq "ResetPassword" -and $ResetPassword) -or ($probe -eq "ReleaseOnly" -and $ReleaseOnly)
+        if ($probeOn -and $deployText -notmatch $probe) {
+            Write-Err2 "取回的部署脚本不认识 -$probe（大概 -Ref 指到了较早的提交）。"
+            Write-Host "      这次什么都没做。请改用 -Ref main，或先升级仓库再重跑。" -ForegroundColor Red
+            exit 2
+        }
     }
 
     # 非交互（-Yes）也要传下去，否则子脚本还会再问一遍"继续？[y/N]"。
@@ -266,6 +321,8 @@ if ($Uninstall -or $ResetPassword) {
 
     if ($ResetPassword) {
         $dargs = @("-ResetPassword")
+    } elseif ($ReleaseOnly) {
+        $dargs = @("-ReleaseOnly")
     } else {
         $dargs = @("-Uninstall")
         if ($KeepData) { $dargs += "-KeepData" }

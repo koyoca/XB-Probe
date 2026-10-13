@@ -30,22 +30,87 @@ func TestWindowsScriptsMirrorTheShellOnes(t *testing.T) {
 	iUp := strings.Index(ps, "# 0.3) 只升级 Master 本体")
 	iRp := strings.Index(ps, "# 0.4) 重置管理员密码")
 	iQA := strings.Index(ps, "# 0.5) 交互问答")
+	iRel := strings.Index(ps, "# 0.2b) 只更新 Agent 发布文件")
 	if iUp < 0 || iRp < 0 {
 		t.Fatal("deploy-master.ps1 里找不到 0.3 / 0.4 两个模式块——判据已与脚本写法脱节。")
 	}
 	if iQA < 0 {
 		t.Fatal("deploy-master.ps1 里找不到交互问答段——判据已与脚本写法脱节。")
 	}
-	if iUp > iQA || iRp > iQA {
+	if iUp > iQA || iRp > iQA || iRel > iQA {
 		t.Error("两个新模式块排在了交互问答之后：\n" +
 			"  那样一来「只升级本体」的用户还是会被问一遍站点、证书、管理员——\n" +
 			"  正是这两条通路要消掉的东西。")
+	}
+	if !strings.Contains(ps, "[switch]$ReleaseOnly") {
+		t.Error("deploy-master.ps1 没有 -ReleaseOnly 这个开关。")
 	}
 
 	up := shRegion(t, "scripts/deploy-master.ps1", ps,
 		"# 0.3) 只升级 Master 本体", "# 0.4) 重置管理员密码")
 	rp := shRegion(t, "scripts/deploy-master.ps1", ps,
 		"# 0.4) 重置管理员密码", "if (-not $Bin -and -not (Test-Path $target))")
+
+	// ②b 只更新 Agent 发布文件（-ReleaseOnly）：菜单第 3 项必须真的有实现。
+	//
+	// 这一条是**被一次事故逼出来的**：本轮先把 5 项菜单搬到了 Windows 侧，而那时
+	// ps1 里根本没有 `dist pull` 这一步——菜单第 3 项写着"去 GitHub 查最新 Release
+	// 把发布文件拉进 data_dir/dist/"，实际什么都不做。这正是 shell 侧早就钉过的
+	// "菜单画了但分支没接"，到 Windows 侧重演了一遍，而且更糟：用户看到的是
+	// **一句承诺**。
+	//
+	// 更硬的后果也在同一处：没有这一步，Windows 一键部署出来的 Master 里
+	// data_dir\dist\ 是空的 → 新节点拿不到装机通道 → Agent 根本装不上。
+	// Linux 侧早就修了（TestDeployPullsReleaseFilesForNodeBootstrap）。
+	if iRel < 0 {
+		t.Error("deploy-master.ps1 里没有 -ReleaseOnly 这一块：\n" +
+			"  菜单第 3 项是对用户的一句承诺；没有它，data_dir\\dist\\ 会一直是空的，\n" +
+			"  新节点拿不到装机通道（/dist/ 恒 404），Agent 装不上。")
+	} else {
+		rel := shRegion(t, "scripts/deploy-master.ps1", ps,
+			"# 0.2b) 只更新 Agent 发布文件", "# 0.3) 只升级 Master 本体")
+		for _, forbidden := range []string{
+			"Set-Content",            // 写配置
+			"Copy-Item",              // 换二进制
+			"Register-ScheduledTask", // 动自启
+			"Stop-ScheduledTask",
+			"Start-ScheduledTask",
+			"init-admin",
+		} {
+			if strings.Contains(rel, forbidden) {
+				t.Errorf("0.2b（只更新发布文件）里出现了 %q：\n"+
+					"  这个模式只往 data_dir\\dist\\ 里写文件。换二进制、重写配置、动自启\n"+
+					"  都会把「只是更新 Agent 版本」变成一次没人预期的改动。", forbidden)
+			}
+		}
+		// 必须真的调用 dist pull，而且要是**调用形式**（`& $bin @args`），
+		// 不是注释里提一句。
+		if !strings.Contains(rel, "& $roBin @pullArgs") {
+			t.Error("0.2b 没有真的执行 dist pull——那发布文件是怎么来的？")
+		}
+		// **每一条分支**都得是 dist pull。只判"文件里有 `"dist", "pull"` 这句"
+		// 是不行的：它有两条分支（全部平台 / 只拉本机），改坏其中一条，另一条
+		// 会替它作证——而用户正好有可能走那条被改坏的。
+		nAssign := strings.Count(rel, "$pullArgs = @(")
+		nDist := strings.Count(rel, `$pullArgs = @("dist", "pull"`)
+		if nAssign < 1 || nDist != nAssign {
+			t.Errorf("0.2b 的 %d 条 dist pull 分支里有 %d 条不是 dist pull：\n"+
+				"  改坏一条分支，另一条会替它作证——而用户正好可能走被改坏的那条。",
+				nAssign, nAssign-nDist)
+		}
+		// 版本号必须过形态闸（纯数字点分），否则会把 HTML 错误页拼进 URL。
+		if !strings.Contains(ps, `if ($tag -notmatch '^\d+(\.\d+)*$') { return "" }`) {
+			t.Error("版本查询没有「纯数字点分」形态闸：\n" +
+				"  解析失败时拿到的是别的文字，拼进 .../releases/download/v<那段文字> 之后\n" +
+				"  症状变成「发布文件拉取失败」，根因被埋掉。")
+		}
+		// 判据必须落在磁盘上。
+		if !strings.Contains(rel, "SHA256SUMS") || !strings.Contains(rel, "xb-probe-agent_*") {
+			t.Error("0.2b 的成败判据没有落在磁盘上（SHA256SUMS + 产物计数）：\n" +
+				"  /dist/ 受 install.mode 门控，刚部署完返回 404 是预期行为，\n" +
+				"  拿 HTTP 状态码当判据会把每次正常部署都报成失败。")
+		}
+	}
 
 	// ② 只换二进制：这些动作在 0.3 里一个都不许出现。
 	//
@@ -124,6 +189,13 @@ func TestWindowsScriptsMirrorTheShellOnes(t *testing.T) {
 			"  非管理员给了一对互相矛盾的开关，只会看到「需要管理员」，看不到\n" +
 			"  「这两项不能同时用」——后者才是他真正要修的东西。")
 	}
+	// 同样要**逐个**钉：只判"有 .Count -gt 1 这个判断"，漏数一个模式也全绿。
+	for _, fl := range []string{"-Uninstall", "-ReleaseOnly", "-UpgradeOnly", "-ResetPassword"} {
+		if !strings.Contains(ps, `$oneShot += "`+fl+`"`) {
+			t.Errorf("deploy-master.ps1 没有把 %s 计入互斥：\n"+
+				"  矛盾的组合会静默做其中一件，而两条路都不报错。", fl)
+		}
+	}
 	// -AskMode 放行是"先问后做"的前提：那一步必然发生在"还没决定要装什么"的时候。
 	if !strings.Contains(ps, "-not $DryRun -and -not $pr.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)") {
 		t.Error("deploy-master.ps1 的管理员检查里没有放行 -AskMode：\n" +
@@ -151,11 +223,36 @@ func TestWindowsScriptsMirrorTheShellOnes(t *testing.T) {
 			"  它自己拼参数（而不是原样透传），被丢掉的那个永远到不了部署脚本，\n" +
 			"  于是一个自相矛盾的组合会安安静静地做另一件事。")
 	}
-	// 取回来的部署脚本认不认识 -ResetPassword 必须先探再传：本脚本与它同源于
+	// 光有"按个数判断"还不够——还得**每个**单次模式都被数进去。只判"有这个判断"
+	// 的话，漏数一个模式照样全绿（本脚本的变异 M32 就抓到了这一处：删掉
+	// `-ReleaseOnly` 那一行，护栏仍然说一切正常）。
+	for _, fl := range []string{"-Uninstall", "-ReleaseOnly", "-UpgradeOnly", "-ResetPassword"} {
+		if !strings.Contains(ips, `$oneShotIn += "`+fl+`"`) {
+			t.Errorf("install-master.ps1 没有把 %s 计入入口处的互斥：\n"+
+				"  不数它，它与别的单次模式同时给出时会被早退通路静默丢掉——\n"+
+				"  用户以为做了 A、实际做了 B。", fl)
+		}
+	}
+	// 取回来的部署脚本认不认识这几个新开关，必须先探再传：本脚本与它同源于
 	// 同一个 ref 时才安全，用户把 -Ref 指到旧标签时就不是了。
-	if !strings.Contains(ips, `if ($ResetPassword -and $deployText -notmatch "ResetPassword")`) {
-		t.Error("install-master.ps1 没有先探再传 -ResetPassword：\n" +
-			"  旧 ref 上的部署脚本会抛一句「找不到与参数名 ResetPassword 匹配的参数」，\n" +
-			"  那句话既不说明原因、也不说明「这次什么都没做」。")
+	//
+	// 判据钉在**那一份清单**上（两个开关写在同一个数组里），而不是各钉一条 if：
+	// 只钉一条的话，将来加第三个忘记探就没人拦——而漏探的后果是 PowerShell 抛一句
+	// 「找不到与参数名 X 匹配的参数」，既不说明原因也不说明"这次什么都没做"。
+	if !strings.Contains(ips, `foreach ($probe in @("ResetPassword", "ReleaseOnly"))`) {
+		t.Error("install-master.ps1 没有先探再传（-ResetPassword / -ReleaseOnly）。")
+	}
+	// 入口也要真的会问菜单（菜单只有一份，在部署脚本里），并且把 2/3/4/5 都映射上。
+	// 少映射一个的后果不是"没这个功能"，而是**用户选了 A、脚本做了 B**。
+	if !strings.Contains(ips, `-File $askScript -AskMode`) {
+		t.Error("install-master.ps1 没有用 -AskMode 去问「做什么」：\n" +
+			"  它必须先问再决定要不要装 Go / 要不要编译，否则选卸载的人要白等一次编译。")
+	}
+	for _, arm := range []string{`"2" { $Uninstall = $true }`, `"3" { $ReleaseOnly = $true }`,
+		`"4" { $UpgradeOnly = $true }`, `"5" { $ResetPassword = $true }`} {
+		if !strings.Contains(ips, arm) {
+			t.Errorf("install-master.ps1 的菜单答案映射里缺 %q：\n"+
+				"  用户答了这一项，脚本却按「安装」走——选了 A 做了 B。", arm)
+		}
 	}
 }

@@ -24,6 +24,10 @@
 # 只升级 Master 本体（换二进制 + 重启计划任务；不问站点/证书/管理员，也不改它们）：
 #   powershell -File scripts\deploy-master.ps1 -UpgradeOnly -Bin bin\xb-probe-master.exe
 #
+# 只更新 Agent 发布文件（查 GitHub 最新 Release 拉进 data_dir/dist/；不动 Master）：
+#   powershell -File scripts\deploy-master.ps1 -ReleaseOnly
+#   powershell -File scripts\deploy-master.ps1 -ReleaseOnly -DryRun   # 只打印会拉什么
+#
 # 只重置管理员密码（不卸载、不清数据、不重写配置、不重启任务）：
 #   powershell -File scripts\deploy-master.ps1 -ResetPassword
 #   口令按 -AdminPassword / $env:PROBE_ADMIN_PASSWORD / 交互的先后取；
@@ -69,6 +73,9 @@ param(
     [switch]$DryRun,
     [switch]$Uninstall,
     [switch]$KeepData,
+    # 只更新 Agent 发布文件：查 GitHub 最新 Release，把它的发布件拉进 data_dir/dist/。
+    # 不动 Master 的二进制、配置与自启（详见 0.2b）。
+    [switch]$ReleaseOnly,
     # 只升级 Master 本体：只换二进制 + 重启计划任务。配置、证书、管理员账号、
     # 发布目录一个都不动（详见 0.3）。
     [switch]$UpgradeOnly,
@@ -93,6 +100,15 @@ function Write-Err2 { param([string]$Msg) Write-Host "错误：$Msg" -Foreground
 # 0) 目标路径（参数默认值的唯一来源在 param() 与上面那两个常量里）
 $target = Join-Path $Dir "xb-probe-master.exe"
 $cfg = Join-Path $Dir "master.yaml"
+
+# 发布仓库：查「最新 Release」时的目标。与 shell 侧的 PROBE_RELEASE_REPO 同名同义。
+if ($env:PROBE_RELEASE_REPO) { $ReleaseRepo = $env:PROBE_RELEASE_REPO } else { $ReleaseRepo = "koyoca/XB-Probe" }
+
+# 本机平台（与 install.ps1 的命名一致：<os>_<arch>）。"只拉本机"时要用它。
+$LocalArch = "amd64"
+if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { $LocalArch = "arm64" }
+elseif (-not [Environment]::Is64BitOperatingSystem) { $LocalArch = "386" }
+$LocalPlatform = "windows_$LocalArch"
 
 # ---------------------------------------------------------------------------
 # 0.1) 是否提问
@@ -172,11 +188,12 @@ if ($AskMode) {
 # 一个悄悄赢：悄悄赢的那种，用户以为做了 A、实际做了 B，而且两条路都不报错。
 $oneShot = @()
 if ($Uninstall) { $oneShot += "-Uninstall" }
+if ($ReleaseOnly) { $oneShot += "-ReleaseOnly" }
 if ($UpgradeOnly) { $oneShot += "-UpgradeOnly" }
 if ($ResetPassword) { $oneShot += "-ResetPassword" }
 if ($oneShot.Count -gt 1) {
     Write-Err2 "这几项都只做一件事，不能同时使用：$($oneShot -join " ")"
-    Write-Host "  「卸载」「只升级本体」「重置密码」一次只能选一个。" -ForegroundColor Red
+    Write-Host "  「卸载」「只更新发布文件」「只升级本体」「重置密码」一次只能选一个。" -ForegroundColor Red
     exit 2
 }
 
@@ -401,6 +418,193 @@ if ($Uninstall) {
         Write-Host "==> 卸载完成。" -ForegroundColor Green
         Write-Host "    自启是计划任务、不是 Windows 服务，所以没有需要额外清理的服务登记项。"
     }
+    exit 0
+}
+
+# Resolve-LatestAgentVersion：查 GitHub 最新 Release，输出归一化后的版本号；
+# 查不到就返回空字符串（**由调用方决定怎么办**，不在这里 exit）。
+#
+# 为什么放在脚本里而不是二进制里（`dist latest` 之类）：部署脚本来自 main
+# （每次取最新），而节点上装着的 xb-probe-master 来自某个 **Release 标签**——
+# 两者版本天生不同步。放进二进制就等于要求"先把 Master 升到带这个子命令的版本
+# 才能用它"，而这个功能恰恰是用在"Master 已经在跑、只想更新 Agent 发布文件"的
+# 场合。放脚本里则**任何版本都能用**，因为 `dist pull --version/--from` 这个契约
+# 早就存在且稳定。
+#
+# 两个来源，任一个能用就行（API 有 60 次/小时匿名限额，机房出口 IP 常常被共享，
+# 所以必须有一条不限额的兜底）：
+#   ① api.github.com/repos/<repo>/releases/latest  → tag_name
+#   ② github.com/<repo>/releases/latest 的 302 Location → .../releases/tag/vX.Y.Z
+#
+# ⚠ 返回值必须过**形态闸**（纯数字点分）。这不是防御性编程：解析失败时拿到的
+# 往往是**别的文字**（HTML 错误页、旧二进制的 usage 行）。不校验就会把那段文字
+# 当版本号，拼出 `.../releases/download/v<那段文字>`，然后以"发布文件拉取失败"
+# 的面目出现，根因被埋掉。同理，这也挡住了形如 `../../x` 的 tag 变成磁盘路径。
+function Resolve-LatestAgentVersion {
+    # Windows PowerShell 5.1 默认只开 TLS 1.0/1.1，而 GitHub 只收 1.2——
+    # 不设这一句，两台机器上的表现会不一样（有的装过 .NET 补丁就能通）。
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { }
+
+    $tag = ""
+    # ① API
+    try {
+        $r = Invoke-RestMethod -Uri "https://api.github.com/repos/$ReleaseRepo/releases/latest" `
+            -Headers @{ "Accept" = "application/vnd.github+json"; "User-Agent" = "probe-deploy" } `
+            -TimeoutSec 20 -ErrorAction Stop
+        if ($r -and $r.tag_name) { $tag = [string]$r.tag_name }
+    } catch {
+        Write-Host "    （GitHub API 不可用：$($_.Exception.Message)）" -ForegroundColor DarkGray
+    }
+
+    # ② 网页重定向兜底：HttpWebRequest 关掉自动跳转，直接从 Location 里取。
+    if (-not $tag) {
+        try {
+            $req = [System.Net.HttpWebRequest]::Create("https://github.com/$ReleaseRepo/releases/latest")
+            $req.AllowAutoRedirect = $false
+            $req.Method = "HEAD"
+            $req.UserAgent = "probe-deploy"
+            $req.Timeout = 20000
+            $resp = $req.GetResponse()
+            $loc = [string]$resp.Headers["Location"]
+            $resp.Close()
+            if ($loc -match "/releases/tag/v?([0-9][0-9.]*)$") { $tag = $matches[1] }
+        } catch {
+            Write-Host "    （GitHub 网页兜底也不可用：$($_.Exception.Message)）" -ForegroundColor DarkGray
+        }
+    }
+
+    $tag = "$tag".Trim()
+    if ($tag -match "^[Vv]") { $tag = $tag.Substring(1) }
+    if ($tag -notmatch '^\d+(\.\d+)*$') { return "" }
+    return $tag
+}
+
+# ---------------------------------------------------------------------------
+# 0.2b) 只更新 Agent 发布文件 -ReleaseOnly
+# ---------------------------------------------------------------------------
+#
+# 与 shell 侧（scripts/deploy-master.sh 的 0c）同一件事：查 GitHub 最新 Release →
+# 校验版本号形态 → 用 `dist pull` 把 Agent 发布文件拉进 data_dir/dist/。**不动**
+# Master 的二进制、配置、计划任务，也不问 TLS / 端口 / 管理员。
+#
+# 这一块在 Windows 侧长期缺失，而**缺失的后果比"少一个功能"严重**：没有它，
+# 一键部署出来的 Master 里 data_dir/dist/ 是空的，于是新节点拿不到装机通道
+# （`/dist/` 恒 404），Agent 根本装不上。Linux 侧早就修了这条
+# （见 internal/dist 里的 TestDeployPullsReleaseFilesForNodeBootstrap），
+# Windows 侧一直只是"提示用户自己手工敲一条 dist pull"——那正是这个项目
+# 明确要消灭的东西。
+#
+# 判据落在**磁盘**上（SHA256SUMS 存在且非空 + 至少有一个 xb-probe-agent_* 产物），
+# 不落在 HTTP 状态码上：/dist/ 受 install.mode 门控，刚部署完返回 404 是预期行为。
+if ($ReleaseOnly) {
+    Write-Step "只更新 Agent 发布文件"
+    Write-Host "    不动 Master 的二进制、配置与自启——只把 Agent 发布文件拉进数据目录。"
+
+    # 用哪个二进制去取件：-Bin（调用方刚编译/刚下载的那份）> 已安装的那份。
+    # 允许 -Bin 是有意的：安装入口编译出来的二进制一定不比节点上装着的旧。
+    $roBin = $target
+    $roFrom = "已安装的那份"
+    if ($Bin -and (Test-Path -LiteralPath $Bin)) {
+        $roBin = $Bin
+        $roFrom = "-Bin 指定的那份"
+    }
+
+    # **先校验二进制，再去用它**：顺序应当是"能用的前提先成立"，而不是先撞一下
+    # 再解释。dry-run 是唯一例外——它一个字节都不写，正是"什么都还没装的时候
+    # 先看看会发生什么"的场合，所以那时只警告。
+    if (-not (Test-Path -LiteralPath $roBin)) {
+        if ($DryRun) {
+            Write-Warn2 "[dry-run] 注意：$roBin 不存在，正式执行会在这里停下。"
+            Write-Host "              （用 -Bin 给一份二进制，例如刚编译出来的那份）" -ForegroundColor Yellow
+        } else {
+            Write-Err2 "找不到 Master 二进制：$roBin（$roFrom）"
+            Write-Host "      它要用来读 $cfg 并把发布文件写进 $Data\dist\。" -ForegroundColor Red
+            Write-Host "      用 -Bin 给一份二进制（例如刚编译出来的那份）。这台机器还没装过" -ForegroundColor Red
+            Write-Host "      Master 的话，请先走一次安装流程。" -ForegroundColor Red
+            exit 1
+        }
+    }
+
+    # 版本查询要在取件之前完成，**失败即止**。这时候退回去拉"本机二进制版本"
+    # 是静默换成另一件事：用户以为更新到了最新，实际拉的是他早就在跑的旧版本。
+    Write-Step "正在查 GitHub 上的最新 Release（$ReleaseRepo）…"
+    $roVer = Resolve-LatestAgentVersion
+    if (-not $roVer) {
+        Write-Err2 "查不到最新 Release 的版本号，已中止（没有拉取任何东西）。"
+        Write-Host "      手工做法：到 https://github.com/$ReleaseRepo/releases 看最新版本号，" -ForegroundColor Red
+        Write-Host "      然后执行上面的第 4 条命令。" -ForegroundColor Red
+        if (-not $DryRun) { exit 1 }
+        Write-Host "==> dry-run：未改动任何东西。" -ForegroundColor Cyan
+        exit 0
+    }
+    Write-Host "==> 最新发布版本：v$roVer"
+
+    $source = "https://github.com/$ReleaseRepo/releases/download/v$roVer"
+    if ($DryRun) {
+        Write-Host "    [dry-run] 将会拉取到 $Data\dist\$roVer\，来源 $source"
+        Write-Host "    [dry-run] 正式执行时还会问一次「拉全部平台还是只拉本机」，再校验落盘。"
+        Write-Host "==> dry-run：未改动任何东西。" -ForegroundColor Cyan
+        exit 0
+    }
+    if (-not (Test-Path -LiteralPath $cfg)) {
+        Write-Err2 "读不到 $cfg —— 这台机器上还没有部署过 Master？"
+        Write-Host "      首次部署请先走一次安装流程。" -ForegroundColor Red
+        exit 1
+    }
+
+    # 默认值刻意写死 "1"（全部平台）而不是沿用记忆：这个模式存在的意义就是"拉最新"，
+    # 上次选过"跳过"的人不该因为一次历史选择而在这里什么都不做。
+    $scope = "1"
+    if ($Ask) { $scope = Read-Host "拉取范围（1 全部平台 / 2 只拉本机 / 3 跳过）[1]" }
+    if (-not $scope) { $scope = "1" }
+    switch -Regex ($scope.Trim()) {
+        "^3$|^skip$" {
+            Write-Host "已跳过：没有拉取任何文件（Master 与发布目录都没变）。" -ForegroundColor Yellow
+            exit 0
+        }
+        "^2$|^local$" {
+            Write-Host "    范围：只拉本机（$LocalPlatform）"
+            $plat = $LocalPlatform
+            if (-not $plat) {
+                Write-Err2 "认不出本机平台，不能只拉本机。可以改选全部平台。"
+                exit 1
+            }
+            $pullArgs = @("dist", "pull", "-config", $cfg, "-version", $roVer, "-platform", $plat, "-from", $source)
+        }
+        default {
+            Write-Host "    范围：全部平台"
+            $pullArgs = @("dist", "pull", "-config", $cfg, "-version", $roVer, "-all", "-from", $source)
+        }
+    }
+    Write-Host "    来源：$source"
+
+    $pullOut = ""
+    try {
+        $pullOut = (& $roBin @pullArgs) 2>&1 | Out-String
+        $pullRc = $LASTEXITCODE
+        if ($null -eq $pullRc) { $pullRc = 0 }
+    } catch {
+        $pullOut = "$($_.Exception.Message)"
+        $pullRc = 1
+    }
+    Write-Host ($pullOut -replace "(?m)^", "    ")
+
+    # 判据：文件真的在、且非空。
+    $sums = Join-Path $Data "dist\$roVer\SHA256SUMS"
+    $n = 0
+    if (Test-Path -LiteralPath $sums) {
+        $n = @(Get-ChildItem -LiteralPath (Join-Path $Data "dist\$roVer") -File -Filter "xb-probe-agent_*" -ErrorAction SilentlyContinue).Count
+    }
+    if ($pullRc -ne 0 -or -not (Test-Path -LiteralPath $sums) -or (Get-Item $sums).Length -eq 0 -or $n -le 0) {
+        Write-Err2 "发布文件没有入库（$Data\dist\$roVer 里没有可用的 SHA256SUMS）。"
+        Write-Host "      手工补救：" -ForegroundColor Red
+        Write-Host "      & `"$roBin`" dist pull -config `"$cfg`" -version $roVer -all -from `"$source`"" -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "    已入库 $n 个 Agent 产物 + SHA256SUMS → $Data\dist\$roVer"
+    Write-Host "==> 完成：新节点装到的 Agent 就是这一版。" -ForegroundColor Green
+    Write-Host "    新节点：后台「节点 → 注册码」生成注册码，按页面给的命令装即可"
+    Write-Host "    已装节点：xb-probe-agent upgrade --check 然后 xb-probe-agent upgrade"
     exit 0
 }
 
