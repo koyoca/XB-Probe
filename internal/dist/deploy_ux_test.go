@@ -333,17 +333,91 @@ func TestConfigKeysAreProbedBeforeWriting(t *testing.T) {
 			"  这条正是用户在真机上撞到的 `field sync_obtain not found`。")
 	}
 
-	// 探测本身要有"基线必须能解析"的前置检查。没有它，一份**语法错误**的
-	// 探针配置会让二进制报 YAML 错误，而那被当成"认识这个键"（假阴性）。
-	if !strings.Contains(body, `*"解析配置失败"*`) {
-		t.Error("binary_supports_config_key 没有基线校验：\n" +
-			"  探针配置自己写坏时二进制报的是 YAML 语法错，会被误判成「认识该键」——\n" +
-			"  那就等于探测失效、照样写下去让服务起不来。")
+	// 探测必须先证明"自己真的读到了我们给它的那份文件"——这就是哨兵的作用。
+	//
+	// 没有哨兵时，探测在**旧二进制**上会恒回答"认识"（假阳性，用户撞到的正是这个）：
+	//   `probe-master tls status -config X` 在没有 tls 子命令的二进制上会 fall through
+	//   到服务启动，而 flag.Parse 遇到非 flag 参数 `tls` 就停止解析 → `-config X`
+	//   被忽略 → 于是"基线"与"待测"两次调用读的是**同一份**真实配置 → 恒"认识"。
+	// 哨兵一次覆盖"子命令不存在"与"-config 被忽略"两种失效——它们症状相同，
+	// 光看待测键那一次的输出分辨不出来。
+	//
+	// 这个方向比"基线"更硬：基线只能证明"配置没写错"，证明不了"它读了我们的文件"。
+	if !strings.Contains(body, "PROBE_SENTINEL_KEY") {
+		t.Error("探测没有哨兵自检：\n" +
+			"  旧二进制没有 tls 子命令时，`tls status -config X` 会 fall through 到服务启动、\n" +
+			"  `-config X` 被忽略 → 两次调用读同一份真实配置 → 探测恒回答「认识」，\n" +
+			"  于是脚本写下二进制不认识的键，服务随即拒绝启动（真机撞到的就是这个）。")
+	}
+	// 哨兵判据必须要求**点名**拒绝哨兵键。只判"有没有报错"不行：
+	// 通道失效时（读的是默认配置）也可能因为别的原因报错，那也会被当成"通道有效"。
+	if !strings.Contains(body, `*"field $PROBE_SENTINEL_KEY not found"*`) {
+		t.Error("哨兵判据太松：必须要求二进制**点名**拒绝哨兵键：\n" +
+			"  只判断「有没有 not found」会把读默认配置时的其它错误当成通道有效。")
+	}
+	if !strings.Contains(body, "_probe_channel_ok()") {
+		t.Error("哨兵检查没有抽成独立的 _probe_channel_ok：\n" +
+			"  探测与「配置能否解析」两处都要用它，各写一份迟早有一份忘了同步。")
+	}
+	// 光"文件里有 _probe_channel_ok"**不够**：它可以存在却没人调用它
+	// （变异验证抓到的正是这个：把探测里那句闸删掉，上面三条断言全绿）。
+	// 必须断言 binary_supports_config_key 的**函数体**里真的用了它。
+	start := strings.Index(body, "binary_supports_config_key() {")
+	if start < 0 {
+		t.Fatal("找不到 binary_supports_config_key 的定义")
+	}
+	// 函数体＝从定义到下一个**行首**的 `}`（函数体内的 `}` 都有缩进）。
+	relEnd := strings.Index(body[start:], "\n}")
+	if relEnd < 0 {
+		t.Fatal("binary_supports_config_key 的函数体没有结束")
+	}
+	fnBody := body[start : start+relEnd]
+	if !strings.Contains(fnBody, "_probe_channel_ok") {
+		t.Error("binary_supports_config_key 体内没有用 _probe_channel_ok 做闸：\n" +
+			"  哨兵函数存在 ≠ 探测真的用了它；少了这一句，旧二进制上探测又变成恒「认识」。")
 	}
 	if !strings.Contains(body, `public_listen: "127.0.0.1:0"`) {
 		t.Error("探针配置里的监听地址没有加引号：\n" +
 			"  `127.0.0.1:0` 不加引号在 YAML 里会被当成映射键（`did not find expected key`），\n" +
 			"  探测结果就全部不可信了。")
+	}
+}
+
+// 配置落盘之后必须**立刻**用二进制自己验一遍，而不是等到服务起不来。
+//
+// 真机日志里第 4 步（init-admin）已经打印了 `field sync_obtain not found`，
+// 脚本却照常往下走：写 systemd 单元、启动服务、失败、回滚——而回滚给出的理由是
+// "启动后立即退出"，离真正的原因（配置与二进制版本错配）很远。
+//
+// 这条钉两个位置：
+//
+//	① 第 3 步写完/保留配置之后要有一次校验；
+//	② 第 4 步 init-admin **不许**用管道吃掉退出码。
+//	   `cmd 2>&1 | sed ... || echo`（曾经的写法）的退出码是 sed 的，永远是 0，
+//	   于是 init-admin 的任何失败都被静默吞掉。
+func TestConfigIsValidatedRightAfterWriteAndInitAdminKeepsItsExitCode(t *testing.T) {
+	body := readRepoFile(t, "../../scripts/deploy-master.sh")
+
+	if !strings.Contains(body, "config_parses_ok \"$CFG\"") {
+		t.Error("第 3 步写完配置后没有用二进制校验它能被解析：\n" +
+			"  上一轮写坏的配置会被这一轮原样保留，不在这里拦住的话，用户要等\n" +
+			"  输完口令、服务起不来、回滚之后才看到原因，而回滚的理由是「启动后立即退出」。")
+	}
+	// 校验失败必须有明确的诊断出口（两处共用同一份，免得一份忘了更新）。
+	if !strings.Contains(body, "fail_config_mismatch()") {
+		t.Error("没有 fail_config_mismatch：配置与二进制不匹配时，\n" +
+			"  必须报出「两边版本不一致」并给出可执行的修法，而不是笼统的「启动失败」。")
+	}
+	if !strings.Contains(body, "_ia_rc=$?") {
+		t.Error("第 4 步 init-admin 没有保存真实退出码：\n" +
+			"  `cmd 2>&1 | sed ... || echo` 的退出码是**管道最后一个命令**（sed）的，永远是 0，\n" +
+			"  于是 `||` 那半句永不执行、init-admin 的失败被静默吞掉，脚本继续往下走。")
+	}
+	// 反向：不许再出现"管道 + ||"那种把退出码吃掉的组合。
+	// 只看"有没有 _ia_rc=$?"不够——两处可以并存（新加的判据被旧的管道绕过）。
+	if strings.Contains(body, `| sed 's/^/    /' || \`) {
+		t.Error("第 4 步仍存在 `cmd | sed ... || ...` 的写法：\n" +
+			"  管道的退出码是 sed 的，init-admin 的失败会被吞掉。先把输出收进变量再自己判。")
 	}
 }
 

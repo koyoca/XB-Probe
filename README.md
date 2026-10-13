@@ -407,6 +407,35 @@ Windows 同理：`powershell -File install-master.ps1 -Uninstall -KeepData`。
 所以正常情况下不会再取到旧版——这一步是给"上游缓存行为不如预期"留的**可诊断**退路：
 不必去比哈希，看那行警告就知道。
 
+### 如果提示"配置里有二进制不认识的键"
+
+```
+错误：/etc/probe-master/master.yaml 里有当前二进制不认识的键（sync_obtain）。
+  这通常不是你填错了，而是**两边版本不一致**
+```
+
+`install-master-bin.sh` 的二进制来自 **Release 标签**，部署脚本来自 **main 分支**。
+脚本按最新的配置格式写文件，而这台机器上的二进制比它旧 —— 配置文件是严格解析的，
+多一个不认识的键就会**拒绝启动**。
+
+按代价从小到大，任选一种：
+
+1. 只删掉那一行，然后重跑（保留你其余的设置）：
+
+   ```sh
+   sed -i "/^[[:space:]]*sync_obtain:/d" /etc/probe-master/master.yaml
+   ```
+
+2. 删掉整份配置重跑（脚本会按当前二进制的能力重写）。
+3. 改用源码安装 —— 二进制与脚本同源，不会再错配：
+
+   ```sh
+   curl -fsSL https://raw.githubusercontent.com/koyoca/XB-Probe/main/install-master.sh | sh
+   ```
+
+脚本本身也有防御：写一个新键之前会先问二进制认不认识它，不认识就不写（功能降级到旧行为），
+而不是写下去让服务起不来。这一节说明的是"仍然撞上了怎么办"。
+
 ## 从源码构建（开发）
 
 ```bash

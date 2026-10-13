@@ -1379,48 +1379,128 @@ CFG="$DIR/master.yaml"
 # `field sync_obtain not found in type config.ACMEConfig`）。
 #
 # 判据必须问二进制本人，不能靠"比版本号"：版本号规则会变、也需要有人记得维护。
-# 做法＝拿一份**只含这一个键**的最小配置喂给它，看它是"配置错误"还是
-# "未知键"。用 tls status 而不是启动服务：它是只读的、不需要端口、立即返回。
-binary_supports_config_key() {
-	_key="${1:-}"
-	[ -z "$_key" ] && return 1
-	[ -x "$BIN_DIR/probe-master" ] || return 1
-	_probe="$(mktemp 2>/dev/null || printf '%s' "/tmp/probe-support-$$.yaml")"
-	# 这份最小配置必须**本身语法正确**，否则二进制报的是 YAML 语法错、而我们会
-	# 把它当成"认识这个键"（假阴性：写下去照样启动失败）。所以：
-	#   · listen 值一律加引号（`127.0.0.1:0` 不加引号会被 YAML 当成映射键）；
-	#   · 生成后用 `probe-master` 自己过一遍**基线**（不含待测键），基线必须解析成功。
-	cat >"$_probe" <<EOF
-public_listen: "127.0.0.1:0"
-admin_listen: "127.0.0.1:0"
-tls:
-  mode: "none"
-EOF
-	_out="$("$BIN_DIR/probe-master" tls status -config "$_probe" 2>&1)"
-	case "$_out" in
-	*"解析配置失败"* | *"unmarshal"*)
-		# 基线都过不了：本机的二进制/配置契约已变，探测结论不可信。
-		# 宁可不写这个键（退回旧行为），也不要写下去让服务起不来。
-		rm -f "$_probe" 2>/dev/null || true
-		return 1
-		;;
-	esac
-	cat >"$_probe" <<EOF
+# 做法＝拿一份**只含这一个键**的最小配置喂给它，看它是"未知键"还是别的错误。
+# 用 tls status 而不是启动服务：它是只读的、不需要端口、立即返回。
+#
+# ⚠⚠ 探测器必须先证明"自己真的读到了我们给它的那份文件"，否则它会给出
+# 一个**恒为"认识"的假结论**——这一条是踩过的事故，值得写清楚：
+#
+#   probe-master tls status -config <临时文件>
+#
+# 在**没有 tls 子命令**的旧二进制上（Release 的 v0.1.0 就是），`tls` 不匹配
+# main() 里任何 case，于是 fall through 到服务启动；而 flag.Parse 遇到第一个
+# 非 flag 参数 `tls` 就**停止解析**，`-config <临时文件>` 被整个忽略，读的是
+# 默认路径的真实配置。结果是"基线"与"待测"两次调用读的是**同一份**文件：
+# 基线通过（因为那份真实配置本来就能解析），待测也没有"未知键"报错 ——
+# 于是探测恒回答"认识"。脚本写下二进制不认识的 sync_obtain，服务随即拒绝启动。
+#
+# 修法是加一个**哨兵**：同样结构，键名换成一个必然不存在的名字。
+#   · 哨兵没有被"点名拒绝" → 这条通道根本没测到我们的文件 → 结论不可信 → 返回 1；
+#   · 哨兵被点名拒绝、而待测键没有 → 通道有效，且二进制确实认识该键 → 返回 0。
+# 哨兵一次覆盖了"子命令不存在"与"-config 被忽略"两种失效——它们的**症状相同**，
+# 光看待测键那一次的输出分辨不出来。它同时取代了原来的"基线"：探测配置若自身
+# 语法错误，报错会是语法错而不是 `field <哨兵> not found`，哨兵判据同样不匹配。
+#
+# "无法判断"一律按"不认识"处理：宁可少写一个键（功能降级到旧行为），
+# 也不能写下去让服务起不来。
+PROBE_SENTINEL_KEY="probe_sentinel_key_that_cannot_exist"
+
+# _probe_write <文件> <键名>：写一份只含该键的最小配置。
+# listen 值一律加引号：`127.0.0.1:0` 不加引号会被 YAML 当成映射键，那样二进制
+# 报的是**语法错**而不是"未知键"，两种失败在"有没有报错"这个层面看不出区别。
+_probe_write() {
+	cat >"$1" <<EOF
 public_listen: "127.0.0.1:0"
 admin_listen: "127.0.0.1:0"
 tls:
   mode: "acme"
   acme:
-    $_key: false
+    $2: false
 EOF
+}
+
+# _probe_channel_ok：这条探测通道**有效吗**——即我们给它的文件真的被读了吗。
+# 判据还是哨兵：一份只含哨兵键的最小配置，必须被**点名**拒绝。
+_probe_channel_ok() {
+	[ -x "$BIN_DIR/probe-master" ] || return 1
+	_probe="$(mktemp 2>/dev/null || printf '%s' "/tmp/probe-channel-$$.yaml")"
+	_probe_write "$_probe" "$PROBE_SENTINEL_KEY"
 	_out="$("$BIN_DIR/probe-master" tls status -config "$_probe" 2>&1)"
 	rm -f "$_probe" 2>/dev/null || true
-	# 二进制认识这个键（哪怕后面因为别的理由报错，也不是"未知键"）。
 	case "$_out" in
-	*"field $_key not found"*) return 1 ;;
-	*"not found in type"*) return 1 ;;
+	*"field $PROBE_SENTINEL_KEY not found"*) return 0 ;;
+	esac
+	return 1
+}
+
+binary_supports_config_key() {
+	_key="${1:-}"
+	[ -z "$_key" ] && return 1
+	_probe_channel_ok || return 1
+	_probe="$(mktemp 2>/dev/null || printf '%s' "/tmp/probe-support-$$.yaml")"
+	_probe_write "$_probe" "$_key"
+	_out="$("$BIN_DIR/probe-master" tls status -config "$_probe" 2>&1)"
+	rm -f "$_probe" 2>/dev/null || true
+	case "$_out" in
+	*"field $_key not found"* | *"not found in type"*) return 1 ;;
 	esac
 	return 0
+}
+
+# config_parses_ok <配置文件>：用二进制自己验一遍这份配置能不能被解析。
+# 返回 0 = 能；1 = 不能（原始输出留在 _CP_OUT，里面点名了是哪个键）；
+#       2 = **判断不了**（通道失效，例如旧二进制没有 tls 子命令）。
+#
+# 这一层专为"保留旧配置"服务：上一轮写坏的配置会被这一轮原样保留，
+# 若不在写完之后立刻验，用户要等输完口令、服务起不来、回滚之后才看到原因。
+# "判断不了"时绝不猜——交给第 4 步 init-admin 的输出兜底，那条路径对任何版本都有效。
+config_parses_ok() {
+	_CP_OUT=""
+	[ -f "${1:-}" ] || return 2
+	_probe_channel_ok || return 2
+	_CP_OUT="$("$BIN_DIR/probe-master" tls status -config "$1" 2>&1)"
+	case "$_CP_OUT" in
+	*"not found in type"* | *"unmarshal"* | *"解析配置失败"*) return 1 ;;
+	esac
+	return 0
+}
+
+# fail_config_mismatch <二进制的原始输出>：报出"配置与二进制不匹配"并回滚。
+# 抽出来是因为它会在两处被调用（第 3 步写完配置、第 4 步 init-admin），
+# 两处的**原因与修法完全一样**，各写一份迟早会有一份忘了更新。
+fail_config_mismatch() {
+	_bad_key="$(printf '%s\n' "${1:-}" | sed -n 's/.*field \([A-Za-z0-9_]*\) not found.*/\1/p' | head -n 1)"
+	echo >&2
+	echo "错误：$CFG 里有当前二进制不认识的键${_bad_key:+（$_bad_key）}。" >&2
+	echo >&2
+	echo "  这通常不是你填错了，而是**两边版本不一致**：" >&2
+	echo "    · 二进制来自 GitHub Release 标签，部署脚本来自 main 分支；" >&2
+	echo "    · 脚本按最新的配置格式写文件，而这台机器上的二进制比它旧。" >&2
+	echo >&2
+	# 修法按"代价从小到大"排：先给只摘掉那一行（保留你其余的设置），
+	# 再给整份重写，最后是换成源码安装（两边同源，从根上不再错配）。
+	cat >&2 <<EOF
+  修法（任选一种）：
+    1) 只删掉这一行，然后重跑本脚本：
+EOF
+	if [ -n "$_bad_key" ]; then
+		printf '         sed -i "/^[[:space:]]*%s:/d" %s\n' "$_bad_key" "$CFG" >&2
+	else
+		printf '         rm -f %s\n' "$CFG" >&2
+	fi
+	cat >&2 <<EOF
+    2) 删掉整份配置重跑（脚本会按当前二进制的能力重写）：
+         rm -f $CFG
+         sudo sh -c "\$(curl -fsSL https://raw.githubusercontent.com/koyoca/XB-Probe/main/install-master-bin.sh)" xb
+    3) 改用源码安装（二进制与脚本同源，不会再错配）：
+         curl -fsSL https://raw.githubusercontent.com/koyoca/XB-Probe/main/install-master.sh | sh
+EOF
+	echo >&2
+	if [ -n "$_bad_key" ]; then
+		rollback "配置键 $_bad_key 与当前二进制不匹配（版本错配，见上面的说明）"
+	else
+		rollback "配置文件无法被当前二进制解析（版本错配，见上面的说明）"
+	fi
 }
 
 # render_config：把最终生效的参数渲染成 master.yaml。
@@ -1942,6 +2022,18 @@ else
 	echo "    已写入"
 fi
 
+# 落盘之后**立刻**用二进制自己验一遍。
+#
+# 这一层是给"保留旧配置"那条路径准备的：上一轮写坏的配置（含二进制不认识的键）
+# 会被这一轮原样保留，若在这里不拦，用户要等输完口令、服务起不来、回滚之后
+# 才看到原因——而回滚给的理由是"启动后立即退出"，离真正的原因很远。
+# 返回 2（判断不了，例如旧二进制没有 tls 子命令）时**什么都不做**：
+# 不猜、不误报，交给第 4 步 init-admin 的输出兜底（那条对任何版本都有效）。
+config_parses_ok "$CFG"
+case "$?" in
+1) fail_config_mismatch "$_CP_OUT" ;;
+esac
+
 echo "==> 4/7 初始化管理员"
 if [ -z "$ADMIN_PASSWORD" ]; then
 	# 与 ask_secret 同一个道理：这里也**不用** read -e（readline 会重新打开回显），
@@ -1956,10 +2048,49 @@ if [ -z "$ADMIN_PASSWORD" ]; then
 	echo "错误：口令不能为空。" >&2
 	exit 2
 fi
-# init-admin 在管理员已存在时会报错退出，这属于预期（幂等升级），故不 set -e 中断。
-"$BIN_DIR/probe-master" init-admin -config "$CFG" \
-	-username "$ADMIN_USER" -password "$ADMIN_PASSWORD" 2>&1 | sed 's/^/    /' || \
-	echo "    （管理员已存在，跳过；改口令用 probe-master reset-admin）"
+# init-admin 在管理员已存在时会报错退出，这属于预期（幂等升级），所以不用
+# `set -e` 硬中断——但**必须拿到它真实的退出码**，并且把"配置解析失败"这一类
+# 与"管理员已存在"区分开。
+#
+# ⚠ 这里曾经写成 `cmd 2>&1 | sed 's/^/    /' || echo "（管理员已存在，跳过）"`。
+# 管道的退出码是**最后一个命令**（sed）的，永远是 0，于是 `||` 那半句永不执行、
+# init-admin 的任何失败都被静默吞掉：脚本继续往下写 systemd 单元并启动服务，
+# 服务必然起不来，最后以"启动失败"回滚——用户看到的失败原因离真正的原因很远
+# （真机日志里，第 4 步已经打印了 `field sync_obtain not found`，脚本却照常往下走）。
+# 所以：先把输出收进变量再自己判，不要让管道吃掉退出码。
+_ia_out="$("$BIN_DIR/probe-master" init-admin -config "$CFG" \
+	-username "$ADMIN_USER" -password "$ADMIN_PASSWORD" 2>&1)"
+_ia_rc=$?
+printf '%s\n' "$_ia_out" | sed 's/^/    /'
+
+# 配置里有当前二进制不认识的键。这一类必须**立刻停下**并点名是哪个键：
+# 继续往下走的唯一结果就是"服务启动失败 → 回滚"，而回滚的原因写成
+# "启动后立即退出"，把真正的原因（版本错配）藏起来了。
+#
+# 根因是两边来源不同：二进制来自 Release 标签、配置模板来自 main，
+# 于是脚本会写出二进制还不认识的键，而 LoadMaster 是严格解析（未知键直接拒绝启动）。
+# 探测（binary_supports_config_key）正常情况下会拦住这些键，但**旧二进制连探测
+# 用的子命令都没有**，探测只能按"不认识"降级——所以这一层兜底是必需的。
+case "$_ia_out" in
+*"解析配置失败"* | *"unmarshal"* | *"not found in type"*)
+	# 与第 3 步共用同一份诊断：原因与修法完全一样，各写一份迟早有一份忘了更新。
+	fail_config_mismatch "$_ia_out"
+	;;
+esac
+
+if [ "$_ia_rc" -ne 0 ]; then
+	case "$_ia_out" in
+	*"已存在"*)
+		# 幂等升级时管理员已经建过了，这是预期内的，继续。
+		echo "    （管理员已存在，跳过；改口令用 probe-master reset-admin）"
+		;;
+	*)
+		echo >&2
+		echo "错误：初始化管理员失败（上面是 probe-master 的输出）。" >&2
+		rollback "初始化管理员失败"
+		;;
+	esac
+fi
 # master.key 与备份必须分开存放：丢了它，已配置的告警渠道凭证就解不开了。
 if [ -f "$DIR/master.key" ]; then
 	chmod 0600 "$DIR/master.key"

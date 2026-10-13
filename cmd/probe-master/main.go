@@ -43,56 +43,109 @@ import (
 // version 由 -ldflags "-X main.version=..." 注入。
 var version = "dev"
 
+// mainUsage：顶层用法。存在的理由见 main() 里 default 分支的注释——
+// 未知命令曾经会 fall through 去启动服务，这里至少要让"打错命令"看得见。
+const mainUsage = `probe-master —— Server Probe 中枢服务
+
+用法：
+  probe-master -config <配置文件>        启动服务（默认 /etc/probe-master/master.yaml）
+  probe-master init-admin  -config <文件> -username <名> -password <口令>
+  probe-master reset-admin -config <文件> -username <名> -password <口令>
+  probe-master tls status  -config <文件> [-wait N] [-json]
+  probe-master dist <子命令>
+  probe-master version
+
+无参数启动时按 -config 解析，配置文件路径缺省为 /etc/probe-master/master.yaml。
+`
+
 func main() {
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
+	os.Exit(runMain(os.Args))
+}
+
+// runMain：顶层分派，返回值就是退出码。
+//
+// 从 main() 里抽出来是为了让"未知命令必须被拒绝"这件事**可以被测试**：
+// 直接 os.Exit 的版本在测试里没法断言退出码。
+func runMain(args []string) int {
+	if len(args) > 1 {
+		switch args[1] {
 		case "init-admin":
-			if err := runInitAdmin(os.Args[2:]); err != nil {
+			if err := runInitAdmin(args[2:]); err != nil {
 				fmt.Fprintln(os.Stderr, "错误：", err)
-				os.Exit(1)
+				return 1
 			}
-			return
+			return 0
 		case "reset-admin":
-			if err := runResetAdmin(os.Args[2:]); err != nil {
+			if err := runResetAdmin(args[2:]); err != nil {
 				fmt.Fprintln(os.Stderr, "错误：", err)
-				os.Exit(1)
+				return 1
 			}
-			return
+			return 0
 		case "dist":
-			if err := runDist(os.Args[2:]); err != nil {
+			if err := runDist(args[2:]); err != nil {
 				fmt.Fprintln(os.Stderr, "错误：", err)
-				os.Exit(1)
+				return 1
 			}
-			return
+			return 0
 		case "tls":
 			// tls 子命令自己打印完整报告，并用退出码表达三种结局
 			// （0 就绪 / 1 失败 / 2 尚无结果）。失败与"还没结果"都不再
 			// 重复打印一遍错误消息——报告里已经写清楚了。
-			err := runTLS(os.Args[2:])
+			err := runTLS(args[2:])
 			switch {
 			case err == nil:
 			case errors.Is(err, errCertFailed):
-				os.Exit(1)
+				return 1
 			case errors.Is(err, errCertPending):
-				os.Exit(2)
+				return 2
 			default:
 				fmt.Fprintln(os.Stderr, "错误：", err)
-				os.Exit(1)
+				return 1
 			}
-			return
+			return 0
 		case "version", "-v", "--version":
 			fmt.Println("probe-master", version)
-			return
+			return 0
+		default:
+			// 未知命令必须**明确拒绝**，绝不能 fall through 到下面的服务启动。
+			//
+			// 曾经这里没有 default，于是 `probe-master tls status -config X` 这样的
+			// 命令在**旧二进制**上（还没那个子命令时）会一路落到 flag.Parse + run()：
+			//   · flag.Parse 遇到第一个非 flag 参数（`tls`）就停止解析，
+			//     于是 `-config X` 被**整个忽略**，读的是默认路径的配置文件；
+			//   · 结果是一个"要查询状态"的命令**把服务真的启动起来了**。
+			// 这个组合坑得很深：部署脚本用 `tls status -config <临时文件>` 探测
+			// "二进制认不认识某个配置键"，而它两次调用读的都是**同一份**真实配置，
+			// 于是探测恒回答"认识"，脚本写下二进制不认识的键，服务随即拒绝启动。
+			// 用户看到的现象是"脚本说部署完成/回滚了，但错误一直不变"。
+			//
+			// 只拦非 flag 的参数：`-config X` 这类仍是启动服务的正常写法。
+			if !strings.HasPrefix(args[1], "-") {
+				fmt.Fprintf(os.Stderr, "错误：未知命令 %q\n\n", args[1])
+				fmt.Fprint(os.Stderr, mainUsage)
+				return 2
+			}
 		}
 	}
 
-	cfgPath := flag.String("config", "/etc/probe-master/master.yaml", "配置文件路径")
-	flag.Parse()
+	// 用**自己的** FlagSet 解析 args，而不是全局的 flag.Parse()：
+	// 后者解析的是 os.Args，与这里分派用的 args 只是"恰好相同"。一旦不同
+	// （测试、或将来把分派嵌进别处），`-config` 就会被**整个忽略**而毫无征兆——
+	// 这正是"未知命令 fall through"那次事故里的第二种失效方式，别再留一个。
+	fs := flag.NewFlagSet("probe-master", flag.ContinueOnError)
+	cfgPath := fs.String("config", "/etc/probe-master/master.yaml", "配置文件路径")
+	if err := fs.Parse(args[1:]); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
 
 	if err := run(*cfgPath); err != nil {
 		fmt.Fprintln(os.Stderr, "启动失败：", err)
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }
 
 func run(cfgPath string) error {
