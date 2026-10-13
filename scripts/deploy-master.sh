@@ -423,18 +423,18 @@ fi
 if [ -n "$ASK" ]; then
 	echo >&2
 	echo "即将执行：" >&2
-	printf '  %-16s %s\n' "公开站监听" "$PUBLIC_LISTEN" >&2
-	printf '  %-16s %s\n' "管理端监听" "$ADMIN_LISTEN" >&2
-	printf '  %-16s %s\n' "公开地址" "${PUBLIC_ORIGIN:-（留空：按请求 Host 回填）}" >&2
-	printf '  %-16s %s\n' "管理地址" "${ADMIN_ORIGIN:-（与公开站同一个域名）}" >&2
-	printf '  %-16s %s\n' "TLS" "$TLS_MODE" >&2
-	printf '  %-16s %s\n' "管理员" "$ADMIN_USER（口令随后输入）" >&2
-	printf '  %-16s %s\n' "配置目录" "$DIR" >&2
-	printf '  %-16s %s\n' "数据目录" "$DATA" >&2
+	printf '  %s：%s\n' "公开站监听" "$PUBLIC_LISTEN" >&2
+	printf '  %s：%s\n' "管理端监听" "$ADMIN_LISTEN" >&2
+	printf '  %s：%s\n' "公开地址" "${PUBLIC_ORIGIN:-（留空：按请求 Host 回填）}" >&2
+	printf '  %s：%s\n' "管理地址" "${ADMIN_ORIGIN:-（与公开站同一个域名）}" >&2
+	printf '  %s：%s\n' "TLS" "$TLS_MODE" >&2
+	printf '  %s：%s\n' "管理员" "$ADMIN_USER（口令随后输入）" >&2
+	printf '  %s：%s\n' "配置目录" "$DIR" >&2
+	printf '  %s：%s\n' "数据目录" "$DATA" >&2
 	if [ -n "$NO_SERVICE" ]; then
-		printf '  %-16s %s\n' "服务" "不注册（--no-service）" >&2
+		printf '  %s：%s\n' "服务" "不注册（--no-service）" >&2
 	else
-		printf '  %-16s %s\n' "服务" "systemd（probe-master，开机自启）" >&2
+		printf '  %s：%s\n' "服务" "systemd（probe-master，开机自启）" >&2
 	fi
 	echo >&2
 	if ! confirm "继续？"; then
