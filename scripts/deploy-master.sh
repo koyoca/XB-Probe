@@ -150,6 +150,9 @@ PROXY_DOMAINS="${PROBE_PROXY_DOMAINS:-}"
 # 直接跑本脚本时自然是空的，此时才提示 `sh deploy-master.sh --uninstall`。
 SELF_ENTRY="${PROBE_SELF_ENTRY:-}"
 SELF_ENTRY_ARGS="${PROBE_SELF_ENTRY_ARGS:-}"
+# 二进制的配置键能力：见 binary_supports_config_key 的注释。
+# 空＝二进制比脚本旧，不能写 sync_obtain（严格解析会拒绝启动）。
+SYNC_OBTAIN_OK=""
 # "用户是否显式给过"这几个标记，用来区分"没给"和"给了一个恰好等于默认值的值"。
 # 缺了它们，像 TLS_MODE / PUBLIC_LISTEN 这种自带默认值的项就永远分不清
 # "来自默认值"还是"人来指定过"，结果是该问的没问、不该问的反复问。
@@ -1107,6 +1110,58 @@ fi
 # **之前**就把将要写入的内容打出来。
 CFG="$DIR/master.yaml"
 
+# binary_supports_config_key <键名>：二进制认不认识某个配置键。
+#
+# 为什么需要它：`install-master-bin.sh` 下的二进制来自 **Release 标签**，而部署脚本
+# 来自 **main**。两者版本不同步——脚本可能写出二进制还不认识的键，而 LoadMaster 是
+# 严格解析（KnownFields(true)），后果是**服务启动即失败**（用户在真机上就撞到了：
+# `field sync_obtain not found in type config.ACMEConfig`）。
+#
+# 判据必须问二进制本人，不能靠"比版本号"：版本号规则会变、也需要有人记得维护。
+# 做法＝拿一份**只含这一个键**的最小配置喂给它，看它是"配置错误"还是
+# "未知键"。用 tls status 而不是启动服务：它是只读的、不需要端口、立即返回。
+binary_supports_config_key() {
+	_key="${1:-}"
+	[ -z "$_key" ] && return 1
+	[ -x "$BIN_DIR/probe-master" ] || return 1
+	_probe="$(mktemp 2>/dev/null || printf '%s' "/tmp/probe-support-$$.yaml")"
+	# 这份最小配置必须**本身语法正确**，否则二进制报的是 YAML 语法错、而我们会
+	# 把它当成"认识这个键"（假阴性：写下去照样启动失败）。所以：
+	#   · listen 值一律加引号（`127.0.0.1:0` 不加引号会被 YAML 当成映射键）；
+	#   · 生成后用 `probe-master` 自己过一遍**基线**（不含待测键），基线必须解析成功。
+	cat >"$_probe" <<EOF
+public_listen: "127.0.0.1:0"
+admin_listen: "127.0.0.1:0"
+tls:
+  mode: "none"
+EOF
+	_out="$("$BIN_DIR/probe-master" tls status -config "$_probe" 2>&1)"
+	case "$_out" in
+	*"解析配置失败"* | *"unmarshal"*)
+		# 基线都过不了：本机的二进制/配置契约已变，探测结论不可信。
+		# 宁可不写这个键（退回旧行为），也不要写下去让服务起不来。
+		rm -f "$_probe" 2>/dev/null || true
+		return 1
+		;;
+	esac
+	cat >"$_probe" <<EOF
+public_listen: "127.0.0.1:0"
+admin_listen: "127.0.0.1:0"
+tls:
+  mode: "acme"
+  acme:
+    $_key: false
+EOF
+	_out="$("$BIN_DIR/probe-master" tls status -config "$_probe" 2>&1)"
+	rm -f "$_probe" 2>/dev/null || true
+	# 二进制认识这个键（哪怕后面因为别的理由报错，也不是"未知键"）。
+	case "$_out" in
+	*"field $_key not found"*) return 1 ;;
+	*"not found in type"*) return 1 ;;
+	esac
+	return 0
+}
+
 # render_config：把最终生效的参数渲染成 master.yaml。
 # 抽成函数是为了让 --dry-run 打印"将要写入的内容"时走**同一段代码**——
 # 预览与落盘各写一份，迟早出现"预览说一套、落盘写另一套"。
@@ -1187,7 +1242,14 @@ render_config() {
 		# 这样部署脚本能拿到一个确定的结果、并在失败时回滚。
 		# 写成 true 而不是靠部署脚本事后改 false：服务重启本来就该被证书挡住一次——
 		# 证书没申请成功时，"服务起来了"是个假象（https 打不开）。
-		echo '    sync_obtain: true          # 部署时前台申请，拿到确定结果；日常重启可改为 false'
+		#
+		# 但它是**新键**：二进制来自 Release 标签、配置模板来自 main，两者会错配。
+		# 而 LoadMaster 是严格解析（未知键直接拒绝启动），写下去就等于让服务起不来。
+		# 所以先探测二进制认不认识它——认识才写。
+		if binary_supports_config_key sync_obtain; then
+			SYNC_OBTAIN_OK="1"
+			echo '    sync_obtain: true          # 部署时前台申请，拿到确定结果；日常重启可改为 false'
+		fi
 		;;
 	esac
 	echo "log_level: \"info\""
@@ -1713,9 +1775,36 @@ if [ "$TLS_TERMINATOR" = "caddy" ]; then
 		rollback "Caddy 安装失败"
 	fi
 	mkdir -p "$CADDY_DIR" 2>/dev/null || true
-	if [ -f "$CADDYFILE" ] && [ -z "$FORCE_CONFIG" ]; then
-		echo "    $CADDYFILE 已存在，保留（要覆盖请加 --force-config）"
-		echo "    ⚠ 若它引用的不是 $PUBLIC_LISTEN，反代会打到别处"
+	# 已有 Caddyfile 怎么办？这里**不能**只看"文件存在"就保留。
+	# 本机 Caddy 很可能本来就是别人（发行版包、x-ui 面板、以前的 nginx 迁移）装的，
+	# 那份配置里根本没有我们要反代的域名——保留它的结果不是"尊重既有配置"，
+	# 而是**Caddy 没有 443 站点、不开 443、也拿不到证书**，用户看到的却是
+	# "反代已配好、部署完成"。所以判据换成：里面**有没有本次要用的那个域名**。
+	_caddy_dom="$(render_caddyfile | sed -n 's/^\([^ {]*\) {.*/\1/p' | head -n1)"
+	Caddyfile_has_domain() {
+		[ -f "$CADDYFILE" ] || return 1
+		[ -z "${1:-}" ] && return 1
+		# 只匹配行首的站点标签（"example.com {" 或 "example.com:443 {"），
+		# 不匹配注释里顺嘴提到的域名——否则一句注释就能让判据失效。
+		grep -Eq "^[[:space:]]*$1(:[0-9]+)?[[:space:]]*\{" "$CADDYFILE" 2>/dev/null
+	}
+	if [ -f "$CADDYFILE" ] && [ -z "$FORCE_CONFIG" ] && Caddyfile_has_domain "$_caddy_dom"; then
+		echo "    $CADDYFILE 已有 $_caddy_dom 的站点块，保留（要覆盖请加 --force-config）"
+	elif [ -f "$CADDYFILE" ] && [ -z "$FORCE_CONFIG" ]; then
+		# 有文件但没有目标域名：备份后并入我们的站点块，而不是整份覆盖——
+		# 里面可能有别人的站点（这台机器上就常见）。
+		cp -f "$CADDYFILE" "$CADDYFILE.bak" 2>/dev/null || true
+		if [ -n "$_caddy_dom" ] && grep -Eq "^[[:space:]]*[^#{]" "$CADDYFILE" 2>/dev/null; then
+			{
+				printf '\n# ---- 以下由 scripts/deploy-master.sh 追加 ----\n'
+				render_caddyfile
+			} >>"$CADDYFILE"
+			echo "    $CADDYFILE 里没有 $_caddy_dom 的站点块 → 已追加（原内容备份为 $CADDYFILE.bak）"
+		else
+			render_caddyfile >"$CADDYFILE"
+			echo "    $CADDYFILE 原内容无有效站点 → 已写入（备份为 $CADDYFILE.bak）"
+		fi
+		chmod 0644 "$CADDYFILE"
 	else
 		if [ -f "$CADDYFILE" ]; then cp -f "$CADDYFILE" "$CADDYFILE.bak" 2>/dev/null || true; fi
 		render_caddyfile >"$CADDYFILE"
@@ -1724,9 +1813,9 @@ if [ "$TLS_TERMINATOR" = "caddy" ]; then
 	fi
 	# 反代域名必须解析到本机，否则 Caddy 申请证书会失败（而失败信息出现在
 	# caddy 的日志里，不在本脚本的输出里，用户基本找不到）。
-	_cd_dom="$(printf '%s' "${PROXY_DOMAINS:-}" | cut -d, -f1)"
+	_cd_dom="${_caddy_dom:-}"
 	if [ -z "$_cd_dom" ]; then
-		_cd_dom="$(render_caddyfile | sed -n 's/^\([^ {]*\) {.*/\1/p' | head -n1)"
+		_cd_dom="$(printf '%s' "${PROXY_DOMAINS:-}" | cut -d, -f1)"
 	fi
 	if [ -n "$_cd_dom" ]; then
 		_cd_ip=""
@@ -1832,22 +1921,72 @@ echo "==> 6/7 证书"
 # 不再"等 120 秒然后听天由命"：现在 wait 的秒数给得足够长（申请由服务在做，
 # 我们只是等它的结果），而**结果一定是确定的**——要么就绪、要么失败并带原因。
 if [ "$TLS_TERMINATOR" = "caddy" ]; then
-	echo "    Caddy 负责申请与续期（它自己会重试），稍后验证 https 是否可用"
+	# 这里必须**当场验**，不能只打印"稍后验证"。用户上一次部署正是栽在这：
+	# 脚本说"反代已配好"，实际 Caddy 只开了 80、没有 443 站点（Caddyfile 是别人
+	# 留下的），用户得自己 netstat 才发现没监听 443。
+	#
+	# 判据要挑**真正的那个事实**：443 在听 + Caddy 能为这个域名拿到证书。
+	# 只查 "caddy 进程活着"是不够的（它当然活着，还开着 80）。
+	echo "    正在等待 Caddy 为 $_cd_dom 申请证书（最多 60 秒）…"
+	_cd_ok=""
+	i=0
+	while [ $i -lt 30 ]; do
+		# 443 端口在听？用 ss/netstat 判，缺工具就跳过后面的请求探测。
+		if curl -fsS --max-time 5 "https://$_cd_dom/api/public/v1/site" >/dev/null 2>&1; then
+			_cd_ok="1"
+			break
+		fi
+		i=$((i + 1))
+		sleep 2
+	done
+	if [ -n "$_cd_ok" ]; then
+		echo "    https://$_cd_dom 已可用（证书由 Caddy 签发）"
+	else
+		# 失败要给出**能直接照做**的诊断，而不是"稍后再看看"。
+		echo "" >&2
+		echo "错误：Caddy 起来了，但 https://$_cd_dom 在 60 秒内仍不可用。" >&2
+		echo "  可能的原因与查法（按常见程度排序）：" >&2
+		echo "  1) Caddyfile 里没有这个域名的站点块 → 看：grep -n '$_cd_dom' $CADDYFILE" >&2
+		echo "  2) 80/443 被别的服务占用（x-ui、nginx、其他 caddy）→ 看：ss -lntp | grep -E ':(80|443)\\b'" >&2
+		echo "  3) 域名没解析到本机 → 看：getent hosts $_cd_dom" >&2
+		echo "  4) 证书申请被 CA 拒绝（配额/限流/端口不通）→ 看：journalctl -u caddy -n 50" >&2
+		echo "" >&2
+		journalctl -u caddy --no-pager -n 20 2>/dev/null | sed 's/^/    /' >&2 || true
+		rollback "Caddy 反代未生效（https://$_cd_dom 打不开，原因见上）"
+	fi
 elif [ "$TLS_MODE" = "none" ]; then
 	echo "    跳过（tls.mode=none）：证书由前置反代负责"
 else
 	_cert_wait=180
 	if [ "$TLS_MODE" != "acme" ]; then _cert_wait=0; fi
-	if [ "$TLS_MODE" = "acme" ]; then
-		echo "    正在申请证书（前台进行，失败会中止安装并回滚）"
-	fi
-	_cert_rc=0
-	# 这里刻意**不再**吞掉输出：tls status 会打印主体/签发者/有效期，
-	# 申请失败时打印原因与可复制的排查命令——那正是用户要的"反馈结果"。
-	if [ "$_cert_wait" -gt 0 ]; then
-		"$BIN_DIR/probe-master" tls status -config "$CFG" -wait "$_cert_wait" || _cert_rc=$?
-	else
+	# sync_obtain 不可用时（二进制比脚本旧），首张证书是**服务在后台**申请的：
+	# 这时不能只跑一次 tls status 就下结论——它会立刻返回"进行中"（rc=2），
+	# 而用户看到的会是"仍在申请，请稍后自己看"，正是本轮要消灭的那种收尾。
+	# 所以我们自己轮询，把"后台申请"包成一次前台等待。
+	if [ "$TLS_MODE" = "acme" ] && [ -z "$SYNC_OBTAIN_OK" ]; then
+		echo "    正在申请证书（您的二进制版本不支持前台申请，改为轮询等待；失败会中止安装并回滚）"
+		i=0
+		while [ $i -lt "$_cert_wait" ]; do
+			_cert_rc=0
+			"$BIN_DIR/probe-master" tls status -config "$CFG" >/dev/null 2>&1 || _cert_rc=$?
+			[ "$_cert_rc" != "2" ] && break
+			i=$((i + 5))
+			sleep 5
+		done
+		_cert_rc=0
 		"$BIN_DIR/probe-master" tls status -config "$CFG" || _cert_rc=$?
+	else
+		if [ "$TLS_MODE" = "acme" ]; then
+			echo "    正在申请证书（前台进行，失败会中止安装并回滚）"
+		fi
+		_cert_rc=0
+		# 这里刻意**不再**吞掉输出：tls status 会打印主体/签发者/有效期，
+		# 申请失败时打印原因与可复制的排查命令——那正是用户要的"反馈结果"。
+		if [ "$_cert_wait" -gt 0 ]; then
+			"$BIN_DIR/probe-master" tls status -config "$CFG" -wait "$_cert_wait" || _cert_rc=$?
+		else
+			"$BIN_DIR/probe-master" tls status -config "$CFG" || _cert_rc=$?
+		fi
 	fi
 	case "$_cert_rc" in
 	0)

@@ -219,3 +219,130 @@ func TestAnswersFileNeverStoresSecrets(t *testing.T) {
 		t.Error("ans_put 里没有敏感项的黑名单：它只靠调用方自觉，那是一层会被随手绕过的约定。")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// ⑤ Caddyfile 存在 ≠ 配好了：不许因为"文件存在"就跳过写入
+// ---------------------------------------------------------------------------
+
+// 真机反馈：脚本打印"反代已配好、部署完成"，用户 netstat 却发现 Caddy
+// **只开了 80、没有 443**，https 打不开。
+//
+// 根因是判据用错了：`[ -f "$CADDYFILE" ]` 就保留。这台机器上 Caddy 是别人
+// （发行版包 / x-ui 面板 / 更早的 nginx 迁移）装的，那份配置里根本没有我们要
+// 反代的域名——保留它不是"尊重既有配置"，而是**让 Caddy 没有 443 站点**。
+//
+// 正确判据是"里面有没有本次要用的那个域名"，且失败时要能当场验出来。
+func TestCaddyfileIsNotKeptJustBecauseItExists(t *testing.T) {
+	body := readRepoFile(t, "../../scripts/deploy-master.sh")
+
+	// 判据一：不许出现"文件存在就保留"这种短路，必须同时看域名。
+	//
+	// 只看**行首的 if**：修正后的写法里有好几个分支也带这个子串
+	// （`elif [ -f "$CADDYFILE" ] && [ -z "$FORCE_CONFIG" ]; then` 是"追加"分支，
+	// 它本来就该在"没有目标域名"时走到）。用全行 Contains 判会把正确实现也判红。
+	sawGuardedIf := false
+	for _, line := range strings.Split(body, "\n") {
+		trimmed := strings.TrimLeft(line, " \t")
+		if strings.HasPrefix(trimmed, "if [ -f \"$CADDYFILE\" ] && [ -z \"$FORCE_CONFIG\" ]") {
+			if !strings.Contains(trimmed, "Caddyfile_has_domain") {
+				t.Error("Caddyfile 的保留判据只看「文件存在」——\n" +
+					"  本机 Caddy 常是别人装的（发行版包、x-ui、更早的 nginx 迁移），\n" +
+					"  那份配置里没有我们要反代的域名，保留它等于 Caddy 不开 443、拿不到证书。\n" +
+					"  判据要换成「里面有没有本次要用的域名」（见 Caddyfile_has_domain）。\n" +
+					"  实际写法：" + trimmed)
+			} else {
+				sawGuardedIf = true
+			}
+		}
+	}
+	if !sawGuardedIf {
+		t.Fatal("没找到「存在 + 未 force-config」这个判据的 if 分支：\n" +
+			"  判据与脚本写法脱节了（脚本改过结构却没同步这里），这条护栏已经形同虚设。")
+	}
+
+	// 判据二：必须真的检查域名在不在文件里，且用的是行首站点标签而非子串。
+	// 用子串的话，一句注释里顺嘴提到域名就能让判据失效。
+	if !strings.Contains(body, "Caddyfile_has_domain()") {
+		t.Fatal("脚本里没有 Caddyfile_has_domain 判据：Caddyfile 的复用/追加/覆盖" +
+			"就没有依据，只能退回到「文件存在就跳过」那个错误行为。")
+	}
+	if !strings.Contains(body, `^[[:space:]]*$1(:[0-9]+)?[[:space:]]*\{`) {
+		t.Error("Caddyfile_has_domain 用的不是「行首站点标签」判据：\n" +
+			"  子串匹配会让注释里出现的域名也算命中——一句话就能让它失效。")
+	}
+
+	// 判据三：caddy 模式下必须**当场验证 443 与证书**，不许只说"稍后验证"。
+	// 这正是用户撞上的那个缺口：脚本跑完一切正常，只有 netstat 能看出问题。
+	if strings.Contains(body, "Caddy 负责申请与续期（它自己会重试），稍后验证 https 是否可用") {
+		t.Error("caddy 分支仍在用「稍后验证 https 是否可用」收尾——\n" +
+			"  用户上次就是这样被骗过的：脚本说部署完成，实际 443 没在听。\n" +
+			"  必须当场请求一次 https://<域名>/api/public/v1/site，失败即回滚并给出诊断。")
+	}
+	if !strings.Contains(body, `https://$_cd_dom/api/public/v1/site`) {
+		t.Error("caddy 分支没有真的去请求一次 https 站点：\n" +
+			"  「caddy 进程活着」不足以说明反代生效——它当然活着，还开着 80。")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ⑥ 脚本写出的配置键，二进制必须认识（否则严格解析让服务起不来）
+// ---------------------------------------------------------------------------
+
+// 真机反馈：
+//
+//	启动失败： 解析配置失败: yaml: unmarshal errors:
+//	  line 16: field sync_obtain not found in type config.ACMEConfig
+//
+// 根因是**脚本与二进制的版本错配**：配置模板来自 main（会写新键），而
+// install-master-bin.sh 下载的二进制来自 Release 标签（不认识新键）。而
+// LoadMaster 是严格解析（KnownFields(true)），写下去＝服务启动即失败。
+//
+// 这条护栏钉两件事：① 写这类新键之前必须探测；② 探测必须问二进制本人。
+func TestConfigKeysAreProbedBeforeWriting(t *testing.T) {
+	body := readRepoFile(t, "../../scripts/deploy-master.sh")
+
+	if !strings.Contains(body, "binary_supports_config_key()") {
+		t.Fatal("脚本里没有 binary_supports_config_key：\n" +
+			"  配置模板来自 main、二进制来自 Release 标签，两者会错配；\n" +
+			"  而 LoadMaster 严格解析未知键，写下去就是「服务起不来」。")
+	}
+
+	// sync_obtain 是本轮新增键的典型：写入必须被探测包住。
+	// 判据看的是"这个键的 echo 行是否在 if binary_supports_config_key 之下"，
+	// 而不是"文件里有没有这个字符串"——后者在注释里也命中。
+	lines := strings.Split(body, "\n")
+	guarded := false
+	for i, line := range lines {
+		if !strings.Contains(line, "sync_obtain: true") {
+			continue
+		}
+		// 往上找最近的 8 行，看有没有一道 binary_supports_config_key 闸。
+		lo := i - 8
+		if lo < 0 {
+			lo = 0
+		}
+		for j := lo; j < i; j++ {
+			if strings.Contains(lines[j], "binary_supports_config_key sync_obtain") {
+				guarded = true
+			}
+		}
+	}
+	if !guarded {
+		t.Error("sync_obtain 的写入没有被 binary_supports_config_key 包住：\n" +
+			"  旧二进制（Release 标签那份）不认识这个键，严格解析会让服务启动失败——\n" +
+			"  这条正是用户在真机上撞到的 `field sync_obtain not found`。")
+	}
+
+	// 探测本身要有"基线必须能解析"的前置检查。没有它，一份**语法错误**的
+	// 探针配置会让二进制报 YAML 错误，而那被当成"认识这个键"（假阴性）。
+	if !strings.Contains(body, `*"解析配置失败"*`) {
+		t.Error("binary_supports_config_key 没有基线校验：\n" +
+			"  探针配置自己写坏时二进制报的是 YAML 语法错，会被误判成「认识该键」——\n" +
+			"  那就等于探测失效、照样写下去让服务起不来。")
+	}
+	if !strings.Contains(body, `public_listen: "127.0.0.1:0"`) {
+		t.Error("探针配置里的监听地址没有加引号：\n" +
+			"  `127.0.0.1:0` 不加引号在 YAML 里会被当成映射键（`did not find expected key`），\n" +
+			"  探测结果就全部不可信了。")
+	}
+}
