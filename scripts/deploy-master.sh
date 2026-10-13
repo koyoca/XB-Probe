@@ -156,6 +156,14 @@ ADMIN_LISTEN="${PROBE_ADMIN_LISTEN:-127.0.0.1:8081}"
 PUBLIC_ORIGIN="${PROBE_PUBLIC_ORIGIN:-}"
 ADMIN_ORIGIN="${PROBE_ADMIN_ORIGIN:-}"
 DIST_BASE="${PROBE_DIST_BASE:-}"
+# 发布文件（Agent 二进制的自举来源）从哪来、拉哪些。见 "6c) 发布文件入库"。
+# RELEASE_REPO 是本项目的发布仓库；--dist-source 可以直接给完整 URL 前缀来
+# 覆盖它（GitHub 在部分机房不可达，这时指向自建镜像）。
+RELEASE_REPO="${PROBE_RELEASE_REPO:-koyoca/XB-Probe}"
+DIST_SOURCE="${PROBE_DIST_SOURCE:-}"
+DIST_PULL="${PROBE_DIST_PULL:-}"
+DIST_PULL_GIVEN=""
+NO_DIST_PULL="${PROBE_NO_DIST_PULL:-}"
 ADMIN_USER="${PROBE_ADMIN_USER:-ops}"
 ADMIN_PASSWORD="${PROBE_ADMIN_PASSWORD:-}"
 NO_SERVICE=""
@@ -268,6 +276,12 @@ deploy-master.sh —— Master 一键部署
   --public-listen <地址>     默认 0.0.0.0:8080（只写端口如 9000 = 0.0.0.0:9000）
   --admin-listen <地址>      默认 127.0.0.1:8081（只监听回环，公网请走反代）
   --dist-base <URL>         发布文件镜像前缀
+  --dist-pull <all|local|skip>
+                            部署完成后把 Agent 发布文件拉进 data_dir/dist/
+                            （默认 all；local 只拉本机架构，skip 先不拉）
+  --dist-source <URL前缀>    发布文件的来源（默认按二进制版本指向本项目的
+                            GitHub Release；GitHub 不可达时给自建镜像）
+  --no-dist-pull            等价于 --dist-pull skip
   --no-service              不注册 systemd（容器场景）
   --force-config            覆盖已有配置
   --dry-run                 只打印计划与将要写入的配置
@@ -312,6 +326,9 @@ while [ $# -gt 0 ]; do
 	--public-origin) PUBLIC_ORIGIN="${2:-}"; shift 2 ;;
 	--admin-origin) ADMIN_ORIGIN="${2:-}"; shift 2 ;;
 	--dist-base) DIST_BASE="${2:-}"; shift 2 ;;
+	--dist-source) DIST_SOURCE="${2:-}"; shift 2 ;;
+	--dist-pull) DIST_PULL="${2:-}"; DIST_PULL_GIVEN="1"; shift 2 ;;
+	--no-dist-pull) NO_DIST_PULL="1"; shift ;;
 	--admin-user) ADMIN_USER="${2:-}"; ADMIN_USER_GIVEN="1"; shift 2 ;;
 	--admin-password) ADMIN_PASSWORD="${2:-}"; shift 2 ;;
 	--no-service) NO_SERVICE="1"; shift ;;
@@ -2075,6 +2092,9 @@ if [ -n "$DRY_RUN" ]; then
 	echo
 	echo "==> dry-run：未创建用户/目录、未安装二进制、未注册服务、未初始化管理员。"
 	echo "    去掉 --dry-run 即执行（其余参数完全一致）。"
+	echo
+	echo "==> dry-run：最后还会把 Agent 发布文件拉进 $DATA/dist/（probe-master dist pull）。"
+	echo "    不拉的话一键安装脚本会在下载 probe-agent 那一步 404；用 --no-dist-pull 跳过。"
 	exit 0
 fi
 
@@ -2635,6 +2655,216 @@ else
 	esac
 fi
 
+echo "==> 6c/7 发布文件入库（/dist/ 里放的是 Agent 二进制，新节点的自举来源）"
+# ---------------------------------------------------------------------------
+# 为什么这一步必须在部署里，而不是留给用户"稍后自己跑"
+# ---------------------------------------------------------------------------
+#
+# 真机现象（用户报的就是这个）：Master 部署"成功"了，紧接着按收尾清单去装第一个
+# Agent：
+#     curl -fsSL https://<域名>/install.sh | sudo sh -s -- --code <注册码>
+#       ==> 平台：linux_amd64
+#       ==> 下载 probe-agent_linux_amd64
+#       curl: (22) The requested URL returned error: 404
+#      错误：下载失败。
+#
+# 根因：/install.sh 是**内嵌在二进制里**的（所以那一步取得到，用户看到的是一份
+# 完整可读的脚本），而脚本接下来要的是 `$DIST_BASE/probe-agent_<os>_<arch>` 与
+# `/dist/SHA256SUMS`——这两个是 `data_dir/dist/<版本>/` 下的**发布文件**。
+# 部署流程从来没把发布文件放进去，只在收尾清单里把 `probe-master dist pull`
+# 当成**事后手工步骤**提了一句。于是一个"一键部署成功"的 Master，开箱的装机
+# 通道是坏的，而且 404 完全指不出原因（用户第一反应是"是不是反代没配好"）。
+#
+# 三条边界，都是踩过之后的结论：
+#
+# ① **失败不回滚**。Master 本身跑得好好的，坏的只是"新节点自举"这一条路。
+#    为一个可能只是网络不可达（GitHub 在部分机房连不上）的下载把整个部署回滚，
+#    是把一个小问题升级成一个大问题。这里只给警告 + 可复制的补救命令。
+#
+# ② **判据落在磁盘上，不落在 HTTP 200 上**。/dist/ 受 install.mode 门控
+#    （默认 on_demand：只有存在"未使用且未过期"的注册码时才开放）。刚部署完
+#    一台新 Master 时一个注册码都还没有，此时请求 /dist/SHA256SUMS 返回 404 是
+#    **预期行为**。拿它当失败判据会把每次正常部署都报成失败——判据要挑能区分
+#    "真的坏了"与"还没到开放条件"的那一个，所以这里查的是文件在不在、非不非空。
+#    之后再用一次真实 HTTP 请求把"现在能不能下载、不能的话为什么"说清楚。
+#
+# ③ 版本号对不上就跳过。只有"纯数字点分"的版本号才可能对上 Release 标签
+#    （0.1.1 → v0.1.1）。本地自编译的二进制版本号是 dev/带 git 描述，
+#    照默认 URL 去拉必然 404，不如直接说明白。
+_mp_bin="$BIN_DIR/probe-master"
+_mp_ver="$("$_mp_bin" version 2>/dev/null | awk '{print $NF}')"
+
+# 手动兜底提示：三条失败/跳过路径共用，省得改一处漏两处。
+dist_pull_hint() {
+	echo "    可以手动补（或在能访问 GitHub 的机器上拉好后拷进 $DATA/dist/）："
+	printf '      %s dist pull --version %s --from %s\n' \
+		"$BIN_DIR/probe-master" "${_mp_ver:-<版本>}" "${DIST_SOURCE:-<发布源 URL>}"
+	echo "    这个机房的网络到不了 GitHub 时，也可以把「设置 → 安装与下载」里的"
+	echo "    install.dist_base 指向你自己的镜像，再从那台镜像上取发布文件。"
+}
+
+# 本机平台（与 install.sh 的命名一致：<os>_<arch>）。
+case "$(uname -s 2>/dev/null)" in
+Linux) _mp_os="linux" ;;
+Darwin) _mp_os="darwin" ;;
+FreeBSD) _mp_os="freebsd" ;;
+*) _mp_os="" ;;
+esac
+case "$(uname -m 2>/dev/null)" in
+x86_64 | amd64) _mp_arch="amd64" ;;
+aarch64 | arm64) _mp_arch="arm64" ;;
+armv7l) _mp_arch="armv7" ;;
+armv6l) _mp_arch="armv6" ;;
+i386 | i686) _mp_arch="386" ;;
+riscv64) _mp_arch="riscv64" ;;
+*) _mp_arch="" ;;
+esac
+_mp_plat="${_mp_os}_${_mp_arch}"
+
+# 只有"纯数字点分"才可能对上 Release 标签。
+case "${_mp_ver:-}" in
+'' | *[!0-9.]* | .* | *. | *..*) _mp_releasable="" ;;
+*) _mp_releasable="1" ;;
+esac
+
+if [ -n "$NO_DIST_PULL" ] || [ "$DIST_PULL" = "skip" ]; then
+	echo "    已跳过（--no-dist-pull / --dist-pull skip）。"
+	echo "    ⚠ 没有发布文件时，一键安装脚本会在下载 probe-agent 那一步 404。"
+	dist_pull_hint
+	_mp_pull_rc="0"
+	_mp_done=""
+elif [ -z "$_mp_releasable" ]; then
+	echo "    当前二进制版本是「${_mp_ver:-未知}」，不是发布版本号，跳过自动拉取。"
+	echo "    ⚠ 没有发布文件时，一键安装脚本会在下载 probe-agent 那一步 404。"
+	dist_pull_hint
+	_mp_pull_rc="0"
+	_mp_done=""
+else
+	if [ -z "$DIST_SOURCE" ]; then
+		DIST_SOURCE="https://github.com/$RELEASE_REPO/releases/download/v$_mp_ver"
+	fi
+	if [ -z "$DIST_PULL_GIVEN" ]; then
+		# 记忆里的选择只当默认值：拉取是幂等的，重新问一次不花钱，但"上次选过
+		# local"的人不该被悄悄升级成"这次拉全部 80MB"。
+		_dp_mem="$(ans_get DIST_PULL)"
+		case "$_dp_mem" in
+		local) _dp_def="2" ;;
+		skip) _dp_def="3" ;;
+		*) _dp_def="1" ;;
+		esac
+		if [ -n "$ASK" ]; then
+			cat >&2 <<'EOF'
+
+Agent 二进制从哪来：Master 的 /dist/ 就是新节点的**自举来源**。
+装第一个 Agent 之前必须把发布文件放进 data_dir/dist/，否则安装脚本
+下载 probe-agent 时只会得到 404（/install.sh 本身是内嵌的，所以那一步正常）。
+EOF
+		fi
+		if [ -n "$ASK" ]; then
+			printf '  1) 全部平台   拉 Release 里全部 Agent 产物（推荐：节点可能是别的架构）\n' >&2
+			printf '  2) 只拉本机   只拉 %s，省流量\n' "${_mp_plat:-本机}" >&2
+			printf '  3) 先跳过     之后自己跑（不跑的话一键安装脚本会 404）\n' >&2
+		fi
+		ask "选择发布文件拉取范围（1/2/3）" "$_dp_def"
+		case "$ASK_REPLY" in
+		1 | all | ALL | All) DIST_PULL="all" ;;
+		2 | local | LOCAL | Local) DIST_PULL="local" ;;
+		3 | skip | SKIP | Skip | none) DIST_PULL="skip" ;;
+		*) DIST_PULL="$ASK_REPLY" ;;
+		esac
+		ans_put DIST_PULL "$DIST_PULL"
+	fi
+
+	if [ "$DIST_PULL" = "skip" ]; then
+		echo "    已跳过。⚠ 没有发布文件时，一键安装脚本会在下载 probe-agent 那一步 404。"
+		dist_pull_hint
+		_mp_pull_rc="0"
+		_mp_done=""
+	elif [ "$DIST_PULL" = "local" ] && [ -z "$_mp_plat" ]; then
+		echo "    认不出本机平台（uname 结果不在已知表里），跳过自动拉取。"
+		dist_pull_hint
+		_mp_pull_rc="0"
+		_mp_done=""
+	else
+		echo "    来源：$DIST_SOURCE"
+		if [ "$DIST_PULL" = "local" ]; then
+			echo "    范围：只拉 $_mp_plat"
+			"$_mp_bin" dist pull --config "$CFG" --version "$_mp_ver" \
+				--platform "$_mp_plat" --from "$DIST_SOURCE" || _mp_pull_rc=$?
+		else
+			echo "    范围：全部平台"
+			"$_mp_bin" dist pull --config "$CFG" --version "$_mp_ver" --all \
+				--from "$DIST_SOURCE" || _mp_pull_rc=$?
+		fi
+		_mp_pull_rc="${_mp_pull_rc:-0}"
+
+		# 判据：文件真的在、且非空（理由见上面的 ②）。
+		_mp_done=""
+		if [ "$_mp_pull_rc" = "0" ] && [ -s "$DATA/dist/$_mp_ver/SHA256SUMS" ]; then
+			_mp_n="$(ls -1 "$DATA/dist/$_mp_ver" 2>/dev/null | grep -c '^probe-agent_' || true)"
+			if [ "${_mp_n:-0}" -gt 0 ]; then
+				_mp_done="1"
+				printf '    已入库 %s 个 Agent 产物 + SHA256SUMS → %s\n' "$_mp_n" "$DATA/dist/$_mp_ver"
+			fi
+		fi
+
+		if [ -n "$_mp_done" ]; then
+			# 发布文件是新装的（root 建的），数据目录的主人是 probe。按文件权限
+			# 0644/目录 0755 本来也读得到，但"数据目录里的东西属于 probe"是
+			# 一条更简单的规则——将来有人把 data_dir 挪到别处时不会踩坑。
+			if id -u probe >/dev/null 2>&1; then
+				chown -R probe:probe "$DATA/dist" 2>/dev/null || \
+					chown -R probe "$DATA/dist" 2>/dev/null || true
+			fi
+			# 真请求一次。能被 install.mode 挡住，那就把"为什么现在打不开、
+			# 什么时候能打开"直接说清楚——而不是留一句"稍后自查"。
+			_mp_port="$(split_port "$PUBLIC_LISTEN")"
+			case "$TLS_TERMINATOR" in
+			master)
+				_mp_url="https://127.0.0.1:$_mp_port/dist/SHA256SUMS"
+				_mp_ck="-k"
+				_mp_nc="--no-check-certificate"
+				;;
+			*)
+				_mp_url="http://127.0.0.1:$_mp_port/dist/SHA256SUMS"
+				_mp_ck=""
+				_mp_nc=""
+				;;
+			esac
+			_mp_body=""
+			if command -v curl >/dev/null 2>&1; then
+				_mp_body="$(curl -sS $_mp_ck --max-time 10 "$_mp_url" 2>/dev/null || true)"
+			elif command -v wget >/dev/null 2>&1; then
+				_mp_body="$(wget -q $_mp_nc -O- --timeout=10 "$_mp_url" 2>/dev/null || true)"
+			fi
+			case "$_mp_body" in
+			*probe-agent_*)
+				echo "    自检：$_mp_url 已可读，新节点可以下载了"
+				;;
+			*分发入口当前未开放*)
+				# 这不是失败：on_demand 模式下，没有注册码时 /dist/ 本来就该关着，
+				# 而且"关着"恰恰是设计意图（没注册码就不该有人能下装机包）。
+				echo "    自检：/dist/ 现在返回「未开放」——install.mode=on_demand 的正常行为，"
+				echo "          去后台「节点 → 注册码」生成一个注册码后 /dist/ 立刻开放。"
+				;;
+			'')
+				echo "    自检：没连上 $_mp_url（服务可能刚起来，或 listen 在别的地址）。"
+				echo "          服务跑起来后可以用浏览器/curl 直接试 $_mp_url"
+				;;
+			*)
+				echo "    ⚠ 自检：$_mp_url 返回的内容不像校验和。"
+				echo "      常见原因：install.mode 被设成 off；或 install.dist_base 被指向了别处"
+				echo "      （指向别处时，节点其实是从那个镜像下载，本机的 /dist/ 不参与）。"
+				;;
+			esac
+		else
+			echo "    ⚠ 发布文件拉取失败（rc=$_mp_pull_rc）。Master 本身不受影响，"
+			echo "      但新节点装机时会在下载 probe-agent 那一步 404。"
+			dist_pull_hint
+		fi
+	fi
+fi
+
 echo "==> 7/7 完成"
 if [ -z "$PUBLIC_ORIGIN" ]; then
 	cat >&2 <<'EOF'
@@ -2744,8 +2974,11 @@ cat <<EOF
        · 安装入口模式 install.mode       —— 默认 on_demand（存在未用注册码时才开放）
   3) 生成注册码（节点页 → 注册码），用它装第一个 Agent：
        curl -fsSL ${PUBLIC_ORIGIN:-http://$PUBLIC_LISTEN}/install.sh | sudo sh -s -- --code <注册码>
-  4) 发布文件入库（Agent 自升级要用）：
-       probe-master dist pull --version <版本> --from <发布源 URL> --pubkey /path/minisign.pub
+  4) 发布文件：本脚本在部署时已经把 Agent 发布文件拉进 data_dir/dist/ 了
+     （见上面 6c 的输出）。若当时跳过了、或之后发布了新版本，补拉一次：
+       probe-master dist pull --version <版本> --from <发布源 URL>
+     没有发布文件时，`/install.sh | sh` 会在下载 probe-agent 那一步 404
+     （/install.sh 本身是内嵌的，所以那一步看起来一切正常，坏在下一步）。
   5) 公开看板与后台要不要分成两个域名 —— 在「设置 → 站点形态」里选：
        · 跟随配置文件（默认）：master.yaml 里有 host 白名单就分离，没有就同站
        · 同站（一个域名）：两个路径都在同一域名下

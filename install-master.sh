@@ -72,6 +72,11 @@ DIR=""
 DATA=""
 BIN_DIR=""
 DIST_BASE=""
+# 发布文件（Agent 二进制的自举来源）的拉取范围与来源前缀。留空 = 交给
+# deploy-master.sh 按二进制版本给默认值并提问（默认值只有一处来源）。
+DIST_PULL=""
+DIST_SOURCE=""
+NO_DIST_PULL=""
 TLS_MODE=""
 TLS_CERT=""
 TLS_KEY=""
@@ -111,7 +116,8 @@ install-master.sh —— XB-Probe Master 整机一键部署
 
   其余参数透传给 scripts/deploy-master.sh：
   --public-origin/--admin-origin/--admin-user/--public-listen/--admin-listen/
-  --dir/--data/--bin-dir/--dist-base/--no-service/--force-config/
+  --dir/--data/--bin-dir/--dist-base/--dist-pull/--dist-source/--no-dist-pull/
+  --no-service/--force-config/
   --tls-mode/--tls-cert/--tls-key/--tls-domain/--tls-ip/--acme-email/--acme-ca/--acme-challenge/
   --tls-terminator/--proxy-domain
 
@@ -150,6 +156,9 @@ while [ $# -gt 0 ]; do
 	--data) DATA="${2:-}"; shift 2 ;;
 	--bin-dir) BIN_DIR="${2:-}"; shift 2 ;;
 	--dist-base) DIST_BASE="${2:-}"; shift 2 ;;
+	--dist-pull) DIST_PULL="${2:-}"; shift 2 ;;
+	--dist-source) DIST_SOURCE="${2:-}"; shift 2 ;;
+	--no-dist-pull) NO_DIST_PULL="1"; shift ;;
 	--tls-mode) TLS_MODE="${2:-}"; shift 2 ;;
 	--tls-cert) TLS_CERT="${2:-}"; shift 2 ;;
 	--tls-key) TLS_KEY="${2:-}"; shift 2 ;;
@@ -756,6 +765,11 @@ set -- --bin "$SRC/bin/probe-master"
 [ -n "$DATA" ] && set -- "$@" --data "$DATA"
 [ -n "$BIN_DIR" ] && set -- "$@" --bin-dir "$BIN_DIR"
 [ -n "$DIST_BASE" ] && set -- "$@" --dist-base "$DIST_BASE"
+# 发布文件拉取范围/来源也必须转发：用户在安装脚本上给的 --dist-pull skip，
+# 如果没传下去，部署脚本会照默认值去拉几十 MB，而用户明确说了不要。
+[ -n "$DIST_PULL" ] && set -- "$@" --dist-pull "$DIST_PULL"
+[ -n "$DIST_SOURCE" ] && set -- "$@" --dist-source "$DIST_SOURCE"
+[ -n "$NO_DIST_PULL" ] && set -- "$@" --no-dist-pull
 [ -n "$NO_SERVICE" ] && set -- "$@" --no-service
 [ -n "$FORCE_CONFIG" ] && set -- "$@" --force-config
 set -- "$@" --tls-mode "$TLS_MODE"

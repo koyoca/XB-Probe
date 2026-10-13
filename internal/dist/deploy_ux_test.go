@@ -923,3 +923,105 @@ func TestMasterTerminatorChecksForCaddyPortConflict(t *testing.T) {
 			"  无条件停掉 caddy 会把别人（发行版包、x-ui）的服务也停掉。")
 	}
 }
+
+// 用户真机报的：Master 部署"成功"后，第一条命令
+//
+//	curl -fsSL https://<域名>/install.sh | sudo sh -s -- --code <注册码>
+//
+// 就死在
+//
+//	==> 下载 probe-agent_linux_amd64
+//	curl: (22) The requested URL returned error: 404
+//	错误：下载失败。
+//
+// 根因不在安装脚本，而在**部署脚本没把发布文件放进 data_dir/dist/**：
+// `/install.sh` 是内嵌在二进制里的（所以那一步取得到、看起来一切正常），
+// 它接下来要的 `$DIST_BASE/probe-agent_<os>_<arch>` 与 `/dist/SHA256SUMS`
+// 才是发布文件；而部署流程只在收尾清单里把 `probe-master dist pull` 当成
+// **事后手工步骤**提了一句。于是一键部署出来的 Master 开箱就没有装机通道。
+//
+// 这条钉三件事：①部署流程必须自己拉发布文件；②拉失败不许回滚整个部署；
+// ③判据落在磁盘上（/dist/ 受 install.mode 门控，刚部署完必然是关的）。
+func TestDeployPullsReleaseFilesForNodeBootstrap(t *testing.T) {
+	body := readRepoFile(t, "../../scripts/deploy-master.sh")
+
+	// 先把"6c) 发布文件入库"这一段切出来。**必须切区间**：本文件里别处也有
+	// `rollback`、也有 `dist` 字样，全文搜索会让别的路径替这一段作证。
+	const startMark = "6c/7 发布文件入库"
+	start := strings.Index(body, startMark)
+	if start < 0 {
+		t.Fatal("部署脚本里没有「发布文件入库」这一步：\n" +
+			"  没有它，一键部署出来的 Master 开箱就没有装机通道——\n" +
+			"  `/install.sh | sh` 会在下载 probe-agent 那一步 404，\n" +
+			"  而 /install.sh 本身是内嵌的，所以那一步看起来完全正常。")
+	}
+	end := strings.Index(body[start:], `echo "==> 7/7 完成"`)
+	if end < 0 {
+		t.Fatal("找不到发布文件入库这一段的结束位置：结构变了，判据要跟着改" +
+			"（别把 end 放宽成整份文件——那样 rollback 的断言会被别处满足）。")
+	}
+	region := body[start : start+end]
+
+	// ① 真的调用 dist pull，而且是**两种范围**都覆盖（--all / --platform）。
+	if !strings.Contains(region, `dist pull --config "$CFG" --version "$_mp_ver"`) {
+		t.Error("这一段没有真的调用 probe-master dist pull：\n" +
+			"  只打印一句「请自己跑 dist pull」等于没修——用户按收尾清单装第一个 Agent 时照样 404。")
+	}
+	if !strings.Contains(region, "--platform \"$_mp_plat\"") {
+		t.Error("没有「只拉本机平台」这一支：\n" +
+			"  全部平台是十几份二进制，机房带宽有限时需要能只拉本机架构。")
+	}
+	if !strings.Contains(region, "--all") {
+		t.Error("没有「拉全部平台」这一支。")
+	}
+	// ② 默认来源必须跟着**二进制版本**走（0.1.1 → v0.1.1 的 Release 标签）。
+	if !strings.Contains(region, "https://github.com/$RELEASE_REPO/releases/download/v$_mp_ver") {
+		t.Error("默认发布源没有从二进制版本推导：\n" +
+			"  写死一个版本号会在升级后静默拉到旧产物；不写 v 前缀则 tag 对不上直接 404。")
+	}
+	// ③ 版本号不是发布版本时（本地自编译的 dev）必须跳过，而不是硬去 GitHub 撞 404。
+	if !strings.Contains(region, `*[!0-9.]*`) {
+		t.Error("没有「版本号不是纯数字点分就跳过」的判断：\n" +
+			"  本地自编译的二进制版本号是 dev，照默认 URL 去拉必然 404。")
+	}
+	// ④ 拉失败**不许**回滚整个部署。Master 本身是好的，坏的只是新节点自举；
+	//    为一个可能只是网络不可达的下载把部署回滚，是把小问题升级成大问题。
+	if strings.Contains(region, "rollback ") {
+		t.Error("发布文件拉取这一段里出现了 rollback：\n" +
+			"  GitHub 在部分机房不可达是常态，为一个下载失败回滚整个部署会把\n" +
+			"  「装好了但装机通道暂时不通」变成「什么都没装成」。这里只该警告 + 给补救命令。")
+	}
+	// ⑤ 判据落在磁盘上（/dist/ 受 install.mode 门控，刚部署完必然是关的，
+	//    拿 HTTP 404 当失败会把每次正常部署都报成失败）。
+	if !strings.Contains(region, `-s "$DATA/dist/$_mp_ver/SHA256SUMS"`) {
+		t.Error("没有检查发布文件是否真的落盘：\n" +
+			"  /dist/ 在 install.mode=on_demand 且没有未使用注册码时**本来就该**返回 404，\n" +
+			"  拿它当成功判据会误报；判据要落在磁盘上的文件。")
+	}
+	// ⑥ 那个"未开放"的 404 要能识别并说清楚（而不是当成自检失败）。
+	if !strings.Contains(region, "分发入口当前未开放") {
+		t.Error("没有区分「/dist/ 未开放」与「真的坏了」：\n" +
+			"  前者是 on_demand 的正常行为（生成注册码后立刻开放），后者才是故障。")
+	}
+
+	// ⑦ 安装入口（源码安装）必须把这三个参数转发给部署脚本。
+	//    不转发 = 用户在安装脚本上给的 --dist-pull skip 被静默丢弃。
+	inst := readRepoFile(t, "../../install-master.sh")
+	for _, fwd := range []string{
+		`set -- "$@" --dist-pull "$DIST_PULL"`,
+		`set -- "$@" --dist-source "$DIST_SOURCE"`,
+		`set -- "$@" --no-dist-pull`,
+	} {
+		if !strings.Contains(inst, fwd) {
+			t.Errorf("install-master.sh 没有转发 %q：\n"+
+				"  参数集护栏（deploy_flags_test.go）要求部署脚本认识的每个参数都被转发；\n"+
+				"  少一个就等于用户在安装脚本里做的选择被静默丢弃。", fwd)
+		}
+	}
+
+	// ⑧ 收尾清单不能还留着"自己去跑 dist pull"这种把必需步骤推给用户的说法。
+	if strings.Contains(body, "--pubkey /path/minisign.pub") {
+		t.Error("收尾清单里还写着让用户手工执行 dist pull 那一版命令：\n" +
+			"  这一步已经在部署流程里做掉了（见 6c），清单要改成「补拉」的说明。")
+	}
+}
