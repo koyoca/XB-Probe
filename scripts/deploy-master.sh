@@ -1526,10 +1526,16 @@ if [ -n "$RESET_PASSWORD" ]; then
 	# 与第 4 步同一个道理：**先把输出收进变量再自己判**。
 	# 写成 `cmd 2>&1 | sed …` 的话，管道会把 cmd 的退出码换成 sed 的（恒 0），
 	# 任何失败都被静默吞掉，脚本还会接着打印"完成"。
+	# ⚠ 必须用 `|| _rp_rc=$?` 接住，不能裸赋值再读 `$?`。
+	#
+	# 脚本开头是 `set -eu`，而"只有赋值的简单命令"（`x="$(cmd)"`）的退出码**就是**
+	# 命令替换的退出码——cmd 失败时 `set -e` 会当场把整个脚本干掉：下一行、
+	# 下面的 `if`、以及"重置口令失败"那句全都不执行，用户只看到入口脚本一句
+	# "部署脚本执行失败"，连原因都没有。放进 AND-OR 列表才脱离 set -e。
+	_rp_rc=0
 	_rp_out="$("$BIN_DIR/xb-probe-master" reset-admin -config "$CFG" \
 		-username "${ADMIN_USER:-ops}" -password "$ADMIN_PASSWORD" \
-		--i-know-what-i-am-doing 2>&1)"
-	_rp_rc=$?
+		--i-know-what-i-am-doing 2>&1)" || _rp_rc=$?
 	printf '%s\n' "$_rp_out" | sed 's/^/    /'
 	if [ "$_rp_rc" -ne 0 ]; then
 		case "$_rp_out" in
@@ -2990,8 +2996,19 @@ fi
 # 才看到原因——而回滚给的理由是"启动后立即退出"，离真正的原因很远。
 # 返回 2（判断不了，例如旧二进制没有 tls 子命令）时**什么都不做**：
 # 不猜、不误报，交给第 4 步 init-admin 的输出兜底（那条对任何版本都有效）。
-config_parses_ok "$CFG"
-case "$?" in
+#
+# ⚠ 调用必须放进 AND-OR 列表（`|| _cp_rc=$?`），不能裸调用。
+# 两个理由，任一都足以致命：
+#   ① 本脚本开头是 `set -eu`。裸调用时 -e **在函数内部也生效**，而函数体里那句
+#      `_CP_OUT="$(tls status …)"` 就是"只有赋值的简单命令"——tls 状态非 0
+#      （rc=1 申请失败 / rc=2 申请中）时它会**在函数里**把整个脚本干掉，
+#      下面这个 case 与 fail_config_mismatch 永远不会执行；
+#   ② 函数返回 1（配置与二进制错配）本来就要靠 `$?` 来接，裸调用同样先被 -e 杀掉。
+# 放进 AND-OR 列表后 -e 被忽略（POSIX：-e 被忽略的上下文里，其内部任何命令都不
+# 导致 shell 退出），返回值也照常拿得到。
+_cp_rc=0
+config_parses_ok "$CFG" || _cp_rc=$?
+case "$_cp_rc" in
 1) fail_config_mismatch "$_CP_OUT" ;;
 esac
 
@@ -3019,9 +3036,18 @@ fi
 # 服务必然起不来，最后以"启动失败"回滚——用户看到的失败原因离真正的原因很远
 # （真机日志里，第 4 步已经打印了 `field sync_obtain not found`，脚本却照常往下走）。
 # 所以：先把输出收进变量再自己判，不要让管道吃掉退出码。
+#
+# ⚠ 但"收进变量"本身还不够——**必须同时放进 AND-OR 列表**（`|| _ia_rc=$?`）。
+# 本脚本开头是 `set -eu`，而"只有赋值的简单命令"（`x="$(cmd)"`）的退出码**就是**
+# 命令替换的退出码：init-admin 返回非 0 时（最典型的是"管理员已存在"这个**预期内**
+# 的幂等分支），`set -e` 会在这一行把整个脚本干掉——下面那句 printf、`已存在`
+# 判定、错误提示与 rollback 全都不执行。
+# 真机现象（v0.1.3 重跑：上一次装到一半失败回过滚，库里已经有一个 admin）：
+# 第 4 步打完口令提示后**一行输出都没有**、也没有回滚，只剩入口脚本一句
+# "部署脚本执行失败"——看上去像"口令不对"，其实是脚本自己把自己杀了。
+_ia_rc=0
 _ia_out="$("$BIN_DIR/xb-probe-master" init-admin -config "$CFG" \
-	-username "$ADMIN_USER" -password "$ADMIN_PASSWORD" 2>&1)"
-_ia_rc=$?
+	-username "$ADMIN_USER" -password "$ADMIN_PASSWORD" 2>&1)" || _ia_rc=$?
 printf '%s\n' "$_ia_out" | sed 's/^/    /'
 
 # 配置里有当前二进制不认识的键。这一类必须**立刻停下**并点名是哪个键：
