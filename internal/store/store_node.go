@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/koyoca/xb-probe/internal/model"
@@ -15,25 +16,105 @@ import (
 const nodeCols = `id, public_id, name, group_name, sort_order, status, public_visible,
 	COALESCE(ip_v4,''), COALESCE(ip_v6,''), COALESCE(provider,''), COALESCE(location,''), COALESCE(note,''),
 	COALESCE(country,''), COALESCE(ip_auto,1),
+	COALESCE(ip_v4_list,''), COALESCE(ip_v6_list,''),
 	COALESCE(hostname,''), COALESCE(os,''), COALESCE(kernel,''), COALESCE(arch,''), COALESCE(cpu_model,''),
 	COALESCE(cpu_cores,0), COALESCE(mem_total,0), COALESCE(swap_total,0), COALESCE(disk_total,0),
 	COALESCE(boot_time,0), COALESCE(agent_version,''),
 	COALESCE(os_family,''), COALESCE(virt,''), COALESCE(service_manager,''), COALESCE(counter_bits,0),
-	last_seen, created_at, COALESCE(archived_at,0)`
+	last_seen, created_at, COALESCE(archived_at,0),
+	COALESCE(alert_probe_targets,'')`
 
 func scanNode(sc interface{ Scan(...any) error }) (*model.Node, error) {
 	n := &model.Node{}
+	var csv4, csv6, csvA string
 	err := sc.Scan(&n.ID, &n.PublicID, &n.Name, &n.GroupName, &n.SortOrder, &n.Status, &n.PublicVisible,
 		&n.IPv4, &n.IPv6, &n.Provider, &n.Location, &n.Note,
 		&n.Country, &n.IPAuto,
+		&csv4, &csv6,
 		&n.Hostname, &n.OS, &n.Kernel, &n.Arch, &n.CPUModel,
 		&n.CPUCores, &n.MemTotal, &n.SwapTotal, &n.DiskTotal, &n.BootTime, &n.AgentVersion,
 		&n.OSFamily, &n.Virt, &n.ServiceManager, &n.CounterBits,
-		&n.LastSeen, &n.CreatedAt, &n.ArchivedAt)
+		&n.LastSeen, &n.CreatedAt, &n.ArchivedAt,
+		&csvA)
 	if err != nil {
 		return nil, err
 	}
+	n.IPv4List = splitIPList(csv4)
+	n.IPv6List = splitIPList(csv6)
+	n.AlertProbeTargets = splitIntList(csvA)
 	return n, nil
+}
+
+// splitIPList 把逗号分隔的地址串解析为切片（去空白、去空项、去重、保序）。
+func splitIPList(s string) []string {
+	if s == "" {
+		return nil
+	}
+	seen := map[string]bool{}
+	out := make([]string, 0)
+	for _, p := range strings.Split(s, ",") {
+		v := strings.TrimSpace(p)
+		if v == "" || seen[v] {
+			continue
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// joinIPList 把地址切片规整为逗号分隔的存储串（去空白、去空项、去重、保序）。
+func joinIPList(list []string) string {
+	return strings.Join(splitIPList(strings.Join(list, ",")), ",")
+}
+
+// splitIntList 把逗号分隔的整数串解析为切片（去空白、去空项、去重、保序，
+// 忽略非法值与非正数）。用于「重点监控的探测目标 ID 清单」这类整型清单列。
+func splitIntList(s string) []int64 {
+	if s == "" {
+		return nil
+	}
+	seen := map[int64]bool{}
+	out := make([]int64, 0)
+	for _, p := range strings.Split(s, ",") {
+		v := strings.TrimSpace(p)
+		if v == "" {
+			continue
+		}
+		id, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || id <= 0 {
+			continue
+		}
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// joinIntList 把整型清单规整为逗号分隔的存储串（去重、保序、丢弃非正数）。
+func joinIntList(list []int64) string {
+	if len(list) == 0 {
+		return ""
+	}
+	seen := map[int64]bool{}
+	parts := make([]string, 0, len(list))
+	for _, id := range list {
+		if id <= 0 || seen[id] {
+			continue
+		}
+		seen[id] = true
+		parts = append(parts, strconv.FormatInt(id, 10))
+	}
+	return strings.Join(parts, ",")
 }
 
 // ListNodes 列出全部节点（管理端）。
@@ -137,6 +218,55 @@ func (r *Repo) UpdateNodeAssets(id int64, ipv4, ipv6, provider, location, countr
 		`UPDATE nodes SET ip_v4=?, ip_v6=?, provider=?, location=?, country=?, note=?, ip_auto=? WHERE id=?`,
 		nullIfEmpty(ipv4), nullIfEmpty(ipv6), provider, location, nullIfEmpty(country), note, ipAuto, id)
 	return err
+}
+
+// UpdateNodeIPLists 写入某个节点的多地址清单（逗号分隔存储，写入口统一规整）。
+//
+// 主地址（ip_v4 / ip_v6）不在这里改：它由 UpdateNodeAssets 负责，且恒等于列表的
+// 第一项（接口层保证），二者不在此耦合，避免"改了清单却把主地址写回旧值"这类
+// 部分更新事故（与 UpdateNodeAssets 共用同一写入口的思路同源）。
+func (r *Repo) UpdateNodeIPLists(id int64, ipv4List, ipv6List []string) error {
+	_, err := r.db.Write.Exec(
+		`UPDATE nodes SET ip_v4_list=?, ip_v6_list=? WHERE id=?`,
+		joinIPList(ipv4List), joinIPList(ipv6List), id)
+	return err
+}
+
+// UpdateNodeAlertTargets 写入某节点的「重点监控探测目标」清单（逗号分隔存储）。
+//
+// 单独的写入口：它与多地址清单一样是节点私有配置，由接口层的 PATCH 单独提交，
+// 不与 UpdateNodeMeta/UpdateNodeAssets 混在一起，避免「改个名字却把监控清单写空」。
+func (r *Repo) UpdateNodeAlertTargets(id int64, targets []int64) error {
+	_, err := r.db.Write.Exec(
+		`UPDATE nodes SET alert_probe_targets=? WHERE id=?`,
+		joinIntList(targets), id)
+	return err
+}
+
+// ListNodeAlertTargets 返回所有「开启了重点监控」的节点及其目标清单。
+//
+// 调度器每 10 秒扫描一次，若对每个节点各查一次库会很浪费；这里一次取回
+// 只含非空清单的小映射，checkProbeFail 按节点 ID 查表即可。失败时返回 nil
+// （调用方视为"没有任何节点开启重点监控"）——这只是告警增强，不应拖垮整轮扫描。
+func (r *Repo) ListNodeAlertTargets() (map[int64][]int64, error) {
+	rows, err := r.db.Read.Query(
+		`SELECT id, COALESCE(alert_probe_targets,'') FROM nodes WHERE COALESCE(alert_probe_targets,'') <> ''`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int64][]int64{}
+	for rows.Next() {
+		var id int64
+		var csv string
+		if err := rows.Scan(&id, &csv); err != nil {
+			return nil, err
+		}
+		if list := splitIntList(csv); len(list) > 0 {
+			out[id] = list
+		}
+	}
+	return out, rows.Err()
 }
 
 // UpdateNodeObservedIP 用"观测到的地址"更新节点地址，返回是否真的改动了。

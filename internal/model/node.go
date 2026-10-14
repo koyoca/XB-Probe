@@ -23,10 +23,21 @@ type Node struct {
 	Status        string `json:"status"`
 	PublicVisible bool   `json:"public_visible"`
 
-	IPv4     string `json:"ip_v4,omitempty"`
-	IPv6     string `json:"ip_v6,omitempty"`
-	Provider string `json:"provider,omitempty"`
-	Location string `json:"location,omitempty"`
+	IPv4 string `json:"ip_v4,omitempty"`
+	IPv6 string `json:"ip_v6,omitempty"`
+	// IPv4List / IPv6List 是该族登记的全部地址（逗号分隔存储，JSON 里为数组）。
+	// 主地址（ip_v4 / ip_v6）恒为列表的第一项；列表用于管理端展示多个地址，
+	// 不参与公开 DTO（公开侧只暴露协议栈标识 net_stack，不含任何地址）。
+	IPv4List []string `json:"ip_v4_list,omitempty"`
+	IPv6List []string `json:"ip_v6_list,omitempty"`
+	// AlertProbeTargets 是本节点被「重点监控」的探测目标 ID 清单（逗号分隔存储，
+	// JSON 里为数组）。清单非空即开启「该目标失败即告警」：覆盖全局 probe_fail 规则
+	// 对 icmp_not_permitted / blocked_target 等「非真实故障」错误的忽略，让容器 / LXC
+	// 这类用 ICMP 探测却无 raw socket 权限的节点也能就关心的目标告警。
+	// 仅管理端可见，不进入公开 DTO（见 dto_leak_test.go 的公开键名护栏）。
+	AlertProbeTargets []int64 `json:"alert_probe_targets,omitempty"`
+	Provider          string  `json:"provider,omitempty"`
+	Location          string  `json:"location,omitempty"`
 	// IPAuto 为 true 表示 ip_v4/ip_v6 允许被自动探测（Agent 自报的公网 IP、
 	// 或 Master 看到的来源地址）改写；管理员手工填过之后会变成 false（"覆盖自动探测"）。
 	// 见 migrations/0007_node_ip_auto.sql。

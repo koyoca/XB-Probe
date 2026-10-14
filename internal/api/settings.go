@@ -88,6 +88,9 @@ var settingDefaults = map[string]string{
 	// （10 分钟层在这么短的窗口里只有 3/6 个桶，画不出点阵），6h/24h 读
 	// latency_10m。取值必须与 state.LatencyBarLayout 的分支一致。
 	"public.lat_window": "24h",
+	// public.show_ip_badge 控制公开卡片是否渲染 IPv4/IPv6 协议栈标识（默认显示）。
+	// 关闭后公开 DTO 的 net_stack 会被清空，既不在前端画标识、也不下发协议栈信息。
+	"public.show_ip_badge": "1",
 	// Agent 接口 IP 白名单（见 router.go agentIPGate）。enabled 默认关闭，
 	// 行为与升级前一致；whitelist 为逗号分隔的单 IP / CIDR，写入前只做
 	// "长度 + 字符集"的宽松校验——真正解析失败的白名单条目会被忽略
@@ -136,6 +139,7 @@ var settingSpecs = map[string]func(string) error{
 	"public.fields":              validatePublicFields,
 	"public.cards":               validatePublicCards,
 	"public.lat_window":          enumValue("30m", "1h", "6h", "24h"),
+	"public.show_ip_badge":       enumValue("0", "1"),
 	"agent.ip_whitelist_enabled": enumValue("0", "1"),
 	"agent.ip_whitelist":         validateIPWhitelist,
 	"inject.head":                maxLen(8192),

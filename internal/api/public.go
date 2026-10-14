@@ -102,7 +102,9 @@ func (h *Handler) handlePublicNodes(w http.ResponseWriter, r *http.Request) {
 	mask := h.publicFieldMask()
 	out := make([]model.PublicNode, 0, len(snap.Nodes))
 	for _, n := range snap.Nodes {
-		out = append(out, n.WithFieldMask(mask))
+		pn := n.WithFieldMask(mask)
+		h.stripIPBadgeIfDisabled(&pn)
+		out = append(out, pn)
 	}
 	w.Header().Set("Cache-Control", "max-age=2")
 	writeJSON(w, http.StatusOK, out)
@@ -117,7 +119,9 @@ func (h *Handler) handlePublicNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Cache-Control", "max-age=2")
-	writeJSON(w, http.StatusOK, h.buildPublicNode(rt, time.Now(), true).WithFieldMask(h.publicFieldMask()))
+	pn := h.buildPublicNode(rt, time.Now(), true).WithFieldMask(h.publicFieldMask())
+	h.stripIPBadgeIfDisabled(&pn)
+	writeJSON(w, http.StatusOK, pn)
 }
 
 // handlePublicHistory 对应 GET /nodes/{public_id}/history。
@@ -533,4 +537,14 @@ func (h *Handler) scriptInjectEnabled() bool {
 // 主键点查，单次开销可忽略。
 func (h *Handler) publicEnabled() bool {
 	return h.Repo.GetSettingDefault("public.enabled", "1") == "1"
+}
+
+// stripIPBadgeIfDisabled 按 public.show_ip_badge 决定是否下发协议栈标识（#2）。
+//
+// 关闭时清空 net_stack：公开卡片不渲染 IPv4/IPv6 标识，且协议栈信息本身也不下发
+// （与项目"公开侧尽量不下发"的取向一致）。默认开启，行为与升级前一致。
+func (h *Handler) stripIPBadgeIfDisabled(p *model.PublicNode) {
+	if h.Repo.GetSettingDefault("public.show_ip_badge", "1") != "1" {
+		p.NetStack = ""
+	}
 }

@@ -311,15 +311,12 @@
   // renderStackBadges 渲染 IPv4/IPv6 标识。
   //
   // net_stack 是后端算好的协议栈标识（"v4"/"v6"/"v4+v6"，没有则为空串），
-  // 前端只做展示、不接触任何地址。为空时渲染 "—"：与其让这一格消失导致
-  // 同行内容宽度随节点变化，不如明确告诉读者"这里没有数据"。
+  // 前端只做展示、不接触任何地址。为空时不渲染任何占位：与其画一个没有信息量
+  // 的 "—"，不如让这一格留空，卡片更干净（#2）。当公开设置
+  // public.show_ip_badge 关闭时，后端会直接把 net_stack 清空，这里同样留空。
   function renderStackBadges(box, stack) {
     box.textContent = '';
     var parts = stack ? String(stack).split('+') : [];
-    if (!parts.length) {
-      box.appendChild(el('span', 'n-badges-none', '—'));
-      return;
-    }
     parts.forEach(function (p) {
       var v = p.trim().toLowerCase();
       var text = v === 'v6' ? 'IPv6' : (v === 'v4' ? 'IPv4' : '');
@@ -328,7 +325,6 @@
       b.title = '该节点已配置 ' + text + ' 地址';
       box.appendChild(b);
     });
-    if (!box.children.length) box.appendChild(el('span', 'n-badges-none', '—'));
   }
 
   // renderLatencyBars 渲染节点卡片上的"探测目标延迟情况"点阵。

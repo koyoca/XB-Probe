@@ -224,16 +224,19 @@ func (h *Handler) handlePatchNode(w http.ResponseWriter, r *http.Request) {
 	}
 	// 指针字段：未提交的字段保持原值（PATCH 语义，7.2）。
 	var req struct {
-		Name          *string `json:"name"`
-		Group         *string `json:"group"`
-		SortOrder     *int    `json:"sort_order"`
-		PublicVisible *bool   `json:"public_visible"`
-		Note          *string `json:"note"`
-		IPv4          *string `json:"ip_v4"`
-		IPv6          *string `json:"ip_v6"`
-		Provider      *string `json:"provider"`
-		Location      *string `json:"location"`
-		Country       *string `json:"country"`
+		Name              *string   `json:"name"`
+		Group             *string   `json:"group"`
+		SortOrder         *int      `json:"sort_order"`
+		PublicVisible     *bool     `json:"public_visible"`
+		Note              *string   `json:"note"`
+		IPv4              *string   `json:"ip_v4"`
+		IPv6              *string   `json:"ip_v6"`
+		IPv4List          *[]string `json:"ip_v4_list"`
+		IPv6List          *[]string `json:"ip_v6_list"`
+		AlertProbeTargets *[]int64  `json:"alert_probe_targets"`
+		Provider          *string   `json:"provider"`
+		Location          *string   `json:"location"`
+		Country           *string   `json:"country"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, model.ErrInvalidParam, "请求体解析失败")
@@ -272,13 +275,22 @@ func (h *Handler) handlePatchNode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 资产元数据（真实 IP / 机房 / 服务商 / 国家）单独更新，允许清空。
-	if req.IPv4 != nil || req.IPv6 != nil || req.Provider != nil || req.Location != nil || req.Country != nil {
+	if req.IPv4 != nil || req.IPv6 != nil || req.IPv4List != nil || req.IPv6List != nil ||
+		req.Provider != nil || req.Location != nil || req.Country != nil {
 		prov, loc := cur.Provider, cur.Location
 		if req.IPv4 != nil {
 			ip4 = strings.TrimSpace(*req.IPv4)
 		}
 		if req.IPv6 != nil {
 			ip6 = strings.TrimSpace(*req.IPv6)
+		}
+		// 多地址清单优先：提交清单时，主地址恒取清单第一项（或清空）。
+		// 这样前端只暴露"清单"一个入口，主地址与清单不再是两个需要同步的来源。
+		if req.IPv4List != nil {
+			ip4 = firstNonEmptyIP(*req.IPv4List)
+		}
+		if req.IPv6List != nil {
+			ip6 = firstNonEmptyIP(*req.IPv6List)
 		}
 		if req.Provider != nil {
 			prov = sanitizeText(*req.Provider, 64)
@@ -296,13 +308,46 @@ func (h *Handler) handlePatchNode(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusInternalServerError, model.ErrInternal, "资产信息更新失败")
 			return
 		}
+		// 多地址清单（ip_v4_list / ip_v6_list）单独落库。
+		if req.IPv4List != nil || req.IPv6List != nil {
+			v4l, v6l := []string{}, []string{}
+			if req.IPv4List != nil {
+				v4l = *req.IPv4List
+			}
+			if req.IPv6List != nil {
+				v6l = *req.IPv6List
+			}
+			if err := h.Repo.UpdateNodeIPLists(id, v4l, v6l); err != nil {
+				writeErr(w, http.StatusInternalServerError, model.ErrInternal, "多地址更新失败")
+				return
+			}
+		}
 	}
 
 	// 元数据同步用 SyncMeta 而不是 Update：节点可能还没首次上报（此时还没被上报路径
 	// 惰性创建），用 Update 会静默失败，导致公开可见性改动丢失。
 	h.Registry.SyncMeta(id, cur.PublicID, name, group, sortOrder, visible, cur.ArchivedAt > 0, ip4 != "", ip6 != "", country)
+
+	// 「重点监控探测目标」单独落库：提交即整份替换（含清空），PATCH 语义。
+	if req.AlertProbeTargets != nil {
+		if err := h.Repo.UpdateNodeAlertTargets(id, *req.AlertProbeTargets); err != nil {
+			writeErr(w, http.StatusInternalServerError, model.ErrInternal, "重点监控目标更新失败")
+			return
+		}
+	}
+
 	_ = h.Repo.Audit(time.Now().Unix(), actorOf(r), "node.update", fmt.Sprint(id), RealIP(r))
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// firstNonEmptyIP 返回列表中第一个非空白地址；全空时返回 ""（表示清空主地址）。
+func firstNonEmptyIP(list []string) string {
+	for _, x := range list {
+		if t := strings.TrimSpace(x); t != "" {
+			return t
+		}
+	}
+	return ""
 }
 
 func (h *Handler) handleArchiveNode(w http.ResponseWriter, r *http.Request) {

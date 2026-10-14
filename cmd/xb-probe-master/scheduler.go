@@ -554,6 +554,10 @@ func (s *Scheduler) scanAlerts(ctx context.Context, now time.Time) {
 
 	nowUnix := now.Unix()
 	rules, _ := s.repo.LoadAlertRules()
+	// 「重点监控探测目标」：节点详情里勾选的目标失败即告警（含被全局规则忽略的
+	// icmp_not_permitted/blocked_target）。一次取回只含非空清单的小映射，
+	// 免得对每个节点各查一次库。失败时按"无人开启"处理，不拖垮整轮扫描。
+	watchByNode, _ := s.repo.ListNodeAlertTargets()
 
 	// 先在读锁内取一份运行态副本，随后所有判定、告警派发都在锁外进行。
 	// 两个原因：① Each 内写字段会与上报路径构成数据竞争；② 告警派发要走
@@ -633,7 +637,7 @@ func (s *Scheduler) scanAlerts(ctx context.Context, now time.Time) {
 		s.checkTrafficTiers(ctx, rules, n, nowUnix)
 
 		// --- 探测连续失败（每个目标一个状态键）---
-		s.checkProbeFail(ctx, rules, n, nowUnix)
+		s.checkProbeFail(ctx, rules, watchByNode, n, nowUnix)
 	}
 
 	// 裁剪探测轮次去重表：按当前运行态里"仍在上报的目标"定界。
@@ -724,8 +728,14 @@ func (s *Scheduler) checkTrafficTiers(ctx context.Context, rules map[string]aler
 //  4. **按轮去重**（见 probeRounds 字段注释），否则一轮失败就够触发。
 //  5. Fire 是同步调用（内部要走渠道 I/O），所以状态判定与去重都在 Fire 之前完成，
 //     每个目标每轮最多 Fire 一次。
+//
+// watchByNode 是「重点监控」清单（节点 → 目标 ID 集合）：被勾上的目标在本节点
+// 失败时**按任意错误告警**，即覆盖 probeFailed 对 icmp_not_permitted / blocked_target
+// 的忽略。这是用户在节点详情里主动勾选「我要盯着这个目标」后的预期——容器 / LXC
+// 节点用 ICMP 探测却无 raw socket 权限时，正是这些被全局规则静默放过的错误才需要
+// 被看见。两者共用同一个状态键与去重槽，因此不会对同一目标重复告警。
 func (s *Scheduler) checkProbeFail(ctx context.Context, rules map[string]alert.Rule,
-	n *state.NodeRuntime, now int64) {
+	watchByNode map[int64][]int64, n *state.NodeRuntime, now int64) {
 	rule, ok := rules[alert.KindProbeFail]
 	if !ok || !rule.Enabled {
 		return
@@ -735,10 +745,18 @@ func (s *Scheduler) checkProbeFail(ctx context.Context, rules map[string]alert.R
 		confirm = 1
 	}
 
+	watched := map[int64]bool{}
+	for _, id := range watchByNode[n.NodeID] {
+		watched[id] = true
+	}
+
 	for _, l := range n.LatestLatency {
 		stateKind := fmt.Sprintf("%s:%d", alert.KindProbeFail, l.TargetID)
 
-		if !probeFailed(l) {
+		// 重点监控的目标：任何非空错误都算失败；其余仍走 probeFailed 的既有排除。
+		failed := (watched[int64(l.TargetID)] && l.Error != "") || (!watched[int64(l.TargetID)] && probeFailed(l))
+
+		if !failed {
 			// 探通了（或这一条不属于"目标不通"）→ 计数归零，已告警过的发恢复通知。
 			s.alerts.Clear(n.NodeID, stateKind)
 			if st, err := s.repo.GetAlertState(n.NodeID, stateKind); err == nil &&

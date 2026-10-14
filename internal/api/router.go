@@ -79,6 +79,12 @@ func (h *Handler) PublicRoutes() http.Handler {
 	h2 = h.publicGate(h2)
 	// 仅当管理员开启了脚本注入时才下发 nonce（5.3 / 13.4.5）。
 	h2 = SecurityHeaders(h.securityPolicy(), h.scriptInjectEnabled, h2)
+	if h.AccessLog {
+		h2 = AccessLogMiddleware(h.Logger, h2)
+	}
+	// RealIPMiddleware 必须最外层：让内部所有处理（限速/门控/记录来源）都能
+	// 取到经可信代理还原后的真实来源，而非 TCP 对端的 127.0.0.1（#1 根因）。
+	h2 = RealIPMiddleware(h.TrustedProxies, h2)
 	return h2
 }
 
@@ -287,6 +293,10 @@ func (h *Handler) AdminRoutes() http.Handler {
 	h2 = RateLimitMiddleware(NewIPLimiter(120, 240), h2)
 	// 管理端不允许任何注入内容，CSP 恒为最严（13.4.5）。
 	h2 = SecurityHeaders(h.securityPolicy(), nil, h2)
+	if h.AccessLog {
+		h2 = AccessLogMiddleware(h.Logger, h2)
+	}
+	h2 = RealIPMiddleware(h.TrustedProxies, h2)
 	return h2
 }
 
@@ -308,6 +318,10 @@ func (h *Handler) AgentRoutes() http.Handler {
 	// /report 请求体 ≤ 256 KB（7.0）。
 	h2 = BodyLimit(256*1024, h2)
 	h2 = RateLimitMiddleware(NewIPLimiter(600, 1200), h2)
+	if h.AccessLog {
+		h2 = AccessLogMiddleware(h.Logger, h2)
+	}
+	h2 = RealIPMiddleware(h.TrustedProxies, h2)
 	return h2
 }
 

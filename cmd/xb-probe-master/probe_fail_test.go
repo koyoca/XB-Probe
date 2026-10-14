@@ -280,6 +280,49 @@ func TestProbeFailIgnoresPermissionAndPolicyErrors(t *testing.T) {
 	}
 }
 
+// TestProbeFailWatchedTargetAlertsOnPermissionError 断言「重点监控」清单会覆盖
+// 全局规则对 icmp_not_permitted 的忽略。
+//
+// 这是"有的节点探测失败却无告警"的修复点：容器 / LXC 节点用 ICMP 探测而 Agent
+// 没有 raw socket 权限，失败原因恒为 icmp_not_permitted，被 probeFailed 静默放过
+// （见上一条，那是为了避免所有无特权节点永远在报警）。管理员在节点详情里勾选
+// 「我要盯着这个目标」后，这个目标就应当无论什么错误都告警。
+func TestProbeFailWatchedTargetAlertsOnPermissionError(t *testing.T) {
+	env := newProbeFailEnv(t)
+	if err := env.repo.UpdateNodeAlertTargets(env.nodeID, []int64{11}); err != nil {
+		t.Fatalf("写重点监控清单失败: %v", err)
+	}
+
+	now := time.Now()
+	for i := 0; i < 3; i++ {
+		env.reportRound(t, now.Add(time.Duration(i)*30*time.Second),
+			[]model.LatencySample{failedSampleP(11, model.ProbeErrICMPNotPermitted)})
+	}
+	if got := env.eventsOfKind(t, "probe_fail:11"); len(got) != 1 {
+		t.Fatalf("重点监控目标连扫 3 轮 icmp_not_permitted 应触发 1 条告警，得到 %d 条", len(got))
+	}
+}
+
+// TestProbeFailUnwatchedTargetStillIgnoresPermissionError 是上一条的反向护栏：
+// 没被勾进重点监控的目标，行为必须与从前完全一致（icmp_not_permitted 仍不算失败）。
+// 否则"重点监控"会被写成"所有节点所有目标都开始报警"。
+func TestProbeFailUnwatchedTargetStillIgnoresPermissionError(t *testing.T) {
+	env := newProbeFailEnv(t)
+	// 只重点监控目标 12；目标 11 仍是普通目标。
+	if err := env.repo.UpdateNodeAlertTargets(env.nodeID, []int64{12}); err != nil {
+		t.Fatalf("写重点监控清单失败: %v", err)
+	}
+
+	now := time.Now()
+	for i := 0; i < 8; i++ {
+		env.reportRound(t, now.Add(time.Duration(i)*30*time.Second),
+			[]model.LatencySample{failedSampleP(11, model.ProbeErrICMPNotPermitted)})
+	}
+	if got := env.eventsOfKind(t, "probe_fail:11"); len(got) != 0 {
+		t.Fatalf("未被重点监控的目标仍产生 %d 条告警（重点监控不应改变其它目标的行为）", len(got))
+	}
+}
+
 // TestProbeFailCountsRealFailures 是上一条的反向护栏：别把该报的也一起排除掉。
 // 端口被拒（服务没了）与超时都必须触发——否则"排除权限错误"会被写成"什么都不报"。
 func TestProbeFailCountsRealFailures(t *testing.T) {

@@ -280,6 +280,7 @@ func run(cfgPath string) error {
 		Writer: writer, Multi: multi, Latency: latencyAgg, Alerts: alerts,
 		Themes: themes, Tracker: tracker,
 		Version: version, TrustedProxies: cfg.TrustedProxies, DistDir: distDir,
+		AccessLog: cfg.AccessLog,
 		TLSMode:   cfg.TLS.Mode,
 		TLSActive: cfg.TLSActive(),
 		HSTS: api.HSTSConfig{
@@ -426,9 +427,9 @@ func run(cfgPath string) error {
 
 	// 未启用 TLS 时，管理端会话只能降级为不带 Secure 的 Cookie（浏览器会丢弃
 	// 纯 HTTP 下的 Secure Cookie）。这里显式提醒，避免被误判成"登录接口坏了"。
-	if !cfg.TLSActive() && len(cfg.TrustedProxies) == 0 {
-		logger.Warn("tls.mode=none 且未配置 trusted_proxies：管理端会话 Cookie 将为 probe_session（不带 Secure）。" +
-			"仅适合本机或受信内网调试；对外提供访问请启用 TLS 或置于 HTTPS 反代之后并配置 trusted_proxies。")
+	if !cfg.TLSActive() {
+		logger.Warn("tls.mode=none：管理端会话 Cookie 将为 probe_session（不带 Secure），仅适合本机或受信内网调试；" +
+			"对外提供访问请启用 TLS 或置于 HTTPS 反代之后。")
 	}
 
 	// 15) 优雅退出：排空写队列并强制 flush（4.2 第 5 条）

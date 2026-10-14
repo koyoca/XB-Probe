@@ -40,6 +40,7 @@ type Deps struct {
 
 	Version        string
 	TrustedProxies []string
+	AccessLog      bool // 是否在 HTTP 层输出访问日志（master.yaml access_log，默认关闭）
 	TLSMode        string     // none | files | selfsigned | acme
 	TLSActive      bool       // 本进程是否自己终止 TLS（决定 Secure Cookie 与 HSTS）
 	HSTS           HSTSConfig // HSTS 下发策略（来自 tls.hsts）

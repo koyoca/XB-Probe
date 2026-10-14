@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -278,6 +279,49 @@ func RateLimitMiddleware(l *IPLimiter, next http.Handler) http.Handler {
 			return
 		}
 		next.ServeHTTP(w, r)
+	})
+}
+
+// statusRecorder 捕获下游响应的状态码与字节数，供访问日志使用。
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+	size   int
+}
+
+func (s *statusRecorder) WriteHeader(code int) {
+	s.status = code
+	s.ResponseWriter.WriteHeader(code)
+}
+
+func (s *statusRecorder) Write(b []byte) (int, error) {
+	n, err := s.ResponseWriter.Write(b)
+	s.size += n
+	return n, err
+}
+
+// AccessLogMiddleware 记录每次请求的访问日志（方法/路径/状态码/来源 IP/耗时）。
+//
+// 来源 IP 取自 RealIP(r)——因此必须挂在 RealIPMiddleware 之内（更靠近路由），
+// 才能拿到经可信代理还原后的真实来源，而不是 TCP 对端的 127.0.0.1。
+// 默认关闭（master.yaml 的 access_log），由 Handler.AccessLog 控制开关。
+// 只记录路径、不记录完整 URL，避免把查询串里的令牌写进日志。
+func AccessLogMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
+	if logger == nil {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+		logger.Info("access",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", rec.status,
+			"ip", RealIP(r),
+			"dur_ms", time.Since(start).Milliseconds(),
+			"bytes", rec.size,
+		)
 	})
 }
 

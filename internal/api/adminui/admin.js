@@ -56,6 +56,18 @@
 
   function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
 
+  // ipListText 把多地址清单（数组）折叠成展示串；清单为空时回落到主地址，再不行返回空。
+  function ipListText(list, primary) {
+    if (Array.isArray(list) && list.length) return list.join(', ');
+    return primary || '';
+  }
+
+  // splitIPInput 把多行/逗号分隔的输入解析为去空白、去空项的地址数组。
+  function splitIPInput(s) {
+    return String(s || '').split(/[\n,]/).map(function (x) { return x.trim(); })
+      .filter(function (x) { return x !== ''; });
+  }
+
   // svgNode 把服务端返回的 SVG 字符串解析成 DOM 节点。
   //
   // 用 DOMParser 而不是 innerHTML：一是 innerHTML 在 CSP 下虽不直接受限，
@@ -1071,7 +1083,7 @@
       var c = nodeCards[id];
       if (!c) { c = makeNodeCard(n); nodeCards[id] = c; }
       c.group = groupKeyOf(n);
-      c.haystack = [n.name, n.ip_v4, n.ip_v6, n.group, n.public_id, n.hostname]
+      c.haystack = [n.name, (n.ip_v4_list || []).join(' '), (n.ip_v6_list || []).join(' '), n.ip_v4, n.ip_v6, n.group, n.public_id, n.hostname]
         .filter(Boolean).join(' ').toLowerCase();
       updateNodeCard(c, n);
 
@@ -1249,8 +1261,8 @@
       ['状态', n.archived_at ? '已归档' : '正常']
     ]));
     info.appendChild(group('网络', [
-      ['IPv4', n.ip_v4],
-      ['IPv6', n.ip_v6],
+      ['IPv4', ipListText(n.ip_v4_list, n.ip_v4)],
+      ['IPv6', ipListText(n.ip_v6_list, n.ip_v6)],
       ['主机名', n.hostname]
     ]));
     info.appendChild(group('位置', [
@@ -1385,6 +1397,19 @@
       l.appendChild(i);
       return l;
     }
+
+    // fieldTextarea 与 field 同理，但用于可填多行的多地址输入。
+    function fieldTextarea(label, id, value) {
+      var l = el('label', 'full');
+      l.appendChild(el('span', null, label));
+      var ta = el('textarea');
+      ta.id = id;
+      ta.rows = 2;
+      ta.value = value == null ? '' : String(value);
+      ta.placeholder = '每行一个地址，可填多个';
+      l.appendChild(ta);
+      return l;
+    }
     panel.appendChild(field('名称', 'n-name', n.name));
     panel.appendChild(field('分组', 'n-group', n.group));
     panel.appendChild(field('排序（越小越靠前）', 'n-sort', n.sort_order));
@@ -1393,16 +1418,20 @@
     //     自动探测永久关掉（UpdateNodeAssets 的三态规则：值与库里不同 = 锁定）；
     //   - 手动态下若不明说，用户改了服务器地址却发现地址栏不变，无从排查。
     // n.ip_auto 缺省视为 true（老数据/接口未升级时不吓唬人）。
+    // 多地址：一个节点可登记多个同族地址，每行一个；主地址恒取清单第一项。
     var ipAuto = n.ip_auto !== false;
-    panel.appendChild(field(
-      ipAuto ? 'IPv4（自动探测中，填写即覆盖）' : 'IPv4（已锁定为手动值，清空两栏并保存可恢复自动）',
-      'n-ip4', n.ip_v4));
-    panel.appendChild(field('IPv6（与 IPv4 共用同一个"自动/手动"开关）', 'n-ip6', n.ip_v6));
+    var ip4Init = (n.ip_v4_list && n.ip_v4_list.length) ? n.ip_v4_list.join('\n') : (n.ip_v4 || '');
+    var ip6Init = (n.ip_v6_list && n.ip_v6_list.length) ? n.ip_v6_list.join('\n') : (n.ip_v6 || '');
+    panel.appendChild(fieldTextarea(
+      ipAuto ? 'IPv4 地址（自动探测中；在此填写即覆盖，每行一个、可填多个）'
+             : 'IPv4 地址（已锁定为手动值；清空并保存可恢复自动探测）',
+      'n-ip4-list', ip4Init));
+    panel.appendChild(fieldTextarea('IPv6 地址（每行一个，可填多个）', 'n-ip6-list', ip6Init));
     panel.appendChild(el('p', 'muted',
       ipAuto
         ? '自动探测记录的是上报来源地址。Master 与节点同机部署（或节点在 NAT 后）时来源不是公网地址，'
           + '需要在节点上启用自助探测：sudo xb-probe-agent install --public-ip-url https://api.ipify.org'
-        : '这两个地址已被手动指定，自动探测不会再改写它们。把两栏都清空并保存即可恢复自动探测。'));
+        : '这些地址已被手动指定，自动探测不会再改写它们。把清单清空并保存即可恢复自动探测。'));
     panel.appendChild(field('服务商', 'n-provider', n.provider));
     panel.appendChild(field('机房/位置', 'n-location', n.location));
     panel.appendChild(field('备注', 'n-note', n.note));
@@ -1444,14 +1473,54 @@
     vis.appendChild(document.createTextNode(' 在公开看板显示'));
     panel.appendChild(vis);
 
+    // 探测失败重点监控：勾上的目标在本节点失败即告警（含 ICMP 无权限这类被全局
+    // 「探测连续失败」规则刻意忽略的错误——容器/LXC 节点正是因此「报错却从不告警」）。
+    // 不勾则沿用全局规则。勾选项由该节点的探测目标异步载入并预勾选已保存值。
+    var watchWrap = el('div', 'full');
+    watchWrap.appendChild(el('h4', null, '探测失败重点监控'));
+    watchWrap.appendChild(el('p', 'muted',
+      '勾选的目标在本节点探测失败时立即告警，并覆盖全局规则对「ICMP 无权限 / 目标被拒」等错误的忽略；'
+        + '不勾则沿用全局「探测连续失败」规则。'));
+    var watchBox = el('div', 'checkbox-list');
+    watchBox.id = 'n-watch-box';
+    watchWrap.appendChild(watchBox);
+    panel.appendChild(watchWrap);
+    api('/probe-targets?node_id=' + n.id).then(function (list) {
+      clear(watchBox);
+      var saved = n.alert_probe_targets || [];
+      var mine = (list || []).filter(function (t) { return !t.node_id || t.node_id === n.id; });
+      if (!mine.length) {
+        watchBox.appendChild(el('span', 'muted', '该节点暂无探测目标'));
+        return;
+      }
+      mine.forEach(function (t) {
+        var lab = el('label', 'check');
+        var cb = el('input');
+        cb.type = 'checkbox';
+        cb.value = t.id;
+        cb.checked = saved.indexOf(t.id) >= 0;
+        lab.appendChild(cb);
+        lab.appendChild(document.createTextNode(' ' + (t.name || ('目标 #' + t.id))
+          + ' (#' + t.id + '，' + (t.method || '-') + ')'));
+        watchBox.appendChild(lab);
+      });
+    }).catch(function () {
+      clear(watchBox);
+      watchBox.appendChild(el('span', 'muted', '探测目标载入失败'));
+    });
+
     var row = el('div', 'row');
     row.appendChild(btn('保存修改', 'primary', function () {
       var body = {
         name: $('n-name').value.trim(),
         group: $('n-group').value.trim(),
         sort_order: parseInt($('n-sort').value, 10) || 0,
-        ip_v4: $('n-ip4').value.trim(),
-        ip_v6: $('n-ip6').value.trim(),
+        ip_v4_list: splitIPInput($('n-ip4-list').value),
+        ip_v6_list: splitIPInput($('n-ip6-list').value),
+        alert_probe_targets: Array.prototype.slice.call(
+          document.querySelectorAll('#n-watch-box input[type=checkbox]'))
+          .filter(function (c) { return c.checked; })
+          .map(function (c) { return parseInt(c.value, 10); }),
         provider: $('n-provider').value.trim(),
         location: $('n-location').value.trim(),
         country: $('n-country').value,
@@ -3656,6 +3725,8 @@
       '节点卡片「延迟 / 丢包」点阵统计的时间范围。30 分钟 / 1 小时读原始探测层' +
       '（10 分钟层在这么短的窗口里只有 3/6 个桶，画不出点阵），6 小时 / 24 小时读 10 分钟聚合层。' +
       '保存后调度器在 1 分钟内按新窗口重算点阵。'],
+    'public.show_ip_badge': ['公开卡片显示 IP 标识（IPv4/IPv6）', 'select:1=显示,0=隐藏',
+      '控制公开卡片是否渲染 IPv4/IPv6 协议栈标识。关闭后该标识不再展示，相关的协议栈信息也不再下发。'],
     'timezone': ['全局时区（IANA 名称，如 Asia/Shanghai）', 'text'],
     'retention.raw_hours': ['高精度层保留小时（1-72）', 'number'],
     'retention.mid_days': ['中精度层保留天（1-30）', 'number'],
@@ -3699,7 +3770,7 @@
   var SETTING_GROUPS = [
     ['站点与全局', ['site.title', 'timezone']],
     ['站点形态', ['site.layout', 'site.public_hosts', 'site.admin_hosts', 'site.admin_url']],
-    ['公开看板', ['public.enabled', 'public.cards', 'public.lat_window']],
+    ['公开看板', ['public.enabled', 'public.cards', 'public.lat_window', 'public.show_ip_badge']],
     ['数据保留', ['retention.raw_hours', 'retention.mid_days', 'retention.days', 'raw_resolution_s']],
     ['Agent 与上报', ['report_interval_s', 'probe_interval_s', 'offline_timeout_s', 'disk_min_free_mb',
       'agent.ip_whitelist_enabled', 'agent.ip_whitelist']],

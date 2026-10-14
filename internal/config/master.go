@@ -21,6 +21,7 @@ type MasterConfig struct {
 	ThemesDir      string    `yaml:"themes_dir"`
 	MasterKeyFile  string    `yaml:"master_key_file"`
 	TrustedProxies []string  `yaml:"trusted_proxies"`
+	AccessLog      bool      `yaml:"access_log"`
 	PublicOrigin   string    `yaml:"public_origin"`
 	AdminOrigin    string    `yaml:"admin_origin"`
 	PublicHosts    []string  `yaml:"public_hosts"`
@@ -168,6 +169,13 @@ func (c *MasterConfig) applyDefaults() {
 	}
 	if c.LogLevel == "" {
 		c.LogLevel = "info"
+	}
+	// 同源反代（Caddy/Nginx 常与 Master 同机）从 127.0.0.1 转发，不信任回环就
+	// 无法从 X-Forwarded-For 还原真实来源——这正是 #1 的根因（RealIPMiddleware
+	// 此前从未挂载 + trusted_proxies 为空，导致 Master 永远把来源看成 127.0.0.1）。
+	// 默认信任回环是安全的：非回环的直连客户端不受影响，按其真实对端地址取源。
+	if len(c.TrustedProxies) == 0 {
+		c.TrustedProxies = []string{"127.0.0.1/32", "::1/128"}
 	}
 
 	t := &c.TLS
