@@ -2979,9 +2979,64 @@ if [ -n "$BIN_SRC" ]; then
 	"$BIN_DIR/xb-probe-master" version || true
 fi
 
+# _cfg_scalar <文件> <缩进> <键>：从 master.yaml 里取一个带引号的标量值。
+# 只服务下面"本次回答 vs 现有配置"的逐项比对——配置由本脚本生成、格式固定，
+# 用不着完整的 YAML 解析。取不到（键不存在）返回空串。
+_cfg_scalar() {
+	sed -n "s/^$2$3:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$1" 2>/dev/null | head -n1
+}
+
 echo "==> 3/7 写配置文件 $CFG"
 if [ -f "$CFG" ] && [ -z "$FORCE_CONFIG" ]; then
-	echo "    已存在，保留（要覆盖请加 --force-config）"
+	# 不能一句"已存在，保留"就完事：保留的前提是**旧配置与本次回答说的是同一套**。
+	# v0.1.3 真机连着栽在这里——旧配置是 acme+旧域名，这一轮问答里改成了
+	# selfsigned/新域名，配置却原样保留，于是：
+	#   · 摘要里打印的是新答案，实际跑的是旧配置（"我明明选了自签"）；
+	#   · 服务按旧模式起，问答改的部分全部没生效，还看不到任何报错；
+	#   · 旧配置若带 sync_obtain: true，服务会在申请失败时直接退出（反复重启），
+	#     而 80/443 都不在听——用户只能靠 netstat 才能发现。
+	# 所以逐项比对：不一致就按本次回答重写（旧文件备份 .bak）；一致才保留。
+	_cfg_diff=""
+	_o_publ="$(_cfg_scalar "$CFG" '' public_listen)"
+	_o_adml="$(_cfg_scalar "$CFG" '' admin_listen)"
+	_o_pubo="$(_cfg_scalar "$CFG" '' public_origin)"
+	_o_admo="$(_cfg_scalar "$CFG" '' admin_origin)"
+	_o_mode="$(_cfg_scalar "$CFG" '  ' mode)"
+	_o_chal="$(_cfg_scalar "$CFG" '    ' challenge)"
+	if [ "$_o_publ" != "$PUBLIC_LISTEN" ]; then
+		_cfg_diff="$_cfg_diff
+      · 公开监听：${_o_publ:-（无）} → $PUBLIC_LISTEN"
+	fi
+	if [ "$_o_adml" != "$ADMIN_LISTEN" ]; then
+		_cfg_diff="$_cfg_diff
+      · 管理监听：${_o_adml:-（无）} → $ADMIN_LISTEN"
+	fi
+	if [ "$_o_pubo" != "$PUBLIC_ORIGIN" ]; then
+		_cfg_diff="$_cfg_diff
+      · 公开地址：${_o_pubo:-（无）} → ${PUBLIC_ORIGIN:-（无）}"
+	fi
+	if [ "$_o_admo" != "$ADMIN_ORIGIN" ]; then
+		_cfg_diff="$_cfg_diff
+      · 管理地址：${_o_admo:-（无）} → ${ADMIN_ORIGIN:-（无）}"
+	fi
+	if [ "$_o_mode" != "$TLS_MODE" ]; then
+		_cfg_diff="$_cfg_diff
+      · 取证书方式：${_o_mode:-（无）} → $TLS_MODE"
+	fi
+	if [ "$TLS_MODE" = "acme" ] && [ "$_o_chal" != "$ACME_CHALLENGE" ]; then
+		_cfg_diff="$_cfg_diff
+      · ACME 校验方式：${_o_chal:-（无）} → $ACME_CHALLENGE"
+	fi
+	if [ -z "$_cfg_diff" ]; then
+		echo "    已存在且与本次回答一致，保留（要覆盖请加 --force-config）"
+	else
+		echo "    已存在，但与本次回答不一致：$_cfg_diff"
+		echo "    按本次回答重写（旧配置备份为 $CFG.bak）。"
+		cp -f "$CFG" "$CFG.bak" 2>/dev/null || true
+		render_config >"$CFG"
+		chmod 0640 "$CFG"
+		echo "    已写入"
+	fi
 else
 	if [ -f "$CFG" ]; then
 		# 覆盖前先留一份。回滚要靠它把旧配置还原回去——否则"升级时失败回滚"
@@ -3583,7 +3638,30 @@ systemctl --no-pager status xb-probe-master | sed -n '1,8p' || true
 #      代理）只警告；拿它回滚会把一次本来成功的安装整份撤掉（连 caddy 一起停掉），
 #      站点反而被脚本自己弄下线。
 case "$_hc_code" in
-2* | "" | 0*) : ;;
+2*) : ;;
+"" | 0*)
+	# 20 秒全是连接层失败。按模式分两种，混成一种会把真话报成假话：
+	#   · acme（Master 自己终结 TLS）：可能只是"首张证书还没就绪，443 暂时握不上
+	#     手"——服务是好的。继续走证书步骤，由它给出确定结果；
+	#   · 其余模式（none / files / selfsigned，含 caddy 反代）：不存在"证书还没好"
+	#     这回事——连不上就是服务没起来或监听地址不对。v0.1.3 真机上这里曾把一次
+	#     "服务反复退出"（配置与问答不一致导致按旧模式起、起不来）静默放过，
+	#     部署照样报告成功，用户是拿 netstat 才发现 443 根本没在听。
+	if [ "$TLS_MODE" = "acme" ] && [ "$TLS_TERMINATOR" != "caddy" ]; then
+		echo "    注：20 秒内连不上 $HEALTH_ADDR（连接层不通）。acme 模式下这" >&2
+		echo "      可能只是首张证书还没就绪（443 暂时握不上手），继续走下面的" >&2
+		echo "      证书步骤，由它给出确定结果。若服务其实在反复重启，查：" >&2
+		echo "        systemctl status xb-probe-master; journalctl -u xb-probe-master -n 50" >&2
+	else
+		echo "" >&2
+		echo "错误：20 秒内连不上 $HEALTH_ADDR——Master 没有在这个地址上提供服务。" >&2
+		echo "      $TLS_MODE 模式下不存在\"证书还没好\"这回事，连不上就是服务没起来：" >&2
+		echo "        systemctl status xb-probe-master" >&2
+		echo "        journalctl -u xb-probe-master --no-pager -n 50" >&2
+		echo "" >&2
+		rollback "Master 未在 $HEALTH_ADDR 上提供服务（20 秒连接层不通）"
+	fi
+	;;
 *)
 	if [ -n "$HC_HOST" ]; then
 		echo "" >&2
@@ -3817,7 +3895,15 @@ else
 	# 而用户看到的会是"仍在申请，请稍后自己看"，正是本轮要消灭的那种收尾。
 	# 所以我们自己轮询，把"后台申请"包成一次前台等待。
 	if [ "$TLS_MODE" = "acme" ] && [ -z "$SYNC_OBTAIN_OK" ]; then
-		echo "    正在申请证书（您的二进制版本不支持前台申请，改为轮询等待；失败会中止安装并回滚）"
+		# SYNC_OBTAIN_OK 只在 render_config 探测成功时才置位；配置被保留/重写前
+		# 根本没走过那段，所以这里**不能**断言"二进制不支持前台申请"——
+		# v0.1.3 真机上配置里明明写着 sync_obtain: true，这句话却说不支持，
+		# 顺着它去查"版本错配"就把人带偏了。按配置的实际内容说话。
+		if grep -q 'sync_obtain: true' "$CFG" 2>/dev/null; then
+			echo "    正在等服务的首次申请（配置带 sync_obtain: true：申请不成功服务会退出；失败会中止安装并回滚）"
+		else
+			echo "    正在等服务的后台申请（服务每 2 分钟自动重试；失败会中止安装并回滚）"
+		fi
 		i=0
 		while [ $i -lt "$_cert_wait" ]; do
 			_cert_rc=0
@@ -4133,7 +4219,7 @@ cat <<EOF
   4) 发布文件：本脚本在部署时已经把 Agent 发布文件拉进 data_dir/dist/ 了
      （见上面 6c 的输出）。若当时跳过了、或之后发布了新版本，补拉一次：
        xb-probe-master dist pull --version <版本> --from <发布源 URL>
-     没有发布文件时，`/install.sh | sh` 会在下载 xb-probe-agent 那一步 404
+     没有发布文件时，\`/install.sh | sh\` 会在下载 xb-probe-agent 那一步 404
      （/install.sh 本身是内嵌的，所以那一步看起来一切正常，坏在下一步）。
   5) 公开看板与后台要不要分成两个域名 —— 在「设置 → 站点形态」里选：
        · 跟随配置文件（默认）：master.yaml 里有 host 白名单就分离，没有就同站

@@ -1679,3 +1679,84 @@ func TestReleaseOnlyModeUpdatesAgentReleaseWithoutTouchingMaster(t *testing.T) {
 			"  结果是「只升级本体」连部署脚本都进不去。")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// ⑤ 第 3 步必须把配置收敛到本次回答；连接层不通不能静默放过
+// ---------------------------------------------------------------------------
+//
+// v0.1.3 真机（2026-10-14，腾讯云）连着栽出三条：
+//
+//	① 问答里选了 selfsigned，第 3 步却"已存在，保留"——旧配置是 acme+sync_obtain，
+//	   服务按旧模式反复退出（申请失败即退出），80/443 全都不在听，
+//	   部署却照样报告成功；
+//	② 健康检查对"20 秒连接层不通"（000/空码）一律静默放过，正好把 ① 掩盖了；
+//	③ 证书步骤打印"您的二进制版本不支持前台申请"——但配置里明明写着
+//	   sync_obtain: true（这句话只在 render_config 探测过才成立，配置被保留时
+//	   根本没探测过），顺着它去查"版本错配"就把人带偏了。
+//	另有一处纯 bug：收尾提示的 heredoc 里 `/install.sh | sh` 的反引号被 shell
+//	当成命令替换，每次部署完都报一行 "line NNNN: /install.sh: No such file"。
+func TestStep3ConvergesConfigToAnswers(t *testing.T) {
+	body := readRepoFile(t, "scripts/deploy-master.sh")
+
+	if !strings.Contains(body, "_cfg_scalar() {") {
+		t.Error("第 3 步没有 _cfg_scalar 提取函数：没有它就无法逐项比对「本次回答 vs 现有配置」。")
+	}
+	if !strings.Contains(body, "已存在且与本次回答一致，保留") {
+		t.Error("第 3 步缺少「一致才保留」的分支：幂等重跑不应每次都重写配置。")
+	}
+	if !strings.Contains(body, "按本次回答重写（旧配置备份为 $CFG.bak）") {
+		t.Error("第 3 步缺少「不一致就按本次回答重写」的分支：\n" +
+			"  摘要打印的是新答案、实际跑的是旧配置，是「我明明选了自签」的直接来源。")
+	}
+	// 反向：旧的静默保留文案不许回潮。
+	if strings.Contains(body, `echo "    已存在，保留（要覆盖请加 --force-config）"`) {
+		t.Error("第 3 步又回到了「已存在，保留」：问答改了 TLS 模式/域名也不会生效。")
+	}
+	// 比对必须覆盖 TLS 模式——这正是真机栽的那一项。
+	for _, key := range []string{"public_listen", "admin_listen", "public_origin", "admin_origin", "mode", "challenge"} {
+		if !strings.Contains(body, `_cfg_scalar "$CFG" `) || !strings.Contains(body, `"`+key+`"`) && !strings.Contains(body, "'"+key+"'") {
+			t.Errorf("第 3 步的比对没有覆盖 %s。", key)
+		}
+	}
+}
+
+func TestHealthCheckNeverToleratesDeadListener(t *testing.T) {
+	body := readRepoFile(t, "scripts/deploy-master.sh")
+
+	// 连接层不通（空码/000）必须分模式处理，不能再与 2xx 混在一个 case 里静默放过。
+	if regexp.MustCompile(`(?m)^case "\$_hc_code" in\n2\* \| "" \| 0\*\) : ;;`).MatchString(body) {
+		t.Error("健康检查又把「连接层不通」与「就绪」合并静默放过：\n" +
+			"  服务反复退出时部署照样报告成功，用户只能靠 netstat 才能发现 443 没在听。")
+	}
+	if !strings.Contains(body, `rollback "Master 未在 $HEALTH_ADDR 上提供服务（20 秒连接层不通）"`) {
+		t.Error("非 acme 模式下连接层不通应当回滚（不存在「证书还没好」这回事）。")
+	}
+	if !strings.Contains(body, "可能只是首张证书还没就绪") {
+		t.Error("acme 模式下连接层不通要先提示「可能只是证书没就绪」，把判定交给证书步骤。")
+	}
+	// 那句只在「render 探测过」时才成立的话不许回潮。
+	if strings.Contains(body, "您的二进制版本不支持前台申请") {
+		t.Error("证书步骤又在断言「二进制不支持前台申请」：配置被保留时根本没探测过，" +
+			"v0.1.3 真机上配置里明明是 sync_obtain: true。按配置的实际内容说话。")
+	}
+	if !strings.Contains(body, "配置带 sync_obtain: true：申请不成功服务会退出") {
+		t.Error("证书步骤缺少按 sync_obtain 实际取值区分的两段提示。")
+	}
+}
+
+func TestFinishTipsNeverExecuteBackticks(t *testing.T) {
+	body := readRepoFile(t, "scripts/deploy-master.sh")
+
+	// 收尾提示是未加引号的 heredoc（cat <<EOF），里面出现裸反引号就是命令替换：
+	// "/install.sh | sh" 前后那一对反引号会真的去执行 /install.sh，
+	// 每次部署完都报 "line NNNN: /install.sh: No such file or directory"。
+	// Go 的双引号字符串不支持 \` 转义，这里用拼接写出反引号本身。
+	bt := "\x60" // 反引号
+	if strings.Contains(body, bt+"/install.sh | sh"+bt) {
+		t.Error("收尾提示里有未转义的反引号命令替换：\n" +
+			"  heredoc 是 cat <<EOF（未加引号），反引号会被执行。写成 反斜杠+反引号 转义。")
+	}
+	if !strings.Contains(body, "\\"+bt+"/install.sh | sh"+"\\"+bt) {
+		t.Error("收尾提示里的 /install.sh 示例缺少转义（反斜杠+反引号）。")
+	}
+}
