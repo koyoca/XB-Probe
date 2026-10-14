@@ -1957,12 +1957,18 @@ func TestMasterUnitGrantsLowPortBinding(t *testing.T) {
 // 于是在真实终端上，每次 say/warn/err 都往 stderr 吐一句 `[: missing ]`，
 // 而 `[` 报错返回 2，整句判假——**颜色一个都没出来**，只剩一堆像乱码的报错。
 //
-// 判据分两层，缺一层都能被再次骗过：
+// 判据分三层，缺一层都能被再次骗过：
 //
 //	① 静态：每个助手函数体里，每一行的 `[` 与 `]` 个数必须相等；
-//	② 运行时：把 `_color_ok` 抠出来挂到**真终端**上跑（`script -qec` 开 pty），
-//	   stderr 必须一字不差地空，返回值必须按 NO_COLOR / TERM=dumb 正确退让。
-//	   没有 `script` 的机器（Windows 开发机）跳过第 ② 层——CI 是 ubuntu，一定有。
+//	② 语法：把 `_color_ok` 抠出来拼成一个可执行片段，先过 `sh -n`——
+//	   片段**构造**错了（例如漏掉函数收尾的 `}`）必须在任何机器上都报出来；
+//	③ 运行时：把片段挂到**真终端**上跑（`script -qec` 开 pty），stderr 必须
+//	   一字不差地空，返回值必须按 NO_COLOR / TERM=dumb 正确退让。
+//	   没有 `script` 的机器（Windows 开发机）只跳过第 ③ 层——CI 是 ubuntu，一定有。
+//
+// 第 ② 层是被真事教出来的：第 ③ 层在没有 `script` 的机器上整层跳过，于是
+// "片段漏了 `}`"在本地永远看不见，CI 上却是一句
+// `Syntax error: end of file unexpected (expecting "}")`。
 func TestColorHelpersAreBalancedAndRunClean(t *testing.T) {
 	// 只列**存在**的助手：编译入口与免编译入口没有 ok/caut/_clr。
 	helpers := []string{"_color_ok", "_clr", "say", "ok", "warn", "err", "caut"}
@@ -1998,10 +2004,12 @@ func TestColorHelpersAreBalancedAndRunClean(t *testing.T) {
 			}
 		}
 
-		// ② 运行时：真终端里跑 `_color_ok`。
-		if _, err := exec.LookPath("script"); err != nil {
-			continue
-		}
+		// ② 运行时：把 `_color_ok` 抠出来，先验片段是合法 shell，再挂到真终端上跑。
+		//
+		// 这一层**不能**整体被机器能力短路掉：真终端那一步需要 `script`（Windows
+		// 开发机上没有），但片段本身的构造错误在任何机器上都该被发现。踩过：片段
+		// 漏了函数收尾的 `}`，本地因为"没有 script → 整层 continue"而全绿，CI 上
+		// 一跑就是 `Syntax error: end of file unexpected (expecting "}")`。
 		fnBody := shFuncBody(t, rel, body, "\n_color_ok")
 		for _, tc := range []struct {
 			env  []string
@@ -2012,24 +2020,44 @@ func TestColorHelpersAreBalancedAndRunClean(t *testing.T) {
 			{[]string{"TERM=xterm", "NO_COLOR=1"}, 1, "NO_COLOR：应当退让"},
 			{[]string{"TERM=dumb"}, 1, "TERM=dumb：应当退让"},
 		} {
-			runColorPredicateOnTTY(t, rel, fnBody, tc.env, tc.rc, tc.desc)
+			runColorPredicate(t, rel, fnBody, tc.env, tc.rc, tc.desc)
 		}
 	}
 }
 
-// runColorPredicateOnTTY 把抠出来的 `_color_ok` 挂到真终端上执行，校验两件事：
-// 退出码是否符合预期、stderr 是否一字不差地空。
-func runColorPredicateOnTTY(t *testing.T, rel, fnBody string, env []string, wantRC int, desc string) {
+// runColorPredicate 把抠出来的 `_color_ok` 跑两遍，校验退出码与 stderr。
+//
+//	① 语法门：任何有 `sh` 的机器都跑（`sh -n`）——片段构造错了（比如漏了函数
+//	   收尾的 `}`）必须在**本地**就红，而不是等到有 pty 的机器上才现形；
+//	② 真终端门：用 `script -qec` 开一个真 pty 跑（`[ -t 1 ]` 才会是真的真），
+//	   没有 `script` 的机器（Windows 开发机）跳过这一门，CI 是 ubuntu，一定有。
+func runColorPredicate(t *testing.T, rel, fnBody string, env []string, wantRC int, desc string) {
 	t.Helper()
 	errFile := filepath.Join(t.TempDir(), "color_err.txt")
 	snip := filepath.Join(t.TempDir(), "predicate.sh")
+	// shFuncBody 返回到 `\n}\n` **之前**，也就是不含收尾的 `}` —— 这里必须自己补上。
 	// stderr 单独收文件：`script` 把子进程的 stdout/stderr 都接到 pty 上，
 	// 从外面分不开，只能在片段里自己重定向。
-	if err := os.WriteFile(snip, []byte(fnBody+"\n_color_ok 1 2>\""+errFile+"\"\n"), 0o600); err != nil {
+	code := fnBody + "\n}\n_color_ok 1 2>\"" + errFile + "\"\n"
+	if err := os.WriteFile(snip, []byte(code), 0o600); err != nil {
 		t.Fatalf("写不了临时片段：%v", err)
 	}
+
+	// ① 语法门。
+	if sh, err := exec.LookPath("sh"); err == nil {
+		if b, err := exec.Command(sh, "-n", snip).CombinedOutput(); err != nil {
+			t.Fatalf("%s：抠出来的片段不是合法 shell（%v）：\n%s\n片段全文：\n%s", rel, err, b, code)
+		}
+	}
+
+	// ② 真终端门。
+	if _, err := exec.LookPath("script"); err != nil {
+		return
+	}
 	cmd := exec.Command("script", "-qec", "sh '"+snip+"'", "/dev/null")
-	cmd.Env = append(append([]string{}, os.Environ()...), env...)
+	// 继承的环境里先把 NO_COLOR / TERM 摘掉再叠加本方用例的值：CI 或用户的
+	// 环境里若恰好带着 NO_COLOR，基础用例"应当判真"会莫名其妙地失败。
+	cmd.Env = append(envWithout(os.Environ(), "NO_COLOR=", "TERM="), env...)
 	out, err := cmd.CombinedOutput()
 	rc := 0
 	if err != nil {
@@ -2042,11 +2070,28 @@ func runColorPredicateOnTTY(t *testing.T, rel, fnBody string, env []string, want
 	if rc != wantRC {
 		t.Errorf("%s：_color_ok 在「%s」下返回 %d，期望 %d。输出：%s", rel, desc, rc, wantRC, out)
 	}
-	if noise, rerr := os.ReadFile(errFile); rerr != nil {
-		t.Fatalf("%s：读不到 stderr 收集文件：%v", rel, rerr)
-	} else if len(noise) > 0 {
+	// 片段没跑起来时这个文件不会被创建，那种情况上面 rc 已经报过了。
+	if noise, err := os.ReadFile(errFile); err == nil && len(noise) > 0 {
 		t.Errorf("%s：_color_ok 在「%s」下往 stderr 写了东西（期望一字不差地空）：\n%s\n"+
 			"  这正是用户看到的 `[: missing ]`——`[` 报错也返回 2，颜色会一个都不出。",
 			rel, desc, noise)
 	}
+}
+
+// envWithout 去掉形如 `KEY=...` 的环境项（前缀匹配），其余原样保留。
+func envWithout(env []string, prefixes ...string) []string {
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		drop := false
+		for _, p := range prefixes {
+			if strings.HasPrefix(kv, p) {
+				drop = true
+				break
+			}
+		}
+		if !drop {
+			out = append(out, kv)
+		}
+	}
+	return out
 }
