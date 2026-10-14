@@ -1310,6 +1310,13 @@ if ($TlsMode -eq "none") {
     if ($certRc -eq 2) {
         Write-Host "    （证书还没就绪：申请仍在进行中。随时可再查：）"
         Write-Host "      `"$target`" tls status -config `"$cfg`" -wait 120"
+        # http-01 的校验是 CA **从公网**访问本机 80 端口来完成的：80 没在听就等于
+        # 申请一定失败。这一条最容易被误判成防火墙/限流问题（真机上用户就是这么
+        # 想的），所以这里把判据直接写出来。
+        if ($TlsMode -eq "acme" -and $AcmeChallenge -eq "http-01") {
+            Write-Host "    注：challenge=http-01 要求 Master 自己监听 80（CA 从公网来验它）。"
+            Write-Host "        80 没在听 = 申请一定失败。查占用：netstat -ano | findstr ':80 '"
+        }
     } elseif ($certRc -ne 0) {
         Write-Host "    （证书申请失败。上面列出的排查项每条都能直接执行；改完配置后）"
         Write-Host "      Restart-ScheduledTask -TaskName xb-probe-master 会立即重试。"

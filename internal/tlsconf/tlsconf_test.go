@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -515,17 +516,23 @@ func TestSanityOfSourceOf(t *testing.T) {
 	}
 }
 
-// SyncObtain 让首次申请**在 Setup 里前台完成**，失败时 Setup 直接返回错误。
+// 前台申请（sync_obtain）的三条不变量，以及它**不该**发生在哪一步。
 //
-// 为什么这条不变量值得钉住：部署脚本靠它把"证书到底成没成"变成一个**确定的
-// 结果**（成了就继续、没成就回滚）。少了它，部署脚本只能等一段时间然后猜，
+// 为什么值得钉住：部署脚本靠它把"证书到底成没成"变成一个**确定的结果**
+// （成了就继续、没成就回滚）。少了它，部署脚本只能等一段时间然后猜，
 // 而用户看到的正是"脚本结束了，https 还是打不开，也不知道为什么"。
 //
-// 两条必须同时成立，缺一条这条通路就是坏的：
+// 三条必须同时成立，缺一条这条通路就是坏的：
 //
 //	① 默认（false）**不得**阻塞启动 —— 一次 DNS 抖动不该让 Master 起不来；
-//	② 打开 true 时**必须**阻塞并且失败要冒泡 —— 否则部署脚本的回滚分支永远
-//	   不会触发，用户拿到的是一个"部署成功"但 https 不可用的部署。
+//	② 打开 true 时，**Setup 自己也不得去申请** —— 申请要靠 http-01 /
+//	   tls-alpn-01 的挑战，而那要求本进程先在 80 / 443 上应答，可 Setup 跑在
+//	   main 启动任何监听**之前**。在 Setup 里申请等于"还没开门就让 CA 来敲门"：
+//	   每次都失败，失败又让进程退出，挑战端口于是永远起不来。真机上
+//	   （一台 80 完全空闲、防火墙全开的机器）"申请期间 80 一直没起来、
+//	   证书申请失败"就是这么来的。它是独立的一步，见 ObtainSyncOnStartup；
+//	③ 显式调用 ObtainSyncOnStartup 时，失败**必须**冒泡 —— 否则部署脚本的
+//	   回滚分支永远不会触发，用户拿到的是"部署成功"但 https 不可用的部署。
 func TestACMEObtainSyncBlocksAndBubblesUpErrors(t *testing.T) {
 	broken := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "boom", http.StatusInternalServerError)
@@ -539,26 +546,74 @@ func TestACMEObtainSyncBlocksAndBubblesUpErrors(t *testing.T) {
 		CA:        broken.URL,
 	}
 
-	// ② 打开 sync_obtain：申请失败必须**让 Setup 失败**。
-	acfg := base
-	acfg.SyncObtain = true
-	if _, err := setup(t, config.TLSConfig{Mode: "acme", ACME: acfg}, t.TempDir()); err == nil {
-		t.Fatal("sync_obtain=true 时，申请失败必须让 Setup 返回错误（部署脚本据此回滚）")
-	}
-
-	// ① 默认关闭：同样的坏 CA，Setup 必须**立刻成功返回**（申请在后台做）。
+	// ① 默认关闭：坏 CA 也不该让 Setup 被网络阻塞，申请交给后台循环。
 	xcfg := base
 	xcfg.SyncObtain = false
-	if _, err := setup(t, config.TLSConfig{Mode: "acme", ACME: xcfg}, t.TempDir()); err != nil {
-		t.Fatalf("sync_obtain 关闭时 Setup 不该被网络阻塞，实际报错：%v", err)
+	xp := mustSetup(t, config.TLSConfig{Mode: "acme", ACME: xcfg}, t.TempDir())
+	if err := xp.ObtainSyncOnStartup(context.Background()); err != nil {
+		t.Fatalf("sync_obtain 关闭时 ObtainSyncOnStartup 应当是空操作，实际报错：%v", err)
+	}
+
+	// ② 打开 sync_obtain：Setup **不得**发起申请（坏 CA 下它仍要成功返回）。
+	acfg := base
+	acfg.SyncObtain = true
+	ap := mustSetup(t, config.TLSConfig{Mode: "acme", ACME: acfg}, t.TempDir())
+
+	// ③ 监听就绪后显式申请：失败必须冒泡。
+	if err := ap.ObtainSyncOnStartup(context.Background()); err == nil {
+		t.Fatal("sync_obtain=true 时前台申请失败必须返回错误（部署脚本据此回滚）")
+	}
+}
+
+// 前台申请失败后必须**冷却**：同一个 dataDir 再起来一次，不能又去发一次申请。
+//
+// 防的是 systemd 的 Restart=always：部署期打开的 sync_obtain 会让"申请不成功"
+// 表现为进程退出，而单元每 3 秒就把它拉起来再申请一次 —— 每一次都算一次
+// "失败授权"。Let's Encrypt 的额度是每标识符每账号**每小时 5 次**，打满之后
+// 连一次**正确**的尝试都做不了。真机上用户看到的 `rateLimited: too many
+// failed authorizations` 正是这么攒出来的（而它只是**次生现象**，根因是
+// 挑战端口根本没起来 / 没权限绑）。
+func TestACMEObtainSyncCoolsDownAfterFailure(t *testing.T) {
+	var hits int32
+	broken := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer broken.Close()
+
+	dir := t.TempDir()
+	cfg := config.TLSConfig{
+		Mode: "acme",
+		ACME: config.ACMEConfig{
+			Domains:    []string{"a.example.com"},
+			Challenge:  acme.ChallengeTLSALPN01,
+			HTTPAddr:   "off",
+			CA:         broken.URL,
+			SyncObtain: true,
+		},
+	}
+
+	first := mustSetup(t, cfg, dir)
+	if err := first.ObtainSyncOnStartup(context.Background()); err == nil {
+		t.Fatal("预期第一次前台申请失败")
+	}
+	afterFirst := atomic.LoadInt32(&hits)
+
+	// 模拟 systemd 把进程拉起来：新建 Provider，读的是同一个 dataDir。
+	second := mustSetup(t, cfg, dir)
+	if err := second.ObtainSyncOnStartup(context.Background()); err != nil {
+		t.Fatalf("冷却期内应当直接放行（不申请、也不报错），让部署脚本从状态里读到原因：%v", err)
+	}
+	if got := atomic.LoadInt32(&hits); got != afterFirst {
+		t.Fatalf("冷却期内又向 CA 发了请求（%d → %d 次），限流配额会被反复烧掉", afterFirst, got)
 	}
 }
 
 // 申请失败时，错误必须已经**落进状态文件**。
 //
-// 这条容易被忽略但很关键：sync_obtain 失败时服务会退出，此时唯一能告诉用户
-// "为什么失败"的就是 status.json。不落盘的话，部署脚本的 `tls status` 只能
-// 报一句"还没结果"——而真正的原因（CA 返回了什么）就永远丢了。
+// 这条容易被忽略但很关键：前台申请失败后进程会退出（或按冷却放行），此时
+// 唯一能告诉用户"为什么失败"的就是 status.json。不落盘的话，部署脚本的
+// `tls status` 只能报一句"还没结果"——而真正的原因（CA 返回了什么）就永远丢了。
 func TestACMEObtainSyncWritesStatusBeforeFailing(t *testing.T) {
 	broken := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "boom", http.StatusInternalServerError)
@@ -578,8 +633,9 @@ func TestACMEObtainSyncWritesStatusBeforeFailing(t *testing.T) {
 			SyncObtain: true,
 		},
 	}
-	if _, err := setup(t, cfg, dir); err == nil {
-		t.Fatal("预期 Setup 失败")
+	p := mustSetup(t, cfg, dir)
+	if err := p.ObtainSyncOnStartup(context.Background()); err == nil {
+		t.Fatal("预期前台申请失败")
 	}
 
 	st, err := ReadStatus(StatusPath(cfg, dir))
@@ -591,5 +647,9 @@ func TestACMEObtainSyncWritesStatusBeforeFailing(t *testing.T) {
 	}
 	if st.LastAttemptAt == 0 {
 		t.Fatal("状态文件里没有 LastAttemptAt —— tls status 无法区分「本轮失败」与「上次遗留」")
+	}
+	// 冷却时刻同样要落盘：它要跨进程重启生效，只在内存里等于没有。
+	if st.SyncObtainFailedAt == 0 {
+		t.Fatal("状态文件里没有 SyncObtainFailedAt —— 重启后会再次申请，反复烧掉 CA 的限流配额")
 	}
 }

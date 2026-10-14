@@ -1760,3 +1760,58 @@ func TestFinishTipsNeverExecuteBackticks(t *testing.T) {
 		t.Error("收尾提示里的 /install.sh 示例缺少转义（反斜杠+反引号）。")
 	}
 }
+
+// ACME 的挑战端口是**特权端口**，systemd 单元必须显式授予绑定能力。
+//
+// 用户的原话是「我选择 80 端口，在申请期间，80 端口一直没起来，所以才申请失败」。
+// 他把原因归给网络，但机器上 80 完全空闲、防火墙全开 —— 真正拦住它的是这一条：
+// 单元里写的是 User=probe，而内核的 net.ipv4.ip_unprivileged_port_start 默认
+// 1024，非 root 进程绑 80 直接 permission denied。证书因此永远申请不到，而每次
+// 失败的申请都会消耗一次 CA 的"失败授权"额度，反复重试之后现象就变成了
+// "rateLimited"——那是**次生现象**，却最容易把人引向"是限流害的"这个错误结论。
+//
+// 三个方向都要钉：
+//   - 有：Master 自己终结 TLS（acme/selfsigned/files）时要绑 443，http-01 还要绑 80；
+//   - 有条件：TLS 交给前置反代（mode=none）时不绑任何低位端口，多给能力没有理由；
+//   - 有上限：申请失败会让进程退出，Restart=always 每 3 秒就再申请一次。
+func TestMasterUnitGrantsLowPortBinding(t *testing.T) {
+	body := readRepoFile(t, "scripts/deploy-master.sh")
+
+	const ambient = "AmbientCapabilities=CAP_NET_BIND_SERVICE"
+	if n := strings.Count(body, ambient); n != 1 {
+		t.Errorf("AmbientCapabilities=CAP_NET_BIND_SERVICE 出现 %d 次（期望恰好 1 次，就在 _cap_block 里）：\n"+
+			"  probe 用户绑不上 80/443（特权端口），http-01 校验必然失败 —— "+
+			"现象正是「申请证书期间 80 一直没起来」。", n)
+	}
+	if !strings.Contains(body, "CapabilityBoundingSet=CAP_NET_BIND_SERVICE") {
+		t.Error("缺 CapabilityBoundingSet=CAP_NET_BIND_SERVICE：只给 Ambient 而不收 Bounding，" +
+			"等于把其它能力也留着，与「最小权限」相悖。")
+	}
+	// 条件化：能力只在「Master 自己终结 TLS」时授予。
+	iGate := strings.Index(body, `if [ "$TLS_MODE" != "none" ]; then`)
+	iCap := strings.Index(body, ambient)
+	iUse := strings.Index(body, "$_cap_block")
+	switch {
+	case iGate < 0:
+		t.Fatal("找不到 _cap_block 的赋值条件：能力必须只在「Master 自己终结 TLS」时授予")
+	case iCap < iGate:
+		t.Error("能力位不在 TLS_MODE != none 的条件块里：" +
+			"无条件授予会连「TLS 交给前置反代」的部署也拿到绑定特权端口的能力")
+	case iUse < 0:
+		t.Error("_cap_block 没有被写进 systemd 单元（单元模板里必须有 $_cap_block）")
+	}
+
+	// 单次失败不能变成"每 3 秒重来一次"：sync_obtain 失败时进程会**故意**退出，
+	// Restart=always 立刻把它拉起来再申请一次，每次都算一次"失败授权"。
+	// Let's Encrypt 是每标识符每账号每小时 5 次，打满之后连正确的尝试都做不了。
+	if !strings.Contains(body, "StartLimitBurst=") {
+		t.Error("单元缺少 StartLimitBurst：申请失败会陷入「退出 → 3 秒后重启 → 再申请」的循环，" +
+			"把 CA 的失败授权额度烧光（真机上就是这么从「申请失败」变成 rateLimited 的）")
+	}
+
+	// 部署前要能提前发现"挑战端口被别人占着"，而不是等证书申请失败了再猜。
+	if !strings.Contains(body, "需要 Master 自己监听 $_pv_port 端口，但它已被占用") {
+		t.Error("缺少 http-01/tls-alpn-01 的端口占用前置检查：" +
+			"端口被占时 Master 起不来、证书申请失败，而报出来的现象离原因很远")
+	}
+}

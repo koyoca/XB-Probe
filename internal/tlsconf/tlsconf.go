@@ -57,6 +57,15 @@ const (
 	retryWithoutCert = 2 * time.Minute
 	// acmeObtainTimeout 限制单次申请的总耗时（含挑战等待与轮询）。
 	acmeObtainTimeout = 5 * time.Minute
+	// syncObtainCooldown 是"前台申请失败后，多久之内不再重试前台申请"。
+	//
+	// 它防的是 systemd 的 Restart=always：部署脚本打开的 sync_obtain 会让
+	// "申请不成功"表现为进程退出，而单元会在 3 秒后把进程拉起来再申请一次
+	// ——每一次都算一次"失败授权"。Let's Encrypt 的额度是每标识符每账号
+	// 每小时 5 次，打满之后连一次**正确**的尝试都做不了（真机上就是这样
+	// 从"申请失败"变成 `rateLimited: too many failed authorizations` 的）。
+	// 有冷却之后，一次配置错误最多消耗一次配额。
+	syncObtainCooldown = 3 * time.Minute
 )
 
 // Provider 是证书提供方：对外给 tls.Config / 挑战处理器 / 运行态。
@@ -79,6 +88,10 @@ type Provider struct {
 	acmeIPs      []string
 	challenge    string
 	acmeHTTPAddr string
+	// syncObtain 来自配置 tls.acme.sync_obtain：部署期把首张证书在**前台**
+	// 申请完，失败则服务不启动。它不由本包在 Setup 里执行，而是由调用方
+	// 在监听就绪后调 ObtainSyncOnStartup 触发（原因见那个方法的注释）。
+	syncObtain bool
 
 	mu          sync.RWMutex
 	cert        *tls.Certificate
@@ -87,6 +100,9 @@ type Provider struct {
 	// lastAttempt 是最近一次申请/续期尝试的开始时间，只用于状态展示
 	// （见 status.go）：运维判断"它是不是还在重试"靠的就是它。
 	lastAttempt time.Time
+	// syncObtainFailedAt 是最近一次**前台申请**失败的时间（Unix 秒），
+	// 用于跨进程重启的冷却判断，详见 status.go 里同名字段的说明。
+	syncObtainFailedAt int64
 
 	// renewMu 串行化申请/续期：并发下单会撞 CA 的速率限制。
 	renewMu sync.Mutex
@@ -163,6 +179,13 @@ func Setup(cfg config.TLSConfig, dataDir string, logger *slog.Logger) (*Provider
 			return nil, fmt.Errorf("初始化 ACME 客户端失败: %w", err)
 		}
 		p.acmeClient = client
+		// sync_obtain 只是**记下来**，不在这里执行：
+		// http-01/tls-alpn-01 都要本进程先在挑战端口上应答，CA 才可能验过，
+		// 而监听是调用方在 Setup 返回之后才启动的。在这里申请等于
+		// "还没开门就让 CA 来敲门"——每次都会失败，失败又让进程退出，
+		// 于是挑战端口永远起不来。真正的触发点是 ObtainSyncOnStartup。
+		p.syncObtain = cfg.ACME.SyncObtain
+
 		// 有缓存证书就先用起来，避免重启期间 TLS 不可用；
 		// 没有则留给 Run() 在后台申请（启动不被网络阻塞）。
 		if pair, err := p.loadCachedACMECert(); err == nil {
@@ -170,27 +193,11 @@ func Setup(cfg config.TLSConfig, dataDir string, logger *slog.Logger) (*Provider
 		} else if !errors.Is(err, os.ErrNotExist) {
 			p.lastErr = err.Error()
 			logger.Warn("缓存的 ACME 证书不可用，将重新申请", "err", err.Error())
-		} else if cfg.ACME.SyncObtain {
-			// 同步申请：**只有部署脚本会打开它**（见 deploy-master.sh 的证书步骤）。
-			//
-			// 平时刻意不这么做：一个 DNS 或网络问题不该让整个 Master 起不来，
-			// 所以首次申请历来在后台跑。但部署那一刻是例外——那时用户正等着
-			// 一个确定答案（"到底能不能用 https"），而后台申请给出的是一段
-			// 没有任何反馈的空窗，他只能靠猜。
-			//
-			// 打开它之后的语义是"申请不成功就不启动"：申请失败时 Setup 返回
-			// 错误，服务退出，部署脚本据此**停止安装并回滚**。成功时证书已经在
-			// 手里，服务起来立刻就能握手——不必再等一次后台重试。
-			ctx, cancel := context.WithTimeout(context.Background(), acmeObtainTimeout)
-			err := p.obtainACMESync(ctx)
-			cancel()
-			if err != nil {
-				// 状态先落盘再返回：部署脚本的 tls status 要靠它报出原因，
-				// 而服务已经退出了，没有别的地方能提供这个原因。
-				p.writeStatus()
-				return nil, fmt.Errorf("申请证书失败: %w", err)
-			}
-			logger.Info("证书已在前台申请成功（tls.acme.sync_obtain）")
+		}
+		// 读回上一次前台申请失败的时间：它是**跨进程重启**的冷却依据
+		// （见 status.go 里 SyncObtainFailedAt 的说明）。
+		if prev, err := ReadStatus(p.statusPath()); err == nil {
+			p.syncObtainFailedAt = prev.SyncObtainFailedAt
 		}
 
 	default:
@@ -518,6 +525,11 @@ func (p *Provider) regenerateSelfSigned() error {
 func (p *Provider) acmeCertPath() string { return filepath.Join(p.cacheDir, certFileName) }
 func (p *Provider) acmeKeyPath() string  { return filepath.Join(p.cacheDir, keyFileName) }
 
+// statusPath 是状态文件的位置。收成一个方法是为了让"读"与"写"共用同一条
+// 推导规则——两处各拼一次路径的话，改了一处就会出现"写到一个文件、
+// 从另一个文件读"的静默不一致。
+func (p *Provider) statusPath() string { return filepath.Join(p.cacheDir, statusFileName) }
+
 func (p *Provider) loadCachedACMECert() (*tls.Certificate, error) {
 	pair, _, _, err := loadKeyPair(p.acmeCertPath(), p.acmeKeyPath())
 	if err != nil {
@@ -693,12 +705,66 @@ func (p *Provider) renewACME(ctx context.Context) {
 		"not_after", pair.Leaf.NotAfter.Format(time.RFC3339), "sans", strings.Join(s.SANs, ","))
 }
 
+// ObtainSyncOnStartup 执行"部署期前台申请"（配置里的 tls.acme.sync_obtain）。
+//
+// ⚠ 调用时机是**硬约束**：必须在所有挑战所需的监听都就绪之后调用。
+//
+//	· http-01 的校验是 CA 从公网访问 http://<域名>:80/.well-known/acme-challenge/<token>，
+//	  本进程得先能在那个端口上应答，CA 才可能验过；
+//	· tls-alpn-01 同理由 443 上的握手承载（443 也得先起来）。
+//
+// 这段申请**曾经**做在 Setup 里，而 Setup 跑在 main 启动任何监听之前。结果：
+// 申请期间挑战端口从未被监听 → 每次校验都"连不上"→ 申请失败 → 失败又让进程
+// 退出 → 挑战端口更起不来。于是一台 80 端口完全空闲、防火墙全开的机器上照样
+// 申请不到证书，用户看到的现象正是"申请期间 80 端口一直没起来"。所以它必须
+// 是监听之后独立的一步，而不是 Setup 的一部分。
+//
+// 返回错误表示"申请失败，部署应当中止并回滚"。平时（sync_obtain 关闭）它是个
+// 空操作，启动不被网络阻塞——一个 DNS 抖动不该让整个 Master 起不来。
+func (p *Provider) ObtainSyncOnStartup(ctx context.Context) error {
+	if p.mode != "acme" || !p.syncObtain {
+		return nil
+	}
+	p.mu.RLock()
+	have := p.cert != nil
+	failedAt := p.syncObtainFailedAt
+	p.mu.RUnlock()
+	if have {
+		// 缓存里已经有证书（例如上次部署已经签下来），无需再申请。
+		return nil
+	}
+	// 冷却：见 status.go 里 SyncObtainFailedAt 的说明。这里刻意**放行进程启动**
+	// （返回 nil）而不是再失败一次——让它活着，部署脚本才能用 `tls status`
+	// 读到上一次的失败原因并回滚，同时不再消耗 CA 的"失败授权"配额。
+	if failedAt > 0 && time.Since(time.Unix(failedAt, 0)) < syncObtainCooldown {
+		p.log.Error("跳过前台申请：上一次前台申请刚刚失败，冷却中（避免反复消耗 CA 的限流配额）",
+			"failed_at", time.Unix(failedAt, 0).Format(time.RFC3339),
+			"cooldown", syncObtainCooldown.String(),
+			"hint", "查 `xb-probe-master tls status` 看失败原因；修好后重启服务可立即重试")
+		return nil
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, acmeObtainTimeout)
+	defer cancel()
+	if err := p.obtainACMESync(reqCtx); err != nil {
+		// 状态先落盘再返回：服务即将退出，`tls status` 只能靠 status.json
+		// 回答"为什么失败"。同时记下失败时间供下次启动的冷却判断。
+		p.mu.Lock()
+		p.syncObtainFailedAt = time.Now().Unix()
+		p.mu.Unlock()
+		p.writeStatus()
+		return fmt.Errorf("申请证书失败: %w", err)
+	}
+	p.log.Info("证书已在前台申请成功（tls.acme.sync_obtain）")
+	p.writeStatus()
+	return nil
+}
+
 // obtainACMESync 同步申请一张证书并返回结果（失败时返回错误）。
 //
 // 与 renewACME 的关系：两者跑的是同一套申请流程，区别只在"错误往哪去"。
 // renewACME 是后台循环的一部分，失败只能记进状态、等下一轮重试；这里被
-// Setup 调用（部署脚本打开的 tls.acme.sync_obtain），失败要**变成返回错误**
-// 让进程起不来，部署脚本才能据此回滚。
+// ObtainSyncOnStartup 调用（部署脚本打开的 tls.acme.sync_obtain），失败要
+// **变成返回错误**让进程起不来，部署脚本才能据此回滚。
 //
 // 不直接复用 renewACME 的原因：它先判 needsRenewal()，而"还没有证书"时的
 // 续期判断走的是另一条分支（nextRenewal 为零值），并且它把错误吞进日志。

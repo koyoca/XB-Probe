@@ -2415,6 +2415,38 @@ if [ "$TLS_MODE" = "acme" ]; then
 			exit 2
 		fi
 	fi
+	# http-01 / tls-alpn-01 都要求**本进程自己**在被 CA 访问的端口上应答
+	# （http-01 用 80，tls-alpn-01 用 443）。端口被别的进程占着时，Master
+	# 起不来、证书也申请不到，而报出来的现象只是"证书申请失败"，离原因很远。
+	#
+	# 真机（v0.1.3 → v0.1.4）上用户报"申请期间 80 一直没起来"，真正的原因有两个，
+	# 一个是他看不到的**权限**（服务以 probe 用户运行，绑 80 需要
+	# CAP_NET_BIND_SERVICE，而当时写的单元没给），另一个是端口占用。这里先把
+	# 端口这一条查掉，权限那条由 systemd 单元保证（见 5/7 步）。
+	if [ "$ACME_CHALLENGE" = "http-01" ] || [ "$ACME_CHALLENGE" = "tls-alpn-01" ]; then
+		_pv_port=80
+		[ "$ACME_CHALLENGE" = "tls-alpn-01" ] && _pv_port=443
+		_pv_use=""
+		if command -v ss >/dev/null 2>&1; then
+			_pv_use="$(ss -ltn 2>/dev/null | awk -v p=":$_pv_port\$" '$4 ~ p {print; exit}')"
+		fi
+		if [ -z "$_pv_use" ] && command -v netstat >/dev/null 2>&1; then
+			_pv_use="$(netstat -ltn 2>/dev/null | awk -v p="[:.]$_pv_port[[:space:]]" \
+				'/[Ll][Ii][Ss][Tt][Ee][Nn]/ && $4 ~ p {print; exit}')"
+		fi
+		if [ -n "$_pv_use" ]; then
+			echo "警告：challenge=$ACME_CHALLENGE 需要 Master 自己监听 $_pv_port 端口，但它已被占用：" >&2
+			printf '      %s\n' "$_pv_use" >&2
+			echo "      Master 会因此起不来、证书随之申请失败。如果该端口由前置反代占用，" >&2
+			echo "      让反代把 /.well-known/acme-challenge/ 转给 Master，并把配置里的" >&2
+			echo "      tls.acme.http_addr 设为 off（http-01 场景），否则两边会抢同一个端口。" >&2
+		fi
+		if [ "$_pv_port" -lt 1024 ]; then
+			echo "提示：$_pv_port 属于特权端口（<1024）。本脚本写的 systemd 单元已授予" >&2
+			echo "      CAP_NET_BIND_SERVICE，服务绑得上；手工起的进程（直接跑二进制）" >&2
+			echo "      需要 root 或自行授予该项能力，否则会 bind: permission denied。" >&2
+		fi
+	fi
 fi
 
 # TLS 与 public_origin 的协议必须自洽。
@@ -3194,11 +3226,40 @@ fi
 echo "==> 5/7 写 systemd 单元"
 UNIT=/etc/systemd/system/xb-probe-master.service
 if command -v systemctl >/dev/null 2>&1 && [ -d /etc/systemd/system ]; then
+	# 自己终结 TLS 时（acme / selfsigned / files），进程要绑 443；challenge 选
+	# http-01 时还要绑 80。**这两个都是特权端口**（内核
+	# net.ipv4.ip_unprivileged_port_start 默认 1024），而服务以 probe 用户运行，
+	# 不授予这项能力就恒 `bind: permission denied`。
+	#
+	# 真机（腾讯云，v0.1.3 → v0.1.4）上用户报的就是这个：80 端口一直起不来、
+	# 证书因此申请失败。他先怀疑防火墙，但机器上 80 完全空闲、防火墙全开——
+	# 拦住它的是这一行缺失的能力位。而失败的申请每次都会消耗一次 CA 的
+	# "失败授权"额度，反复重试之后现象就变成了 "rateLimited"。
+	#
+	#   · NoNewPrivileges=true **不**妨碍它：Ambient 能力由 systemd 在 exec
+	#     之前赋予，属于"启动时就有的"，不是运行中通过 setuid/文件能力获取的；
+	#   · 只留这一项（CapabilityBoundingSet）比留全部更紧。
+	#
+	# 文案里刻意不写反引号：这段字符串会被展开进一个**不加引号**的 heredoc，
+	# 而那里的反引号会被当命令替换执行（同一个坑在本脚本的收尾提示里踩过一次）。
+	_cap_block=""
+	if [ "$TLS_MODE" != "none" ]; then
+		_cap_block="# 绑定低位端口（443；http-01 还要 80）。没有它，probe 用户绑不上 80，
+# 现象是「申请证书期间 80 一直没起来」——与防火墙无关。
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE"
+	fi
 	cat >"$UNIT" <<EOF
 [Unit]
 Description=XB-Probe Master
 After=network-online.target
 Wants=network-online.target
+# tls.acme.sync_obtain 打开时，「申请不成功」表现为进程**故意**退出（好让部署
+# 脚本拿到确定结果并回滚），而 Restart=always 会每 3 秒把它拉起来再申请一次。
+# 每次失败都算一次"失败授权"，Let's Encrypt 的额度是每标识符每账号每小时 5 次
+# ——打满之后连一次**正确**的尝试都做不了。所以连续失败要停下来等人工介入。
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -3207,6 +3268,7 @@ Restart=always
 RestartSec=3
 User=probe
 Group=probe
+$_cap_block
 # 最小权限：私有 /tmp、只读系统目录、禁止提权（3.2 / S 系列加固）
 PrivateTmp=true
 ProtectSystem=strict
@@ -3652,6 +3714,19 @@ case "$_hc_code" in
 		echo "      可能只是首张证书还没就绪（443 暂时握不上手），继续走下面的" >&2
 		echo "      证书步骤，由它给出确定结果。若服务其实在反复重启，查：" >&2
 		echo "        systemctl status xb-probe-master; journalctl -u xb-probe-master -n 50" >&2
+		# http-01 还要看 80：CA 是**从公网**访问这个端口来验的，它没在听就等于
+		# 申请一定失败。这是"证书申请失败"里最容易查错方向的一个原因——用户会
+		# 先去怀疑防火墙，而真正缺的往往是"绑定低位端口"的能力位（服务以 probe
+		# 用户运行，80 < 1024 属于特权端口）。v0.1.4 之前真机就是这样。
+		if [ "$ACME_CHALLENGE" = "http-01" ]; then
+			echo "      另外：challenge=http-01 要求 Master 自己监听 80（CA 从公网来验它）。" >&2
+			echo "      若 80 不在听，先分清是"被占"还是"没权限"：" >&2
+			echo "        ss -ltnp | grep ':80'" >&2
+			echo "        · 被别的进程占 → 让反代转发 /.well-known/acme-challenge/，" >&2
+			echo "          并把 tls.acme.http_addr 设为 off；" >&2
+			echo "        · 报 permission denied → 缺 CAP_NET_BIND_SERVICE（手工写的单元" >&2
+			echo "          / 直接跑二进制容易漏；本脚本 5/7 步写的单元已包含它）。" >&2
+		fi
 	else
 		echo "" >&2
 		echo "错误：20 秒内连不上 $HEALTH_ADDR——Master 没有在这个地址上提供服务。" >&2

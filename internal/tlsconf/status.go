@@ -47,6 +47,17 @@ type Status struct {
 	LastError string `json:"last_error,omitempty"`
 	// LastAttemptAt 是最近一次申请/续期尝试的开始时间。
 	LastAttemptAt int64 `json:"last_attempt_at,omitempty"`
+	// SyncObtainFailedAt 是"部署期前台申请"最近一次失败的时间。
+	//
+	// 它存在的唯一理由是**别在 systemd 的重启循环里反复消耗 CA 的配额**：
+	// sync_obtain 会让"申请不成功"表现为进程退出，而单元里 Restart=always
+	// 每隔几秒就把它拉起来再申请一次——每次都是一次"失败授权"。Let's
+	// Encrypt 的额度是每标识符每账号每小时 5 次，打满之后连一次**正确**的
+	// 尝试都做不了（真机上就是这么从"申请失败"变成
+	// `rateLimited: too many failed authorizations` 的）。
+	// 记下这个时间，下次启动若仍在冷却窗口内就跳过前台申请，让部署脚本
+	// 读到原因并回滚，而不是继续烧配额。
+	SyncObtainFailedAt int64 `json:"sync_obtain_failed_at,omitempty"`
 	// UpdatedAt 是本文件写入时间，用来判断"这份状态是不是这一轮写的新鲜货"。
 	UpdatedAt int64 `json:"updated_at"`
 }
@@ -108,14 +119,16 @@ func (p *Provider) snapshot() Status {
 	next := p.nextRenewal
 	lastErr := p.lastErr
 	attempt := p.lastAttempt
+	syncFailed := p.syncObtainFailedAt
 	p.mu.RUnlock()
 
 	st := Status{
-		Mode:          p.mode,
-		Source:        sourceOf(p.mode),
-		LastError:     lastErr,
-		LastAttemptAt: unixOrZero(attempt),
-		UpdatedAt:     time.Now().Unix(),
+		Mode:               p.mode,
+		Source:             sourceOf(p.mode),
+		LastError:          lastErr,
+		LastAttemptAt:      unixOrZero(attempt),
+		SyncObtainFailedAt: syncFailed,
+		UpdatedAt:          time.Now().Unix(),
 	}
 	if p.mode == "acme" {
 		st.Challenge = p.challenge
@@ -155,7 +168,7 @@ func (p *Provider) writeStatus() {
 		return
 	}
 	raw = append(raw, '\n')
-	path := filepath.Join(p.cacheDir, statusFileName)
+	path := p.statusPath()
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, raw, 0o640); err != nil {
 		p.log.Debug("写入 TLS 状态文件失败", "err", err.Error())

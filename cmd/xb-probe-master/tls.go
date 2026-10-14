@@ -111,6 +111,17 @@ func runTLS(args []string) error {
 		if haveLast && last.LastAttemptAt > 0 {
 			fmt.Printf("    最近一次尝试：%s\n", time.Unix(last.LastAttemptAt, 0).Format("2006-01-02 15:04:05"))
 		}
+		// 等待超时后，**即使这条错误不是本轮产生的也要打出来**。
+		//
+		// 场景：部署期前台申请失败过一次，进程在"失败冷却"里重新起来
+		// （见 tlsconf 的 syncObtainCooldown —— 不这么做的话 systemd 会每
+		// 3 秒重启一次、每次烧掉一个 CA 的失败授权额度）。此时状态文件里
+		// 会留一条**上一轮**的失败原因，而上面那个"只认本轮错误"的判断
+		// 会把它跳过去。不放出来的话，用户在这一步只能看到一句
+		// "还没就绪"，而真正的失败原因就摆在文件里却没人转述。
+		if haveLast && last.LastError != "" {
+			fmt.Printf("    上一次申请失败的原因：%s\n", last.LastError)
+		}
 	}
 	fmt.Println("==> 证书尚未就绪（申请还在进行中，或服务还没开始申请）")
 	printRetryHints(cfg, statusPath)
@@ -215,6 +226,9 @@ func printRetryHints(cfg *config.MasterConfig, statusPath string) {
 	case cfg.TLS.ACME.Challenge == acme.ChallengeHTTP01:
 		fmt.Printf("      · 域名是否已解析到本机：dig +short %s\n", firstDomain(cfg))
 		fmt.Printf("      · 80 端口是否空闲且可达：ss -ltnp | grep ':80'\n")
+		fmt.Printf("        80 没在听 = 申请**一定**失败（CA 是从公网访问这个端口来验的）。\n")
+		fmt.Printf("        报 permission denied → 服务无权绑定特权端口（80 < 1024），\n")
+		fmt.Printf("        需要给服务 CAP_NET_BIND_SERVICE（systemd: AmbientCapabilities）。\n")
 		fmt.Printf("      · 80 被反代占用、且反代会转发 /.well-known/ 时，把 acme.http_addr 设为 off\n")
 	case cfg.TLS.ACME.Challenge == acme.ChallengeTLSALPN01:
 		fmt.Printf("      · 域名是否已解析到本机：dig +short %s\n", firstDomain(cfg))

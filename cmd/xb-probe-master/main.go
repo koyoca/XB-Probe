@@ -14,6 +14,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -308,24 +309,39 @@ func run(cfgPath string) error {
 		Heartbeat: sched, // A5 状态卡：只读快照，见 handleHeartbeatStatus
 	})
 
-	// 13) 启动写协程、调度循环与证书续期循环
+	// 13) 启动写协程与调度循环
+	//
+	// 证书的续期循环（tlsProvider.Run）**不在这里**：它可能立刻发起一次
+	// 申请，而那需要挑战端口已经就绪。它被排在 14) 之后，与前台申请同处
+	// 一条"监听已就绪"的时间线（见下面 14b 的说明）。
 	writer.Start()
 	go sched.Run(ctx)
-	tlsProvider.Run(ctx)
 
 	// 14) HTTP 服务
+	//
+	// 三个监听先全部拉起来，再谈证书（见 14b）：申请证书要走挑战，
+	// 而挑战要么落在 80（http-01）、要么落在 443（tls-alpn-01）。
+	var pubSrv, adminSrv, plainSrv *http.Server
+	// closeAll 供 14b 之后的失败路径用：进程即将因为申请失败而退出，
+	// 已绑上的端口要立刻放开，否则重启时会撞"address already in use"。
+	closeAll := func() {
+		for _, s := range []*http.Server{pubSrv, adminSrv, plainSrv} {
+			if s != nil {
+				_ = s.Close()
+			}
+		}
+	}
 	httpErr := make(chan error, 3)
 
 	// 公开站与 Agent 接口共用同一监听地址（各自独立中间件栈，见 api.RootRoutes）。
-	pubSrv := newServer(cfg.PublicListen, h.RootRoutes())
-	go func() { httpErr <- serve(pubSrv, tlsProvider) }()
+	pubSrv = newServer(cfg.PublicListen, h.RootRoutes())
+	go func() { httpErr <- serve(pubSrv, tlsProvider, nil) }()
 
 	// 管理端：推荐使用独立监听地址（13.4.5）。
 	// 若与公开站同地址，则把管理端挂在同一路由树上（同源部署，需接受"主题视为可信代码"的前提）。
-	var adminSrv *http.Server
 	if cfg.AdminListen != "" && cfg.AdminListen != cfg.PublicListen {
 		adminSrv = newServer(cfg.AdminListen, h.AdminRoutes())
-		go func() { httpErr <- serve(adminSrv, tlsProvider) }()
+		go func() { httpErr <- serve(adminSrv, tlsProvider, nil) }()
 	} else {
 		merged := http.NewServeMux()
 		// 同一份 AdminRoutes 处理器挂两个前缀：/api/admin/v1/* 与管理界面 /admin/*。
@@ -339,12 +355,52 @@ func run(cfgPath string) error {
 
 	// ACME http-01 需要一个明文端口。它只在"我们自己去申请证书"时才开，
 	// 且只服务挑战路径（其余请求 301 到 https），不会被当成第二个站点。
-	var plainSrv *http.Server
+	//
+	// ⚠ 这个监听必须**先于**任何 ACME 申请就绪（见 14b）。http-01 的校验方式
+	// 是 CA 从公网访问 http://<域名>:80/.well-known/acme-challenge/<token>，
+	// 我们得先在 80 上应答，CA 才可能验过。曾经把同步申请做在 tlsconf.Setup
+	// 里（= 在这个监听之前），于是申请期间 80 从未被监听、每次都因"连不上"
+	// 而失败，失败又让进程退出、80 更起不来——一台 80 完全空闲、防火墙全开
+	// 的机器上照样申请不到证书，用户看到的就是"申请期间 80 一直没起来"。
+	//
+	// 所以这里用**同步** Listen 而不是丢进 goroutine：绑不上就要当场说清楚
+	// 原因（下面的错误文案覆盖了最常见的两种：端口被占、权限不足）。
+	// 若是丢进 httpErr 通道，这条失败会被随后那次申请的失败淹掉，现场只剩
+	// 一句含糊的"证书申请失败"。
 	if addr := tlsProvider.PlainHTTPAddr(); addr != "" {
+		ln, err := net.Listen("tcp", addr)
+		if err != nil {
+			closeAll()
+			return fmt.Errorf("无法监听 ACME http-01 明文端口 %s：%w。"+
+				"http-01 要求 CA 能从公网访问这个端口，先把它让出来再启动："+
+				"（1）端口被前置反代占用 → 把 tls.acme.http_addr 设为 off，"+
+				"并让反代把 /.well-known/acme-challenge/ 转发到本进程；"+
+				"（2）提示 permission denied → 80 属于特权端口（<1024），"+
+				"当前用户无权绑定，需要给服务授予 CAP_NET_BIND_SERVICE"+
+				"（部署脚本写的 systemd 单元已包含这一项，手工装的话请自行补上）", addr, err)
+		}
 		plainSrv = newServer(addr, tlsProvider.PlainHTTPHandler())
-		go func() { httpErr <- serve(plainSrv, nil) }()
+		go func() { httpErr <- serve(plainSrv, nil, ln) }()
 		logger.Info("已启动 ACME http-01 明文监听", "addr", addr)
 	}
+
+	// 14b) 部署期的前台申请证书（tls.acme.sync_obtain）
+	//
+	// 位置是**硬约束**：必须在上面所有监听就绪之后（见 ObtainSyncOnStartup
+	// 的注释）。平时它是个空操作；只有部署脚本打开 sync_obtain 时才会真的
+	// 去申请，并且"申请不成功就不启动"，好让部署脚本拿到一个确定的结果、
+	// 失败时回滚，而不是留下一个"服务在跑但 https 打不开"的假象。
+	if err := tlsProvider.ObtainSyncOnStartup(ctx); err != nil {
+		logger.Error("证书前台申请失败", "err", err.Error())
+		closeAll()
+		return fmt.Errorf("TLS 初始化失败: %w", err)
+	}
+
+	// 14c) 证书续期循环
+	//
+	// 放在这里而不是 13)：它启动时会立刻 tick 一次，而 tick 可能直接发起
+	// 申请——同样需要挑战端口已经就绪。
+	tlsProvider.Run(ctx)
 
 	scheme := "http"
 	if cfg.TLSActive() {
@@ -422,16 +478,25 @@ func newServer(addr string, handler http.Handler) *http.Server {
 //
 // 证书一律通过 tls.Config.GetCertificate 动态提供（files 热加载 / selfsigned
 // / acme 都可能在中途换证书），所以 ListenAndServeTLS 的两个文件名传空。
-func serve(srv *http.Server, provider *tlsconf.Provider) error {
+//
+// ln 非 nil 表示"套接字已经由调用方绑好"（ACME 明文端口要同步 Listen 才能
+// 把绑定失败的原因当场报出来，见 14) 那段注释）；此时只负责在上面 Serve。
+func serve(srv *http.Server, provider *tlsconf.Provider, ln net.Listener) error {
 	var tlsCfg *tls.Config
 	if provider != nil {
 		tlsCfg = provider.TLSConfig()
 	}
 	var err error
-	if tlsCfg != nil {
+	switch {
+	case ln != nil && tlsCfg != nil:
+		srv.TLSConfig = tlsCfg
+		err = srv.ServeTLS(ln, "", "")
+	case ln != nil:
+		err = srv.Serve(ln)
+	case tlsCfg != nil:
 		srv.TLSConfig = tlsCfg
 		err = srv.ListenAndServeTLS("", "")
-	} else {
+	default:
 		err = srv.ListenAndServe()
 	}
 	if errors.Is(err, http.ErrServerClosed) {
