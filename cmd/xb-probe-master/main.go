@@ -431,6 +431,13 @@ func run(cfgPath string) error {
 		logger.Warn("tls.mode=none：管理端会话 Cookie 将为 probe_session（不带 Secure），仅适合本机或受信内网调试；" +
 			"对外提供访问请启用 TLS 或置于 HTTPS 反代之后。")
 	}
+	// trusted_proxies 为空时不采信任何 X-Forwarded-*（S5 不变量）。RealIPMiddleware
+	// 已随本次修复挂载，但前置反代（含同机 Caddy）必须显式填入反代网段，否则来源
+	// 会恒为反代地址——这正是"IP 探查有问题"的形态，这里显式提醒而不是静默默认。
+	if len(cfg.TrustedProxies) == 0 {
+		logger.Warn("未配置 trusted_proxies：不采信 X-Forwarded-For，前置反代后来源 IP 将恒为反代地址；" +
+			"同机 Caddy/Nginx 请配置 [\"127.0.0.1/32\", \"::1/128\"]。")
+	}
 
 	// 15) 优雅退出：排空写队列并强制 flush（4.2 第 5 条）
 	sig := make(chan os.Signal, 1)

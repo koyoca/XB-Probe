@@ -170,13 +170,10 @@ func (c *MasterConfig) applyDefaults() {
 	if c.LogLevel == "" {
 		c.LogLevel = "info"
 	}
-	// 同源反代（Caddy/Nginx 常与 Master 同机）从 127.0.0.1 转发，不信任回环就
-	// 无法从 X-Forwarded-For 还原真实来源——这正是 #1 的根因（RealIPMiddleware
-	// 此前从未挂载 + trusted_proxies 为空，导致 Master 永远把来源看成 127.0.0.1）。
-	// 默认信任回环是安全的：非回环的直连客户端不受影响，按其真实对端地址取源。
-	if len(c.TrustedProxies) == 0 {
-		c.TrustedProxies = []string{"127.0.0.1/32", "::1/128"}
-	}
+	// trusted_proxies **刻意不设默认值**：空 = 一律不采信 X-Forwarded-*。
+	// 这是 docs/01（S5）与冒烟反证断言共同钉住的不变量——未配置时伪造
+	// X-Forwarded-Proto 绝不能骗到 HSTS。前置反代（含同机 Caddy）时由运维
+	// 显式填入反代网段（deploy-master.sh 装本机 Caddy 时会自动写回环地址）。
 
 	t := &c.TLS
 	if t.Mode == "" {
