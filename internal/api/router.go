@@ -25,8 +25,24 @@ func (h *Handler) PublicRoutes() http.Handler {
 	// --- ACME http-01 挑战（必须在 GET / 的兜底之前注册） ---
 	// 免鉴权、且要绕过 host 白名单与"公开站已关闭"开关：CA 是按 IP 访问的，
 	// 它既不知道我们的域名，也无从登录。
+	//
+	// ⚠ 这个模式**必须**带方法（"GET "），不能只写路径。Go 1.22 起的 ServeMux
+	// 会在注册时检查冲突：`/.well-known/acme-challenge/`（不带方法 = 匹配所有
+	// 方法）与兜底的 `GET /` 互不包含（前者路径更具体但方法更多，后者方法更窄
+	// 但路径更宽），于是**注册即 panic**：
+	//
+	//	panic: pattern "GET /" conflicts with pattern "/.well-known/acme-challenge/":
+	//	        GET / matches fewer methods than /.well-known/acme-challenge/,
+	//	        but has a more general path pattern
+	//
+	// 这个 panic 发生在装配路由时（进程启动阶段），任何"选 acme + http-01"的
+	// 部署都**必然**装上就退（systemd 反复重启），现场只剩一句 panic。
+	// 真机上就是这样：用户选 2) master(http-01) 后服务起不来、80 端口从未被监听，
+	// 而证书申请那一步给出的却是"申请失败"，把人引向 DNS/防火墙/限流。
+	// 带上 "GET " 之后两者是"方法相同、路径更具体"的关系，不再冲突；
+	// 且 Go 的 ServeMux 里 GET 模式**同时匹配 HEAD**（真机验证），CA 用哪种都能应答。
 	if h.ChallengeHandler != nil {
-		mux.Handle(acme.HTTP01Prefix, h.ChallengeHandler)
+		mux.Handle("GET "+acme.HTTP01Prefix, h.ChallengeHandler)
 	}
 
 	// --- 公开 API ---
@@ -164,8 +180,12 @@ func (h *Handler) AdminRoutes() http.Handler {
 	// --- ACME http-01 挑战 ---
 	// 管理端监听也可能被反代指向（例如只有 admin 域名配了 80 端口），
 	// 因此这里同样挂一份。挑战内容本就是公开的，不构成信息泄露。
+	//
+	// 同样必须带 "GET "：本 mux 里还有 `GET /admin/` 与大量 `GET /api/admin/v1/…`
+	// 模式，不带方法的挑战模式属于"无方法"的一类，与它们的方法集不同，
+	// 将来若有哪个兜底模式写成不带方法就会当场 panic（同 PublicRoutes 的注释）。
 	if h.ChallengeHandler != nil {
-		mux.Handle(acme.HTTP01Prefix, h.ChallengeHandler)
+		mux.Handle("GET "+acme.HTTP01Prefix, h.ChallengeHandler)
 	}
 
 	// 后台界面（固定，不随主题变化，5.2）。静态资源本身不含任何敏感数据，

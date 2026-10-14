@@ -91,7 +91,14 @@ $ErrorActionPreference = "Stop"
 # 出厂默认值：**只有这一份来源**。问题里方括号显示的默认值必须与真正生效的值同源，
 # 否则迟早出现"提示写 8080、实际听 8081"。
 $DefaultPublicListen = "0.0.0.0:8080"
-$DefaultAdminListen = "127.0.0.1:8081"
+# 管理端监听的默认值：**空串是一个有意义的取值** —— 与公开站共用同一个监听，
+# 后台就在公开地址的 /admin/ 下（"同站"）。见 Test-AdminSharesPublic。
+#
+# 这里默认留空（而不是 127.0.0.1:8081）：Windows 侧不代管反代，填一个回环端口
+# 就等于装出一个"只有本机能打开"的后台——公开看板正常、/admin/ 打不开，
+# 而失败现场看起来像"后台没装上"。确实要把后台关在本机（只用 SSH 隧道）时，
+# 问答里直接填 127.0.0.1:8081 即可，收尾会如实说明它只在本机可达。
+$DefaultAdminListen = ""
 
 function Write-Step { param([string]$Msg) Write-Host "==> $Msg" -ForegroundColor Cyan }
 function Write-Warn2 { param([string]$Msg) Write-Host "警告：$Msg" -ForegroundColor Yellow }
@@ -287,6 +294,80 @@ function Get-AdminUrlFrom {
     $o = $Origin.TrimEnd("/")
     if ($o -match "/admin$") { return "$o/" }
     return "$o/admin/"
+}
+
+# Get-HostOf：取地址里的主机部分（去掉最后一个冒号之后的端口）。
+function Get-HostOf {
+    param([string]$Addr)
+    if (-not $Addr) { return "" }
+    if ($Addr -match ":") { return $Addr.Substring(0, $Addr.LastIndexOf(":")) }
+    return $Addr
+}
+
+# Test-LoopbackListen：是不是只绑回环（只有本机能连上）。
+#
+# ⚠ 不能用 `-like "[::1]*"` 那种写法：PowerShell 的 `-like` 里 `[` 是字符类，
+# `[::1]` 会变成"以 : 或 1 开头"，把 `:8080` 这种也算成回环。所以走正则 + 去端口。
+function Test-LoopbackListen {
+    param([string]$Addr)
+    if (-not $Addr) { return $false }
+    if ($Addr -match "^\[?::1\]?$") { return $true }
+    $h = (Get-HostOf $Addr).Trim("[", "]")
+    if ($h -eq "localhost") { return $true }
+    if ($h -eq "::1") { return $true }
+    if ($h -like "127.*") { return $true }
+    return $false
+}
+
+# 管理端与公开站**共用同一个监听**吗？判据是"留空"——
+# 这是 master.yaml 的语义（docs/04 §2.5：admin_listen 只在你想再开一个本地端口
+# 时才需要填；cmd/xb-probe-master 里空值走 merged 分支，在同一个监听上同时提供
+# 公开站与 /admin/）。
+function Test-AdminSharesPublic {
+    if (-not $AdminListen) { return $true }
+    return ($AdminListen -eq $PublicListen)
+}
+
+# Resolve-AdminEntry：算出"后台入口地址"与一句说明（$script:AdminUrl / $script:AdminNote）。
+#
+# 与 deploy-master.sh 的 resolve_admin_entry 是同一套推导，两处必须一致：
+#   · 旧实现只按"有没有 admin_origin"分叉，于是**管理端独立监听**的部署会被印成
+#     https://<公开地址>/admin/ —— 那个地址由公开监听提供服务，而 /admin/ 根本
+#     不在那棵路由树上（真机：公开看板能开、/admin/ 打不开，用户以为后台没装上）。
+#   · 也**不能**拿监听地址当访问地址：0.0.0.0:8081 不是能连的目的地址，
+#     归一成 127.0.0.1:8081 又只在本机有效。
+function Resolve-AdminEntry {
+    param([string]$Scheme)
+    $script:AdminNote = ""
+    $pubHost = ""
+    $pubUrl = $PublicOrigin
+    if ($PublicOrigin) {
+        $pubHost = $PublicOrigin -replace "^[a-zA-Z][a-zA-Z0-9+.-]*://", "" -replace "/.*$", "" -replace ":[0-9]*$", ""
+    } else {
+        $pubHost = Get-HostOf $PublicListen
+        if (-not $pubHost -or $pubHost -eq "0.0.0.0" -or $pubHost -eq "::" -or $pubHost -eq "[::]") { $pubHost = "127.0.0.1" }
+        $pubUrl = "${Scheme}://$pubHost" + ":" + (Get-PortOf $PublicListen)
+    }
+
+    if ($AdminOrigin) {
+        $script:AdminUrl = Get-AdminUrlFrom $AdminOrigin
+    } elseif (Test-AdminSharesPublic) {
+        # 同站：后台就在公开地址的 /admin/ 下。
+        $script:AdminUrl = Get-AdminUrlFrom $pubUrl
+        $script:AdminNote = "（同站：后台在公开地址下的 /admin/，与公开看板共用 $PublicListen 这一个监听）"
+    } elseif (Test-LoopbackListen $AdminListen) {
+        $script:AdminUrl = "${Scheme}://$AdminListen/admin/"
+        $script:AdminNote = "（这是**本机**地址：管理端监听 $AdminListen 只在本机可达。公网访问请把管理端监听改成一个对外端口，或用 SSH 隧道：ssh -L 8081:$AdminListen 本机）"
+    } else {
+        $h = $pubHost
+        if (-not $PublicOrigin -and $PubIpForHint) { $h = $PubIpForHint }
+        $script:AdminUrl = "${Scheme}://${h}:" + (Get-PortOf $AdminListen) + "/admin/"
+        if (Test-LoopbackListen $h) {
+            $script:AdminNote = "（管理端是**独立监听**：$AdminListen；这里给的是本机地址，公网请换成这台机器的公网地址加该端口，并确认防火墙已放行）"
+        } else {
+            $script:AdminNote = "（管理端是**独立监听**：$AdminListen；请确认防火墙已放行该端口）"
+        }
+    }
 }
 
 # 用户名只允许字母、数字与 . _ @ -
@@ -905,12 +986,50 @@ if (-not $PublicListenGiven -and $Ask) {
     if (Test-PortOk $v) { $PublicListen = $v } else { Write-Warn2 "$v 不是合法端口，沿用 $PublicListen" }
 }
 
+# 管理端监听：**回车 = 与公开站共用同一个监听**（"与公开站相同"）；填地址则独立监听。
+#
+# 独立监听 + 只绑回环 + 没有反代 = 一个谁也打不开的后台。这不是"配置得不好"，
+# 是**装完就不可用**（公开看板正常、/admin/ 打不开，看起来像"后台没装上"），
+# 所以这里说清楚并给默认值；用户再答一次还是回环就尊重他（SSH 隧道是合理做法）。
 $AdminListenGiven = [bool]$AdminListen
 if (-not $AdminListen) { $AdminListen = $DefaultAdminListen }
 if (-not $AdminListenGiven -and $Ask) {
-    $v = Read-Answer "管理端监听（端口，或 IP:端口；127.0.0.1 表示只有本机能访问）" $AdminListen
-    $v = Normalize-Listen $v "127.0.0.1"
-    if (Test-PortOk $v) { $AdminListen = $v } else { Write-Warn2 "$v 不是合法端口，沿用 $AdminListen" }
+    $AdminMergeLabel = "与公开站相同"
+    $admDefault = $AdminListen
+    if (-not $admDefault) { $admDefault = $AdminMergeLabel }
+    $admTries = 0
+    $admWarned = $false
+    while ($admTries -lt 3) {
+        $v = Read-Answer "管理端监听（回车=$AdminMergeLabel，即与公开站同一个监听、后台在公开地址的 /admin/ 下；也可填 IP:端口 单独开一个）" $admDefault
+        if (-not $v -or $v -eq $AdminMergeLabel -or $v -eq "same" -or $v -eq "merge") {
+            $AdminListen = ""
+            break
+        }
+        $v = Normalize-Listen $v "127.0.0.1"
+        if (-not (Test-PortOk $v)) {
+            Write-Warn2 "$v 不是合法端口，沿用 $(if ($AdminListen) { $AdminListen } else { $AdminMergeLabel })"
+            break
+        }
+        if ($v -eq $PublicListen) {
+            $admTries++
+            Write-Warn2 "管理端与公开站不能监听同一个地址端口（$v）——一个进程无法监听两次。"
+            Write-Host "        想要「同一个域名下的两个路径」：回车（$AdminMergeLabel）即可。" -ForegroundColor Gray
+            $admDefault = $AdminMergeLabel
+            continue
+        }
+        if (-not $admWarned -and (Test-LoopbackListen $v)) {
+            $admWarned = $true
+            Write-Warn2 "管理端只监听 $v：没有反代的话这个后台谁也打不开（公开看板照常、/admin/ 打不开）。"
+            Write-Host "        · 回车 = $AdminMergeLabel（后台在公开地址的 /admin/ 下，不占新端口）" -ForegroundColor Gray
+            Write-Host "        · 或者填 0.0.0.0:8081 单独开一个（记得防火墙放行该端口）" -ForegroundColor Gray
+            Write-Host "        · 确实只想用 SSH 隧道：把 $v 再输一次即可。" -ForegroundColor Gray
+            $admDefault = $AdminMergeLabel
+            continue
+        }
+        $AdminListen = $v
+        break
+    }
+    if ($admTries -ge 3) { $AdminListen = "" }
 }
 
 # 公开 IP 只在"真要问 public_origin"时才去探测：它要发一次外部请求，
@@ -1044,7 +1163,7 @@ if ($Ask) {
     $tlsNote = $TlsMode
     if ($TlsMode -eq "acme") { $tlsNote = "$TlsMode（challenge=$AcmeChallenge）" }
     Write-Host "  公开站监听：$PublicListen"
-    Write-Host "  管理端监听：$AdminListen"
+    Write-Host "  管理端监听：$(if ($AdminListen) { $AdminListen } else { "（与公开站同一个监听：后台在公开地址的 /admin/ 下）" })"
     Write-Host "  公开地址：$(if ($PublicOrigin) { $PublicOrigin } else { '（留空：按请求 Host 回填）' })"
     Write-Host "  管理地址：$(if ($AdminOrigin) { $AdminOrigin } else { '（与公开站同一个域名）' })"
     Write-Host "  TLS：$tlsNote"
@@ -1326,12 +1445,10 @@ if ($TlsMode -eq "none") {
 # ---- 收尾汇总：把"地址到底是什么"直接摆出来 ----
 $pubUrl = $PublicOrigin
 if (-not $pubUrl) { $pubUrl = "${scheme}://$healthAddr" }
-$adminUrl = ""
-if ($AdminOrigin) {
-    $adminUrl = Get-AdminUrlFrom $AdminOrigin
-} else {
-    $adminUrl = "${scheme}://$AdminListen/admin/"
-}
+# 推导过程全在 Resolve-AdminEntry 里（含它踩过的两个坑：拿监听地址当访问地址、
+# 以及"管理端独立监听"时一律印成公开域名下的 /admin/），与 deploy-master.sh 同一套。
+Resolve-AdminEntry $scheme
+$adminUrl = $script:AdminUrl
 $tlsLine = "明文（证书由前置反代负责）"
 switch ($TlsMode) {
     "files" { $tlsLine = "https（证书来自 $TlsCert）" }
@@ -1345,6 +1462,7 @@ Write-Host " 部署完成" -ForegroundColor Green
 Write-Host "============================================================" -ForegroundColor Green
 Write-Host "  公开看板    $pubUrl"
 Write-Host "  管理后台    $adminUrl"
+if ($script:AdminNote) { Write-Host "              $($script:AdminNote)" }
 Write-Host "  传输安全    $tlsLine"
 Write-Host "============================================================" -ForegroundColor Green
 Write-Host ""

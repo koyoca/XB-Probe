@@ -55,13 +55,31 @@ func TestAdminURLIsNotDerivedFromListenAddress(t *testing.T) {
 			"端口语义丢了、地址必然只在回环有效、协议还可能与实际监听不符。", hits)
 	}
 
-	// 反向也要钉：必须真的存在"同站"这条分支（用 public_origin 推导后台地址）。
+	// 反向也要钉：必须真的存在"同站"这条分支（用公开地址推导后台地址）。
 	// 只删掉错的那行、没补上正确的推导，用户拿到的会是空地址或回环地址。
-	must := `ADMIN_URL="$(admin_url_from "$PUBLIC_ORIGIN")"`
+	//
+	// ⚠ 但"同站"的前提是**管理端与公开站共用同一个监听**（admin_listen 留空）。
+	// 早先这里的分支只判"有没有 public_origin"，于是**管理端独立监听**的部署也被
+	// 印成 <公开地址>/admin/ —— 而那个地址由公开监听提供服务，/admin/ 根本不在
+	// 那棵路由树上。真机（腾讯云，selfsigned + 管理端 127.0.0.1:8081）上就是：
+	// 看板能开、按提示访问 /admin/ 打不开，用户以为"后台没装上"。
+	// 所以这条分支的判据里必须出现 admin_shares_public_listener。
+	must := `admin_shares_public_listener`
 	if !strings.Contains(body, must) {
-		t.Errorf("没有找到「同站」分支：%s\n"+
-			"  「同站」的正确表达是「后台在公开域名下的 /admin/」，"+
-			"不是让两个端口监听同一个地址（那不可能）。", must)
+		t.Errorf("找不到「共用同一个监听才算同站」这个判据（%s）：\n"+
+			"  少了它，「管理端独立监听」的部署会被印成公开地址下的 /admin/，"+
+			"而那个地址上根本没有后台。", must)
+	}
+	if !strings.Contains(body, `ADMIN_URL="$(admin_url_from "$_rae_public_url")"`) {
+		t.Error("没有找到「同站」分支：同站的正确表达是「后台在公开地址下的 /admin/」" +
+			"（用公开地址推导），不是让两个端口监听同一个地址（那不可能）。")
+	}
+
+	// 独立监听的分支必须把**管理端自己的端口**带出来：后台不在公开监听上，
+	// 地址里少了这个端口就会指到公开站的路由树上（那里没有 /admin/）。
+	if !strings.Contains(body, `${_rae_h}:${_rae_admin_port}/admin/`) {
+		t.Error("「管理端独立监听」的分支没有带上管理端自己的端口：" +
+			"这个形态下后台不住在公开监听上，地址必须指向管理端监听。")
 	}
 
 	// 用回环地址兜底时必须**说出来**。不说的话，用户会把它当成公网后台地址

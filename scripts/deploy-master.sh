@@ -50,8 +50,10 @@
 #   --data <目录>         数据目录（默认 /var/lib/xb-probe-master）
 #   --bin-dir <目录>      二进制安装目录（默认 /usr/local/bin；只读根文件系统用 /opt/xb-probe-master）
 #   --public-listen <地址> 公开站监听（默认 0.0.0.0:8080；只写端口如 9000 等价于 0.0.0.0:9000）
-#   --admin-listen  <地址> 管理端监听（默认 127.0.0.1:8081 —— 只监听回环，
-#                          公网访问请走反代，或显式写 0.0.0.0:8081 自行承担风险）
+#   --admin-listen  <地址> 管理端监听（留空 = 与公开站共用同一个监听，后台在公开
+#                          地址的 /admin/ 下——"Master 自己终结 TLS"时的默认值；
+#                          填地址则独立监听，默认 127.0.0.1:8081 只监听回环，
+#                          那种形态只适合反代在前，或只用 SSH 隧道访问后台）
 #   --dist-base <URL>     发布文件镜像前缀（不放行则由 Master 自己提供 /dist/）
 #   --no-service          只安装不注册服务（容器里用）
 #   --force-config        覆盖已有配置文件
@@ -158,7 +160,11 @@ DIR="${PROBE_DIR:-/etc/xb-probe-master}"
 DATA="${PROBE_DATA:-/var/lib/xb-probe-master}"
 BIN_DIR="${PROBE_BIN_DIR:-/usr/local/bin}"
 PUBLIC_LISTEN="${PROBE_PUBLIC_LISTEN:-0.0.0.0:8080}"
+# 管理端监听。**空串是一个合法的、有意义的值**：与公开站共用同一个监听
+# （后台在公开地址的 /admin/ 下，即"同站"）。见 admin_shares_public_listener。
 ADMIN_LISTEN="${PROBE_ADMIN_LISTEN:-127.0.0.1:8081}"
+# 问答里"共用同一个监听"的说法。用户看得懂、也能照着敲；内部一律归一成空串。
+ADMIN_MERGE_LABEL="与公开站相同"
 PUBLIC_ORIGIN="${PROBE_PUBLIC_ORIGIN:-}"
 ADMIN_ORIGIN="${PROBE_ADMIN_ORIGIN:-}"
 DIST_BASE="${PROBE_DIST_BASE:-}"
@@ -253,6 +259,9 @@ PUBLIC_LISTEN_GIVEN=""
 ADMIN_LISTEN_GIVEN=""
 # 公开监听这个值是不是来自"上次的答案"（见 ans_get PUBLIC_LISTEN 那一段）。
 PUBLIC_LISTEN_FROM_ANSWERS=""
+ADMIN_LISTEN_FROM_ANSWERS=""
+# 被丢弃的旧管理端监听（只绑回环、而这次没有反代）。见"管理端监听"的默认值那一段。
+ADMIN_LISTEN_STALE=""
 TLS_MODE_GIVEN=""
 ADMIN_USER_GIVEN=""
 ACME_CHALLENGE_GIVEN=""
@@ -294,7 +303,9 @@ deploy-master.sh —— Master 一键部署
   --data <目录>             数据目录（默认 /var/lib/xb-probe-master）
   --bin-dir <目录>          二进制安装目录（默认 /usr/local/bin）
   --public-listen <地址>     默认 0.0.0.0:8080（只写端口如 9000 = 0.0.0.0:9000）
-  --admin-listen <地址>      默认 127.0.0.1:8081（只监听回环，公网请走反代）
+  --admin-listen <地址>      留空 = 与公开站共用同一个监听（后台在公开地址的
+                            /admin/ 下）；填地址则独立监听——默认 127.0.0.1:8081
+                            只监听回环，那种形态需要反代在前（或只用 SSH 隧道）
   --dist-base <URL>         发布文件镜像前缀
   --dist-pull <all|local|skip>
                             部署完成后把 Agent 发布文件拉进 data_dir/dist/
@@ -764,7 +775,10 @@ if [ -z "$FRESH_ANSWERS" ]; then
 		PUBLIC_LISTEN_FROM_ANSWERS="1"
 	fi
 	_v="$(ans_get ADMIN_LISTEN)"
-	if [ -z "$ADMIN_LISTEN_GIVEN" ] && known_nonempty "$_v"; then ADMIN_LISTEN="$_v"; fi
+	if [ -z "$ADMIN_LISTEN_GIVEN" ] && known_nonempty "$_v"; then
+		ADMIN_LISTEN="$_v"
+		ADMIN_LISTEN_FROM_ANSWERS="1"
+	fi
 	_v="$(ans_get TLS_MODE)"
 	if [ -z "$TLS_MODE_GIVEN" ] && known_nonempty "$_v"; then TLS_MODE="$_v"; fi
 	_v="$(ans_get ACME_CHALLENGE)"
@@ -774,6 +788,13 @@ if [ -z "$FRESH_ANSWERS" ]; then
 	_v="$(ans_get TLS_TERMINATOR)"
 	if [ -z "$TLS_TERMINATOR_GIVEN" ] && known_nonempty "$_v"; then TLS_TERMINATOR="$_v"; fi
 fi
+
+# "与公开站相同"（同站）是**用户看得懂的说法**，但配置里必须落成空串。
+# 命令行、环境变量、记忆三条来路都在这里归一，免得多处各写一遍。
+# （记忆里那句"回环管理端监听"能不能用，取决于形态，所以放到问完形态之后再判。）
+case "${ADMIN_LISTEN:-}" in
+"" | "$ADMIN_MERGE_LABEL" | same | merge) ADMIN_LISTEN="" ;;
+esac
 
 # 答案文件的位置与"这次是否复用了它"必须在问答开始前告诉用户。
 # 不说的话会出现最糟的一种情况：用户以为自己答的每一项都生效了，实际上方括号里
@@ -1895,6 +1916,128 @@ admin_url_from() {
 	esac
 }
 
+# split_host <地址:端口>：取主机部分。取**最后一个**冒号之前，IPv6 字面量也对。
+split_host() {
+	case "$1" in
+	*:*) printf '%s' "${1%:*}" ;;
+	*) printf '%s' "$1" ;;
+	esac
+}
+
+# reachable_host <监听地址> [兜底主机]：把"监听所有网卡"的写法换成**能连**的地址。
+# 0.0.0.0/[::] 是"监听哪块网卡"的写法，不是目的地址：它出现在 URL 里是错的，
+# 而 0.0.0.0:8080 被归一成 127.0.0.1:8080 又只在本机有效——两个坑都踩过。
+reachable_host() {
+	case "$(split_host "$1")" in
+	'' | '0.0.0.0' | '::' | '[::]') printf '%s' "${2:-127.0.0.1}" ;;
+	*) printf '%s' "$(split_host "$1")" ;;
+	esac
+}
+
+# is_loopback_listen <地址:端口>：是不是只绑回环（只有本机能连上）。
+#
+# ⚠ `[::1]` 那一段的**引号是必须的**：case 的模式里 `[...]` 是字符类，
+# 不引起来的 `[::1]:*` 会变成"以 : 或 1 开头"，把 `1:8080` 这种也判成回环。
+is_loopback_listen() {
+	case "$1" in
+	'' ) return 1 ;;
+	127.* | localhost | localhost:* | '[::1]:'* | '::1':* | '::1') return 0 ;;
+	*) return 1 ;;
+	esac
+}
+
+# 管理端与公开站**共用同一个监听**吗？
+#
+# 判据是"留空"，这是 master.yaml 的语义（docs/04 §2.5：`admin_listen` 只在你
+# 确实想再开一个本地端口时才需要填；`cmd/xb-probe-master` 里空值走 merged 分支，
+# 在同一个监听上同时提供公开站与 /admin/）。
+# 让"两个监听字符串相等"也算，是为了兼容手工改过的配置。
+admin_shares_public_listener() {
+	if [ -z "${ADMIN_LISTEN:-}" ] || [ "${ADMIN_LISTEN:-}" = "${PUBLIC_LISTEN:-}" ]; then
+		return 0
+	fi
+	return 1
+}
+
+# resolve_admin_entry <对外协议>：算出"后台入口地址"与一句说明。
+#
+# 写进全局 ADMIN_URL / ADMIN_NOTE。两处用它：收尾总结、--no-service 的前台运行提示。
+#
+# ⚠ 这里曾经有一处**实打实的错**，用户直接撞上了：
+#
+#	ADMIN_URL="$SCHEME://$ADMIN_ADDR/admin/"     # ADMIN_ADDR = 归一化后的监听地址
+#
+# ADMIN_ADDR 来自 ADMIN_LISTEN，而它是一个**监听**地址：0.0.0.0:8080 会被归一化成
+# 127.0.0.1:8080（因为 0.0.0.0 不是能连的目的地址）。于是用户填的是 0.0.0.0:8080、
+# 打印出来的却是 https://127.0.0.1:8080/admin/——那个地址既错了端口语义
+# （用户填的和印出来的不一致），又是"只有本机能打开"的回环地址，还是 https
+# （而 tls.mode=none 时根本没有 https 监听）。三个错叠在同一个字符串里。
+#
+# 修掉那一处之后还留着第二个：分叉只按"有没有 public_origin"，于是**管理端独立
+# 监听**的部署一律被印成 https://<公开域名>/admin/ —— 而那个地址由公开监听提供
+# 服务，/admin/ 根本不在那棵路由树上。真机（腾讯云，selfsigned + 管理端
+# 127.0.0.1:8081）上就是：公开看板能开、按提示访问 /admin/ 得到 404/主题页，
+# 用户以为"后台没装上"。
+#
+# 所以正确的推导必须按**用户实际怎么访问**分四种，而不是"从监听地址反推":
+#   ① 配了反代（Caddy）→ 走域名，与内部监听端口无关；
+#   ② 显式配了 admin_origin → 就用它（有人把后台放在另一个域名下）；
+#   ③ 管理端与公开站共用同一个监听 → 后台在公开地址的 /admin/ 下（同站）；
+#   ④ 管理端独立监听 → **就是那个监听地址**：只绑回环就照实说是"本机地址"，
+#      绑对外就把公开主机名与它的端口拼出来，并提醒放行端口。
+resolve_admin_entry() {
+	_rae_scheme="$1"
+	# 后台在"本机/对外"到底长什么样，取决于管理端自己的监听地址。
+	_rae_admin_host="$(split_host "${ADMIN_LISTEN:-}")"
+	_rae_admin_port="$(split_port "${ADMIN_LISTEN:-}")"
+	# 公开地址：优先用户填的 public_origin；没填时用"能连"的公开监听地址。
+	if [ -n "${PUBLIC_ORIGIN:-}" ]; then
+		_rae_public_url="$PUBLIC_ORIGIN"
+		_rae_public_host="$(printf '%s' "$PUBLIC_ORIGIN" | sed -e 's|^[a-zA-Z][a-zA-Z0-9+.-]*://||' -e 's|/.*$||' -e 's|:[0-9]*$||')"
+	else
+		_rae_public_host="$(reachable_host "$PUBLIC_LISTEN")"
+		_rae_public_url="$_rae_scheme://$_rae_public_host:$(split_port "$PUBLIC_LISTEN")"
+	fi
+
+	ADMIN_NOTE=""
+	if [ "${TLS_TERMINATOR:-}" = "caddy" ]; then
+		# 反代形态：对外就是域名，后台在同一个域名的 /admin/ 下（同站）或另一个域名。
+		if [ -n "${ADMIN_ORIGIN:-}" ]; then
+			ADMIN_URL="$(admin_url_from "$ADMIN_ORIGIN")"
+		else
+			_rae_first="$(printf '%s' "${PROXY_DOMAINS:-}" | cut -d, -f1)"
+			if [ -z "$_rae_first" ]; then _rae_first="$_rae_public_host"; fi
+			ADMIN_URL="https://$_rae_first/admin/"
+			ADMIN_NOTE="（由 Caddy 反代到 ${ADMIN_LISTEN:-$PUBLIC_LISTEN}；证书自动续期）"
+		fi
+	elif [ -n "${ADMIN_ORIGIN:-}" ]; then
+		ADMIN_URL="$(admin_url_from "$ADMIN_ORIGIN")"
+	elif admin_shares_public_listener; then
+		# 同站：后台就在公开地址的 /admin/ 下。**这才是"同站"的正确表达**——
+		# 不是"让两个端口监听同一个地址"（那不可能），而是"同一个域名下的两个路径"。
+		ADMIN_URL="$(admin_url_from "$_rae_public_url")"
+		ADMIN_NOTE="（同站：后台在公开地址下的 /admin/，与公开看板共用 $PUBLIC_LISTEN 这一个监听）"
+	elif is_loopback_listen "$ADMIN_LISTEN"; then
+		# 独立监听、且只绑回环：**照实说是本机地址**，并给出能用的两条路。
+		# 不说明的话，用户会把这个地址当成"公网后台地址"贴给别人或写进笔记。
+		ADMIN_URL="$_rae_scheme://${ADMIN_LISTEN}/admin/"
+		ADMIN_NOTE="（这是**本机**地址：管理端监听 $ADMIN_LISTEN 只在本机可达。公网访问请把管理端监听改成一个对外端口，或用 SSH 隧道：ssh -L 8081:$ADMIN_LISTEN 本机）"
+	else
+		# 独立监听、且对外可连：同一个主机、另一个端口。
+		# 主机名优先用公开地址里的那个；没填公开地址时用探测到的公网 IP
+		# （明文直连 IP 的部署就是这种），都拿不到才落回本机地址——那种情况下
+		# 要把"这是本机地址、公网请换成公网地址"说清楚，否则用户会当成公网地址。
+		_rae_h="$_rae_public_host"
+		if [ -z "${PUBLIC_ORIGIN:-}" ] && [ -n "${PUBIP:-}" ]; then _rae_h="$PUBIP"; fi
+		ADMIN_URL="$_rae_scheme://${_rae_h}:${_rae_admin_port}/admin/"
+		if is_loopback_listen "$_rae_h"; then
+			ADMIN_NOTE="（管理端是**独立监听**：$ADMIN_LISTEN；这里给的是本机地址，公网请换成这台机器的公网地址加该端口，并确认防火墙已放行）"
+		else
+			ADMIN_NOTE="（管理端是**独立监听**：$ADMIN_LISTEN；请确认防火墙已放行该端口）"
+		fi
+	fi
+}
+
 # admin_user_ok：用户名只允许字母、数字与 . _ @ -
 # 有这个判断是因为实际发生过：交互提示"管理员用户名 [ops]"时，有人把上一题的
 # 答案（一个 host:port）又粘了一遍，脚本照单全收，然后 init-admin 建出一个
@@ -2165,6 +2308,53 @@ EOF
 	fi
 fi
 
+# ---- 管理端监听：默认值随"谁终结 TLS"变 ----
+#
+# 它的取值空间比别的项多一个**空串**：空 = 与公开站共用同一个监听
+# （后台在公开地址的 /admin/ 下，也就是"同站"）。见 admin_shares_public_listener。
+#
+#   · caddy 形态 → 127.0.0.1:8081。Caddy 会把 /admin/ 与 /api/admin/ 分流到这个
+#     回环端口，这正是安全默认想要的：管理端不直接暴露在公网上。
+#   · 其它形态（Master 自己终结 TLS）→ **空**（与公开站同一个监听）。
+#     这里没有反代，回环端口没有任何东西能把它接出来：公开看板照常，但
+#     https://<你的地址>/admin/ 会落到公开监听的路由树上、那里没有 /admin/。
+#     真机（腾讯云，v0.1.4）上就是这样：用户选了 selfsigned，看板能开、
+#     按脚本提示访问后台却打不开，只能怀疑"后台没装上"。而脚本当时印出来的
+#     后台地址恰恰是 https://<公开地址>/admin/ —— 它只对"共用监听"成立。
+if [ -z "$ADMIN_LISTEN_GIVEN" ]; then
+	case "$TLS_TERMINATOR" in
+	caddy) _al_default="127.0.0.1:8081" ;;
+	*) _al_default="" ;;
+	esac
+	if [ -n "$ADMIN_LISTEN_FROM_ANSWERS" ]; then
+		# 记忆里那句"只绑回环"在没有反代的形态下是**死值**：没有人能把它接出来。
+		# 它不作为默认值（否则这次装完还是打不开后台），但也不删——用户确实可能
+		# 只想用 SSH 隧道访问后台，问答里直接输入即可。所以要说清为什么不用它了，
+		# 否则就成了"我上次答的没生效"。
+		#
+		# 别的记忆值一律不动：那是用户显式答过的（比如 0.0.0.0:8081），
+		# 与公开监听同一条规矩——"来自上次答案的值不动，但把后果说清楚"。
+		if [ -z "$_al_default" ] && is_loopback_listen "$ADMIN_LISTEN"; then
+			ADMIN_LISTEN_STALE="$ADMIN_LISTEN"
+			ADMIN_LISTEN=""
+		fi
+	else
+		ADMIN_LISTEN="$_al_default"
+	fi
+fi
+
+# 被丢弃的旧管理端监听要说清"为什么不用它了"——否则又是一次
+# "我上次答的没生效"。这句话在问答开始前就印出来，用户还有机会改回去。
+if [ -n "$ADMIN_LISTEN_STALE" ]; then
+	cat >&2 <<EOF
+
+注意：上次答的管理端监听是 $ADMIN_LISTEN_STALE，但这次是「Master 自己终结 TLS、
+      没有前置反代」，那个地址谁也接不出来（后台会变成"只有本机能开"）。
+      本次改用「$ADMIN_MERGE_LABEL」：后台在公开地址的 /admin/ 下、不占新端口。
+      确实只想用 SSH 隧道访问后台：下面的管理端监听把它再输一次即可。
+EOF
+fi
+
 # 管理端监听：这里除了端口合法性，还要判**与公开站是否撞车**。
 #
 # 撞车不是"配置得不好"，而是**装不起来**：一个进程没法同时监听两次同一个
@@ -2174,25 +2364,50 @@ fi
 # 所以他看到的是"部署完成"后面跟着一个退出的服务。
 #
 # "同站"这个需求**不需要**两个进程监听同一个端口：同站是指两个路径在同一个
-# 域名下，那是由反代按路径转发实现的（或者由 site.layout=single 让 Master
-# 自己在同一个监听上同时提供两套路径）。所以撞车时重问，并把正确做法说清楚。
+# 域名下，而 Master 支持在**同一个监听**上同时提供两套路径（admin_listen 留空，
+# 见 cmd/xb-probe-master 的 merged 分支），也可以由反代按路径转发实现。
+# 所以撞车时重问，并把正确做法说清楚。
 _admin_tries=0
+_adm_loop_warned=""
+_adm_default="${ADMIN_LISTEN:-$ADMIN_MERGE_LABEL}"
 while [ -z "$ADMIN_LISTEN_GIVEN" ] && [ -n "$ASK" ]; do
-	ask "管理端监听（端口，或 IP:端口；127.0.0.1 表示只有本机能访问）" "$ADMIN_LISTEN"
+	ask "管理端监听（回车=$ADMIN_MERGE_LABEL，即与公开站同一个监听、后台在公开地址的 /admin/ 下；也可填 IP:端口 单独开一个）" "$_adm_default"
+	case "$ASK_REPLY" in
+	"" | "$ADMIN_MERGE_LABEL" | same | merge)
+		ADMIN_LISTEN=""
+		break
+		;;
+	esac
 	_new_listen="$(normalize_listen "$ASK_REPLY" "127.0.0.1")"
 	if ! listen_port_ok "$_new_listen"; then
-		printf '警告：%s 不是合法端口，沿用 %s\n' "$ASK_REPLY" "$ADMIN_LISTEN" >&2
+		printf '警告：%s 不是合法端口，沿用 %s\n' "$ASK_REPLY" "${ADMIN_LISTEN:-$ADMIN_MERGE_LABEL}" >&2
 		break
 	fi
 	if [ "$_new_listen" = "$PUBLIC_LISTEN" ]; then
 		printf '错误：管理端与公开站不能监听同一个地址端口（%s）——一个进程无法监听两次。\n' "$_new_listen" >&2
-		printf '      想要「同一个域名下的两个路径」，请改管理端端口（如 127.0.0.1:8081），\n' >&2
-		printf '      再用反代按路径 /admin/ 转发；或者干脆让两边都留在同一个监听上。\n' >&2
+		printf '      想要「同一个域名下的两个路径」，请直接回车（%s），\n' "$ADMIN_MERGE_LABEL" >&2
+		printf '      或者给管理端另开一个端口（如 127.0.0.1:8081）再由反代按 /admin/ 转发。\n' >&2
 		_admin_tries=$((_admin_tries + 1))
 		if [ "$_admin_tries" -ge 3 ]; then
-			printf '      连续三次都相同，改用默认值 %s。\n' "$ADMIN_LISTEN" >&2
+			printf '      连续三次都相同，改用「%s」。\n' "$ADMIN_MERGE_LABEL" >&2
+			ADMIN_LISTEN=""
 			break
 		fi
+		continue
+	fi
+	# 独立监听 + **没有反代** + 只绑回环 = 一个谁也打不开的后台。
+	# 这不是"配置得不好"，是**装完就不可用**（公开看板正常、后台打不开），
+	# 所以在这里说清楚并给默认值；用户再答一次还是回环就尊重他（SSH 隧道合理）。
+	if [ "$TLS_TERMINATOR" != "caddy" ] && [ -z "$_adm_loop_warned" ] &&
+		is_loopback_listen "$_new_listen"; then
+		_adm_loop_warned="1"
+		printf '\n注意：这次是 Master 自己终结 TLS，**没有前置反代**。\n' >&2
+		printf '      管理端只监听 %s 的话，谁也接不出来：公开看板照常，\n' "$_new_listen" >&2
+		printf '      但 https://<你的地址>/admin/ 打不开（真机上就是这么撞上的）。\n' >&2
+		printf '      · 回车 = %s（后台在公开地址的 /admin/ 下，不占新端口，推荐）\n' "$ADMIN_MERGE_LABEL" >&2
+		printf '      · 或者填 0.0.0.0:8081 单独开一个（记得防火墙放行该端口）\n' >&2
+		printf '      · 确实只想用 SSH 隧道访问后台：把 %s 再输一次即可。\n' "$_new_listen" >&2
+		_adm_default="$ADMIN_MERGE_LABEL"
 		continue
 	fi
 	ADMIN_LISTEN="$_new_listen"
@@ -2205,7 +2420,8 @@ done
 if [ "$PUBLIC_LISTEN" = "$ADMIN_LISTEN" ]; then
 	echo "错误：公开站与管理端不能监听同一个地址端口（$PUBLIC_LISTEN）。" >&2
 	echo "      一个进程无法在同一地址端口上监听两次，启动时会以" >&2
-	echo "      「address already in use」退出。请给管理端换一个端口。" >&2
+	echo "      「address already in use」退出。" >&2
+	echo "      想让后台跟公开看板共用一个监听：把管理端监听留空（$ADMIN_MERGE_LABEL）。" >&2
 	exit 2
 fi
 
@@ -2323,7 +2539,7 @@ if [ -n "$ASK" ]; then
 		printf '  %s\n' "（想全部重答一遍：PROBE_FRESH_ANSWERS=1 重跑本脚本）" >&2
 	fi
 	printf '  %s：%s\n' "公开站监听" "$PUBLIC_LISTEN" >&2
-	printf '  %s：%s\n' "管理端监听" "$ADMIN_LISTEN" >&2
+	printf '  %s：%s\n' "管理端监听" "${ADMIN_LISTEN:-（与公开站同一个监听：后台在公开地址的 /admin/ 下）}" >&2
 	printf '  %s：%s\n' "公开地址" "${PUBLIC_ORIGIN:-（留空：按请求 Host 回填）}" >&2
 	printf '  %s：%s\n' "管理地址" "${ADMIN_ORIGIN:-（与公开站同一个域名）}" >&2
 	# 清单里的 TLS 一行要说清"对外是 http 还是 https、证书谁办"，
@@ -2668,7 +2884,7 @@ render_caddyfile() {
 
 	echo "$CADDY_HEAD"
 	echo "# Caddy 负责 https（证书自动申请与续期）并把请求反代给 Master。"
-	echo "# 公开站 $PUBLIC_LISTEN、管理端 $ADMIN_LISTEN（都是明文，证书与 443 由 Caddy 管）。"
+	echo "# 公开站 $PUBLIC_LISTEN、管理端 ${ADMIN_LISTEN:-$PUBLIC_LISTEN（与公开站共用同一个监听）}（都是明文，证书与 443 由 Caddy 管）。"
 	echo
 	if [ -n "$_adm" ] && [ "$_adm" != "$_pub" ]; then
 		# 分离形态。管理域名的 /admin/ 由它自己兜；公开域名**显式拒绝** /admin/，
@@ -3041,7 +3257,7 @@ if [ -f "$CFG" ] && [ -z "$FORCE_CONFIG" ]; then
 	fi
 	if [ "$_o_adml" != "$ADMIN_LISTEN" ]; then
 		_cfg_diff="$_cfg_diff
-      · 管理监听：${_o_adml:-（无）} → $ADMIN_LISTEN"
+      · 管理监听：${_o_adml:-（与公开站同一个监听）} → ${ADMIN_LISTEN:-（与公开站同一个监听）}"
 	fi
 	if [ "$_o_pubo" != "$PUBLIC_ORIGIN" ]; then
 		_cfg_diff="$_cfg_diff
@@ -3207,18 +3423,12 @@ if [ -n "$NO_SERVICE" ]; then
 	esac
 	echo "    前台运行：$BIN_DIR/xb-probe-master -config $CFG"
 	echo
-	# 与收尾那段同一个道理：ADMIN_ORIGIN 才是"对外地址"，没给时给的本机地址
-	# 必须**说明它只在本机有效**，否则会被当成公网后台地址记下来。
-	if [ -n "$ADMIN_ORIGIN" ]; then
-		_ns_admin="$(admin_url_from "$ADMIN_ORIGIN")"
-		_ns_note=""
-	else
-		_ns_admin="$(admin_url_from "${PUBLIC_ORIGIN:-$_ns_scheme://$ADMIN_LISTEN}")"
-		_ns_note="（本机地址；管理端 $ADMIN_LISTEN 只在本机可达，公网请走反代）"
-	fi
+	# 与收尾那段**共用**同一份推导：两处各写一遍的下场是"改一处＝没改"，
+	# 而这两处印的是同一个东西（后台入口地址），措辞一致才不会被当成两个结论。
+	resolve_admin_entry "$_ns_scheme"
 	echo "  公开看板    ${PUBLIC_ORIGIN:-$_ns_scheme://$PUBLIC_LISTEN}"
-	echo "  管理后台    $_ns_admin"
-	if [ -n "$_ns_note" ]; then echo "              $_ns_note"; fi
+	echo "  管理后台    $ADMIN_URL"
+	if [ -n "$ADMIN_NOTE" ]; then echo "              $ADMIN_NOTE"; fi
 	echo
 	exit 0
 fi
@@ -4206,56 +4416,10 @@ fi
 # 是一串命令行片段而不是"我的看板在哪儿、后台在哪儿"——于是最常见的下一步
 # 是回头 SSH 进来翻 master.yaml。地址本来就是脚本自己算出来的，没有理由不印。
 #
-# ⚠ 这里曾经有一处**实打实的错**，用户直接撞上了：
-#
-#     ADMIN_URL="$SCHEME://$ADMIN_ADDR/admin/"     # ADMIN_ADDR = 归一化后的监听地址
-#
-# ADMIN_ADDR 来自 ADMIN_LISTEN，而它是一个**监听**地址：0.0.0.0:8080 会被归一化成
-# 127.0.0.1:8080（因为 0.0.0.0 不是能连的目的地址）。于是用户填的是 0.0.0.0:8080、
-# 打印出来的却是 https://127.0.0.1:8080/admin/——那个地址既错了端口语义
-# （用户填的和印出来的不一致），又是"只有本机能打开"的回环地址，还是 https
-# （而 tls.mode=none 时根本没有 https 监听）。三个错叠在同一个字符串里。
-#
-# 正确的推导必须按**用户实际怎么访问**分三种情况，而不是"从监听地址反推"：
-#   ① 配了反代（Caddy）→ 走域名，与内部监听端口无关；
-#   ② 同站（admin_origin 留空但有 public_origin）→ 后台在公开域名的 /admin/ 下；
-#   ③ 什么都没有（明文直连 IP）→ 只能给个"本机可达"的提示地址，且必须说明
-#      它只在本机有效，以及公网该怎么访问。
+# 推导过程全在 resolve_admin_entry 里（含它踩过的两个坑：拿监听地址当访问地址、
+# 以及"管理端独立监听"时一律印成公开域名下的 /admin/）。这里只负责调用它。
 PUBLIC_URL="${PUBLIC_ORIGIN:-$SCHEME://$HEALTH_ADDR}"
-# 本机可达的地址，用来在"没有对外域名"时给一个能立刻打开的东西。
-# 仍然要归一化（0.0.0.0 不是可连的目的地址），但**只在真的用它时才用**。
-ADMIN_ADDR="$ADMIN_LISTEN"
-case "$ADMIN_ADDR" in
-0.0.0.0:*) ADMIN_ADDR="127.0.0.1:${ADMIN_ADDR#0.0.0.0:}" ;;
-"[::]:"*) ADMIN_ADDR="127.0.0.1:${ADMIN_ADDR#\[::\]:}" ;;
-":::" | "[::]") ADMIN_ADDR="127.0.0.1" ;;
-esac
-ADMIN_NOTE=""
-if [ "$TLS_TERMINATOR" = "caddy" ]; then
-	# 反代形态：对外就是域名，后台在同一个域名的 /admin/ 下（同站）或另一个域名。
-	if [ -n "$ADMIN_ORIGIN" ]; then
-		ADMIN_URL="$(admin_url_from "$ADMIN_ORIGIN")"
-	else
-		_cd_first="$(printf '%s' "${PROXY_DOMAINS:-}" | cut -d, -f1)"
-		if [ -z "$_cd_first" ]; then
-			_cd_first="$(printf '%s' "$PUBLIC_ORIGIN" | sed -e 's|^[a-zA-Z][a-zA-Z0-9+.-]*://||' -e 's|/.*$||' -e 's|:[0-9]*$||')"
-		fi
-		ADMIN_URL="https://$_cd_first/admin/"
-		ADMIN_NOTE="（由 Caddy 反代到 $ADMIN_LISTEN；证书自动续期）"
-	fi
-elif [ -n "$ADMIN_ORIGIN" ]; then
-	ADMIN_URL="$(admin_url_from "$ADMIN_ORIGIN")"
-elif [ -n "$PUBLIC_ORIGIN" ]; then
-	# 同站：后台就在公开域名的 /admin/ 下。**这才是"同站"的正确表达**——
-	# 不是"让两个端口监听同一个地址"（那不可能），而是"同一个域名下的两个路径"。
-	ADMIN_URL="$(admin_url_from "$PUBLIC_ORIGIN")"
-	ADMIN_NOTE="（同站：在公开域名下的 /admin/；站点形态可在「设置 → 站点形态」调整）"
-else
-	# 既没有对外域名也没有反代：只能给个本机地址，并**明确说明**它只在本机有效。
-	# 不说明的话，用户会把这个地址当成"公网后台地址"贴给别人或写进笔记。
-	ADMIN_URL="$SCHEME://$ADMIN_ADDR/admin/"
-	ADMIN_NOTE="（这是**本机**地址：管理端监听 $ADMIN_LISTEN 只在本机可达）"
-fi
+resolve_admin_entry "$SCHEME"
 
 echo
 echo "============================================================"
