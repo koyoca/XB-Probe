@@ -491,10 +491,12 @@ func TestAdminLoginPageIsThemed(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestNodeFeeIsGated 续费价格行必须能被 public.cards 的 node_fee 关掉，
-// 并且与其它区块一样"缺值渲染 — 不省略行"。
+// 且在"这个节点没有价格也没有续费信息"时**整行不显示**。
 //
-// 价格是**全局开关**（不是逐节点可选）：一旦某些节点开、某些关，
-// 同一行网格里卡片高度就会参差——所以缺价格时渲染 "—" 而不是隐藏整行。
+// 价格开关是**全局**的（不是逐节点可选）；"有没有值"是逐节点的，但两者不冲突：
+// 行高由 .net-line 固定，隐藏价格行不会让卡片高度参差。
+// （2026-10-15 用户反馈："没有设置续费或者节点价格时候，节点卡片会显示 续费 - ，
+// 同样不合理，应该直接不显示"——所以缺值时的判据从"渲染 —"改成了"不渲染"。）
 func TestNodeFeeIsGated(t *testing.T) {
 	src := readFrontend(t, "internal/theme/builtin/app.js")
 	if !strings.Contains(src, "'data-card', 'node_fee'") {
@@ -510,20 +512,24 @@ func TestNodeFeeIsGated(t *testing.T) {
 			t.Errorf("续费价格的文案判断缺少 %s：终身/一次性/未配置三种情况会串成一个", want)
 		}
 	}
-	// 缺价格时不能省略行：占位必须是 "—"。
+	// 缺价格时的文案仍是占位符 "—"——它现在用来**判断该行是否显示**
+	// （见下面的 c.hasFee）：先算出"有没有值"，再决定显隐，一步都不能少。
 	if !strings.Contains(src, "var feeText = '—';") {
-		t.Error("续费价格的缺省文案应为 \"—\"（不省略行，否则卡片高度会参差）")
+		t.Error("续费价格的缺省文案应为 \"—\"：它是 c.hasFee 的判据（有值才显示那一行）")
 	}
 	// 第 112 项：价格与实时速率同行（.net-line：速率左、价格右），
 	// 不再是独立一行；两个开关各自只管自己的那一半。
 	if !strings.Contains(src, "rateLine.appendChild(fee);") {
 		t.Error("公开看板 .n-fee 没有挂进 .net-line：价格又变成独立一行了")
 	}
+	// 价格行还要求"这个节点确实有价格/续费信息"（c.hasFee）：没配价格与续费的
+	// 节点不再挂一行"续费 —"（用户反馈）。开关本身（cardOn）的判断必须保留。
 	for _, want := range []string{
-		"c.fee.hidden = !cardOn('node_fee');",
+		"c.fee.hidden = !cardOn('node_fee') || !c.hasFee;",
 		"c.rateRow.hidden = !cardOn('node_net');",
 		"c.totRow.hidden = !cardOn('node_net');",
-		"c.net.hidden = !(cardOn('node_fee') || cardOn('node_net'));",
+		"c.net.hidden = !((cardOn('node_fee') && c.hasFee) || cardOn('node_net'));",
+		"c.hasFee = feeText !== '—';",
 	} {
 		if !strings.Contains(src, want) {
 			t.Errorf("公开看板卡片显隐逻辑缺少 %q：开关组合下卡片高度会跳", want)
@@ -562,6 +568,10 @@ func TestAdminNodeCardShowsFee(t *testing.T) {
 	}
 	if !strings.Contains(upd, "setText(c.feeV, feeText);") {
 		t.Error("后台算出了 feeText 却没写进 DOM：金额永远不会显示")
+	}
+	// 没有价格/续费信息时整行隐藏（用户反馈：后台卡片同样不该挂一行"续费 —"）。
+	if !strings.Contains(upd, "c.fee.hidden = feeText === '—';") {
+		t.Error("后台没有在「没有价格/续费信息」时隐藏整行：卡片会多出一行无信息量的「续费 —」")
 	}
 	// 第 112 项：价格不再单独占一行，而是与实时速率同行（速率左、价格右）。
 	// 后台没有逐块开关，价格恒显示——但 DOM 结构必须与公开看板一致。

@@ -545,19 +545,32 @@ func countConns() (int, bool) {
 
 // detectVirt 判断虚拟化 / 容器类型。
 //
-// 判定顺序按"证据强度"排：容器标记（/.dockerenv、cgroup 路径）比 /proc/cpuinfo
-// 里的 QEMU 字样更可靠——LXC 里跑 KVM 虚机时两者会同时命中，而实际身份是 LXC。
+// 判定顺序按"证据强度"排：
 //
-// cgroup v2 统一挂载在 /sys/fs/cgroup，路径里不再有 "lxc"/"docker" 字样，
-// 因此 v2 下改为读 /proc/self/mountinfo 与 /proc/1/cgroup 的 cgroup 命名空间
-// 以及 /run/systemd 的存在性来判断（v2 容器通常没有 systemd）。
+//	① 容器运行时**自报**的名字（环境变量 container=）——运行时自己说的，最硬；
+//	② 容器专属的物证（/.dockerenv、cgroup 路径里的运行时名）；
+//	③ "我们在不在容器里"这个**隔离事实**（PID 命名空间）。只要在，就绝不许把
+//	   宿主机的指纹当成本机身份——容器里能看到的 DMI / cpuinfo 全是宿主的；
+//	④ 最后才是宿主机的虚拟化指纹（cpuinfo 的 QEMU、DMI 厂商串）。
+//
+// ③ 这一层是后补的：真机反馈「节点是 LXC 容器，虚拟化却显示 kvm」——那台 LXC 的
+// /proc/1/environ 里没有 container=（或被系统裁剪过），cgroup v2 的路径里也没有
+// "lxc" 字样，于是三层容器判据全部落空，最后 DMI 读到**宿主**（一台 KVM 虚机）的
+// "QEMU" 就认成了 kvm。隔离事实（PID 命名空间）不走文件名/环境变量，这类环境里
+// 反而是最可靠的一条。
 func detectVirt() string {
-	// Docker / Podman / containerd：/.dockerenv 或 /run/.containerenv。
+	// ① 容器运行时自报的名字。
+	if v := containerEnvName(); v != "" {
+		return v
+	}
+
+	// ② Docker / Podman / containerd：/.dockerenv 或 /run/.containerenv。
 	if exists("/.dockerenv") || exists("/run/.containerenv") {
 		return "docker"
 	}
 
-	// cgroup v1 的路径里带容器运行时名；LXC / Docker 都能命中。
+	// cgroup v1 的路径里带容器运行时名；LXC / Docker 都能命中
+	// （v2 的命名空间形态是 /lxc.payload.<name>，同样命中 "lxc"）。
 	cgroupBlob := readFileLine("/proc/1/cgroup") + "\n" + readFileLine("/proc/self/cgroup")
 	switch {
 	case contains(cgroupBlob, "lxc"):
@@ -570,19 +583,24 @@ func detectVirt() string {
 		return "containerd"
 	}
 
-	// cgroup v2：/proc/self/cgroup 只有 "0::/"。改为看命名空间与 init 进程。
-	// LXC 的容器内通常能看到 lxc 相关的环境变量或 /dev/lxc 设备。
-	if contains(string(readEnvFile("/proc/1/environ")), "container=lxc") {
-		return "lxc"
-	}
-	if exists("/dev/lxc") {
-		return "lxc"
-	}
-	// systemd-nspawn / machinectl。
-	if exists("/run/systemd/nspawn") {
-		return "systemd-nspawn"
+	// ③ 拿不出名字，但能证明身处容器：认容器，不认宿主机。
+	if inContainer() {
+		switch {
+		case exists("/proc/vz"), exists("/proc/bc"):
+			return "openvz"
+		case exists("/dev/lxc"), contains(readFileLine("/proc/self/mountinfo"), "lxcfs"):
+			// /dev/lxc 由 LXC 创建；lxcfs 是 LXC 专属的 FUSE 文件系统，宿主机把它
+			// bind 进容器后容器内 mountinfo 里就能看到 "lxcfs"（宿主自己也可能挂
+			// 着 lxcfs，所以这两条只在"已在容器里"的前提下才算 LXC 证据）。
+			return "lxc"
+		case exists("/run/systemd/nspawn"):
+			return "systemd-nspawn"
+		}
+		// 名字叫不出来的容器：报"container"胜过谎报宿主机的 kvm。
+		return "container"
 	}
 
+	// ④ 不在容器里，剩下的才是宿主机的虚拟化指纹。
 	switch {
 	case contains(readFileLine("/proc/cpuinfo"), "QEMU"):
 		return "kvm"
@@ -625,6 +643,33 @@ func detectVirt() string {
 		return "wsl"
 	}
 	return "none"
+}
+
+// containerEnvName 从环境变量里读出容器运行时**自报**的名字。
+//
+// 为什么优先信它：它是运行时自己写的，不像 DMI / cpuinfo 那样在容器里读到的是
+// 宿主机的指纹。LXC 的 lxc-start 默认注入 container=lxc，systemd 还会把这个变量
+// 透给各服务单元；docker / podman / systemd-nspawn 同理。
+//
+// 两处都看：/proc/1/environ 在容器里可能不可读（非 root、或 PID 命名空间收紧），
+// 此时自己的 environ（由 systemd 透下来的那份）往往还带着 container=。
+func containerEnvName() string {
+	for _, p := range []string{"/proc/1/environ", "/proc/self/environ"} {
+		if v := containerNameOf(envValue(readEnvFile(p), "container")); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// inContainer 只依据"隔离事实"判断是否身处容器，不看任何硬件/厂商指纹
+// （宿主机的指纹在容器里照样看得见，正是这次误判的来源）。
+//
+// 判据是 /proc/self/status 的 NSpid（见 nsPidCount）：容器有自己的 PID 命名空间，
+// 这一行会有两个及以上值；宿主机上只有一个。它不读文件名、不读环境变量，
+// LXC 的各种裁剪形态都躲不掉——真机那台 LXC 正是前两类判据全部落空的情形。
+func inContainer() bool {
+	return nsPidCount(readFileLine("/proc/self/status")) > 1
 }
 
 // readEnvFile 读 /proc/<pid>/environ（NUL 分隔），转成可搜索的字符串。

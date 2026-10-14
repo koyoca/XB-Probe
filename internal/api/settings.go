@@ -69,6 +69,16 @@ var settingDefaults = map[string]string{
 	// 留空时的推导顺序：master.yaml 的 admin_origin → 「分离」且只有一个
 	// 管理域名时按请求协议拼出来 → 都没有就保持同站相对路径。
 	"site.admin_url": "",
+	// admin.session_ttl_hours 是管理端的「登录有效期」（小时）：从登录那一刻算起，
+	// 到点必须重新登录（Cookie 的 MaxAge 与服务端判定用同一个值）。
+	//
+	// 默认 12 小时与线上既有行为一致（auth.SessionAbsoluteTTL）：老部署升级后
+	// 不会因为多了这个设置项而改变会话时长。取值下限 1 小时、上限 720 小时（30 天）
+	// —— 不提供"永不过期"：那等于取消这条保护。
+	//
+	// 它与空闲上限（auth.SessionIdleTTL，固定 2 小时）是两条独立的线：页面停在
+	// 那里不动由空闲上限兜底，一直在用则由本项兜底。
+	"admin.session_ttl_hours": "12",
 	// public.cards 是公开看板的**卡片级**白名单。
 	// 取值 "all"（默认）= 不限制；空值 = 一张都不展示；否则是逗号分隔的卡片键。
 	// 与 public.fields 的区别：fields 管"某个字段的数据发不发给前端"，
@@ -135,6 +145,7 @@ var settingSpecs = map[string]func(string) error{
 	"site.public_hosts":          validateHostList,
 	"site.admin_hosts":           validateHostList,
 	"site.admin_url":             optionalHTTPURL,
+	"admin.session_ttl_hours":    intRange(1, 720),
 	"public.enabled":             enumValue("0", "1"),
 	"public.fields":              validatePublicFields,
 	"public.cards":               validatePublicCards,

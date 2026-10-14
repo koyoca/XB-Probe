@@ -32,19 +32,81 @@ func RealIP(r *http.Request) string {
 }
 
 // RealIPMiddleware 解析来源 IP（S5）。
-// 仅当 TCP 对端命中 trustedProxies 时才解析 X-Forwarded-For；默认为空。
+// 仅当 TCP 对端命中 trustedProxies（或本身就是 Cloudflare 边缘）时才解析代理头。
 func RealIPMiddleware(trustedProxies []string, next http.Handler) http.Handler {
 	trusted := parseCIDRs(trustedProxies)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ip := remoteHost(r.RemoteAddr)
-		if isTrusted(ip, trusted) {
-			if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-				ip = rightmostUntrusted(xff, trusted)
-			}
-		}
-		ctx := context.WithValue(r.Context(), ctxKeyRealIP{}, ip)
+		ctx := context.WithValue(r.Context(), ctxKeyRealIP{}, resolveClientIP(r, trusted))
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// resolveClientIP 是"这个请求到底是谁发的"的唯一判据（中间件与 Agent IP 白名单共用）。
+//
+// 大前提：**只有当这一跳确实是代理时**才去看它带来的头；对端不可信时一律用对端地址。
+// 否则任何人都能自己写一个 X-Forwarded-For / CF-Connecting-IP，把自己洗进白名单。
+//
+// 头的优先级（均以"这一跳可信"为前提）：
+//  1. CF-Connecting-IP：Cloudflare 专用头，**单值**，由 CF 边缘覆盖写入，比 XFF 准
+//     （XFF 是"追加"语义，客户端可以先塞一个假值）。但它只有在能证明链路确实过了
+//     CF 时才采信——见下面 cloudflareSawEdge 的两条证明路径。
+//  2. X-Forwarded-For：从右往左跳过代理跳（可信代理 + CF 边缘），取第一个真实地址。
+//  3. X-Real-IP：nginx 单值头的兜底。
+//
+// 真机反馈（本条 bug）：Master 套了 Cloudflare 之后，节点地址被写成 172.68.x.x
+// （CF 边缘的回源地址）。链路是 CF → 本机 Caddy → Master：XFF 最右边那一跳是 CF
+// 边缘，而 trusted_proxies 里只写了回环，于是解析停在 CF 那一跳上，把 CF 自己
+// 当成了节点地址。
+func resolveClientIP(r *http.Request, trusted []*net.IPNet) string {
+	peer := remoteHost(r.RemoteAddr)
+
+	// 路径 A：对端本身就是 CF 边缘（CF 直接回源，或 CF 前面的代理已退出链路）。
+	// "来源地址落在 CF 网段"这件事无法伪造：TCP 三次握手要求对方真能从该网段发包。
+	if cfEdge(peer) {
+		if ip := clientIPHeader(r, "CF-Connecting-IP"); ip != "" {
+			return ip
+		}
+		if ip, _ := walkXFF(r.Header.Get("X-Forwarded-For"), trusted); ip != "" {
+			return ip
+		}
+		return peer
+	}
+	if !isTrusted(peer, trusted) {
+		return peer
+	}
+
+	// 路径 B：对端是（自建的）可信代理。此时 CF 只可能出现在 XFF 链里——
+	// 链里出现 CF 边缘这一跳，就等于证明"这次请求确实过了 CF"，于是 CF 写的
+	// CF-Connecting-IP 才可信。没有这一跳时绝不采信该头：旁路 CF 直连你反代的
+	// 人也能塞一个同名头。
+	xff := r.Header.Get("X-Forwarded-For")
+	ip, sawCF := walkXFF(xff, trusted)
+	if sawCF {
+		if v := clientIPHeader(r, "CF-Connecting-IP"); v != "" {
+			return v
+		}
+	}
+	if ip != "" {
+		return ip
+	}
+	if v := clientIPHeader(r, "X-Real-IP"); v != "" {
+		return v
+	}
+	return peer
+}
+
+// clientIPHeader 读一个单值来源头，只接受**合法 IP**。
+// 非法值（空、带端口、带逗号、任意字符串）一律当没给——否则一个畸形头就能
+// 把节点地址写成一句垃圾。
+func clientIPHeader(r *http.Request, name string) string {
+	v := strings.TrimSpace(r.Header.Get(name))
+	if v == "" || strings.ContainsAny(v, ", ") {
+		return ""
+	}
+	if net.ParseIP(v) == nil {
+		return ""
+	}
+	return v
 }
 
 func remoteHost(addr string) string {
@@ -94,21 +156,82 @@ func isTrusted(ip string, cidrs []*net.IPNet) bool {
 	return false
 }
 
-// rightmostUntrusted 从 XFF 右侧（代理追加端）开始，跳过可信代理，
-// 返回第一个不可信地址——这是最不容易被伪造的位置。
-func rightmostUntrusted(xff string, trusted []*net.IPNet) string {
+// walkXFF 从 XFF 右侧（代理追加端）开始，跳过所有"中间跳"，返回第一个真实地址。
+//
+// 跳过的两类：
+//  1. 命中所配 trusted_proxies 的地址（管理员声明的反代）；
+//  2. Cloudflare 边缘网段（见 cloudflareEdgeRanges：这几段只可能是 CF 自己）。
+//
+// 第二个返回值表示"链里出现过 CF 边缘"——它是"这次请求确实过了 CF"的证明，
+// 调用方据此才敢采信 CF-Connecting-IP。
+//
+// 取右侧而不是左侧：XFF 是追加语义，客户端可以自己塞一个假值在最左边，
+// 而右侧几跳是各层代理逐个追加的，越靠右越接近真实发起者。
+func walkXFF(xff string, trusted []*net.IPNet) (string, bool) {
 	parts := strings.Split(xff, ",")
+	sawCF := false
 	for i := len(parts) - 1; i >= 0; i-- {
 		ip := strings.TrimSpace(parts[i])
 		if ip == "" {
 			continue
 		}
+		if cfEdge(ip) {
+			sawCF = true
+			continue
+		}
 		if !isTrusted(ip, trusted) {
-			return ip
+			return ip, sawCF
 		}
 	}
-	return strings.TrimSpace(parts[0])
+	return "", sawCF
 }
+
+// rightmostUntrusted 已并入 walkXFF / resolveClientIP（本条链路上只有一个出口，
+// 免得"两个地方各判一次可信代理、其中一处忘了 CF 那一跳"）。
+
+// cloudflareEdgeRanges 是 Cloudflare 边缘地址段的**快照**
+// （2026-10 取自 https://www.cloudflare.com/ips-v4 与 /ips-v6）。
+//
+// 为什么值得内建：这几段地址只可能是 Cloudflare 自己——TCP 三次握手要求对端
+// 真能从该网段发包，客户端伪造不了源地址。因此"来源在 CF 网段"本身就是
+// "这一跳是 CF 边缘"的充分证据，不需要管理员再在 trusted_proxies 里声明一次。
+//
+// 用途只有两个，都在"谁是真实客户端"这条链上：
+//  1. 解析 XFF 时把 CF 那一跳跳过去（否则套了 CF 的部署会把 CF 的回源地址
+//     当成客户端地址——真机里节点地址就是这么变成 172.68.x.x 的）；
+//  2. 判定请求是不是 HTTPS（CF 会写 X-Forwarded-Proto，见 session_cookie.go）。
+//
+// 名单多年未变，但确实变过；更新时改这里即可。它**不是**安全边界：
+// 真正的边界是"只有 CF 会从这些地址回源"。
+var cloudflareEdgeRanges = []string{
+	"173.245.48.0/20",
+	"103.21.244.0/22",
+	"103.22.200.0/22",
+	"103.31.4.0/22",
+	"141.101.64.0/18",
+	"108.162.192.0/18",
+	"190.93.240.0/20",
+	"188.114.96.0/20",
+	"197.234.240.0/22",
+	"198.41.128.0/17",
+	"162.158.0.0/15",
+	"104.16.0.0/13",
+	"104.24.0.0/14",
+	"172.64.0.0/13",
+	"131.0.72.0/22",
+	"2400:cb00::/32",
+	"2606:4700::/32",
+	"2803:f800::/32",
+	"2405:b500::/32",
+	"2405:8100::/32",
+	"2a06:98c0::/29",
+	"2c0f:f248::/32",
+}
+
+var cloudflareEdges = parseCIDRs(cloudflareEdgeRanges)
+
+// cfEdge 判断地址是否落在 Cloudflare 边缘网段内。
+func cfEdge(ip string) bool { return isTrusted(ip, cloudflareEdges) }
 
 // ctxKeyNonce 传递本次请求的 CSP nonce（仅在开启脚本注入时存在）。
 type ctxKeyNonce struct{}

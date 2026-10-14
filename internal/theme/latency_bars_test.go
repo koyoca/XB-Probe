@@ -63,10 +63,18 @@ func TestLatencyBarsNeverFabricatePlaceholderRows(t *testing.T) {
 		t.Errorf("renderLatencyBars 没有直接按实际目标列表渲染行（render 体：%s）", render)
 	}
 
-	// 3) 一条目标都没有时必须明确说"没有数据"，不能留白或整块隐藏。
-	//    这条与上面并不矛盾：空列表是"确实没有目标"，而占位行伪造的是"有的目标挂掉了"。
-	if !strings.Contains(render, `'lb-empty'`) {
-		t.Errorf("renderLatencyBars 对无数据节点没有渲染「暂无探测数据」占位")
+	// 3) 一条目标都没有时**整块收起**（连标题一起不画）。
+	//
+	//    2026-10-15 按用户要求反转了早先的做法（当时画一句"暂无探测数据"）：
+	//    "当探测目标为无时，节点卡片底下会显示 延迟 / 丢包 · 近 30 分钟 暂无探测数据
+	//     之类的，占用了卡片行数并且也不好看"。
+	//    这条与上面并不矛盾：空列表是"这个节点根本没有探测目标"（没有信息量，
+	//    所以不显示），而占位行伪造的是"有的目标挂掉了"（错误信息，更不能显示）。
+	if strings.Contains(render, `'lb-empty'`) {
+		t.Errorf("renderLatencyBars 又给「没有探测目标」的节点画占位文案了：整块应当收起")
+	}
+	if !strings.Contains(render, "!list.length") || !strings.Contains(render, "box.hidden = true") {
+		t.Errorf("renderLatencyBars 没有在「没有探测目标」时收起整块")
 	}
 }
 

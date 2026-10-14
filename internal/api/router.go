@@ -135,7 +135,7 @@ func (h *Handler) validAdminSession(r *http.Request) bool {
 	if err != nil || sess == nil {
 		return false
 	}
-	return auth.CheckIdleExpiry(sess, time.Now()) == nil
+	return auth.CheckSession(sess, time.Now(), h.sessionLimits()) == nil
 }
 
 // isInstallPath 判断是否为安装/发布链路（开关关闭时仍需放行的路径）。
@@ -333,16 +333,13 @@ func (h *Handler) AgentRoutes() http.Handler {
 //
 // 来源 IP 的取法与 RealIPMiddleware 同一套规则：只有 TCP 对端命中可信代理时
 // 才认 X-Forwarded-For，否则谁都能伪造头把自己洗进名单。
+// 来源 IP 的取法与 RealIPMiddleware 同一套规则——**同一个函数**（resolveClientIP）：
+// 只有 TCP 对端命中可信代理（或对端本身就是 Cloudflare 边缘）时才认代理头，
+// 否则谁都能伪造头把自己洗进名单。
 func (h *Handler) agentIPGate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if h.Repo.GetSettingDefault("agent.ip_whitelist_enabled", "0") == "1" {
-			ip := remoteHost(r.RemoteAddr)
-			trusted := parseCIDRs(h.TrustedProxies)
-			if isTrusted(ip, trusted) {
-				if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-					ip = rightmostUntrusted(xff, trusted)
-				}
-			}
+			ip := resolveClientIP(r, parseCIDRs(h.TrustedProxies))
 			allow := strings.Split(h.Repo.GetSettingDefault("agent.ip_whitelist", ""), ",")
 			if !isTrusted(ip, parseCIDRs(allow)) {
 				writeErr(w, http.StatusForbidden, "forbidden", "来源 IP 不在白名单内")
@@ -380,10 +377,18 @@ func (h *Handler) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 			writeErr(w, http.StatusUnauthorized, "unauthorized", "会话无效")
 			return
 		}
-		if err := auth.CheckIdleExpiry(sess, time.Now()); err != nil {
+		now := time.Now()
+		lim := h.sessionLimits()
+		if err := auth.CheckSession(sess, now, lim); err != nil {
 			auth.ClearSessionCookie(w)
 			writeErr(w, http.StatusUnauthorized, "unauthorized", "会话过期")
 			return
+		}
+		// 空闲截止时间在"过半"时才续期：后台界面每 3 秒就发一次请求，
+		// 每次都 UPDATE 一行 sessions 是纯粹的无用功（还要抢写锁）。
+		// 续期同样受绝对上限约束（见 auth.TouchDeadline）。
+		if next := auth.TouchDeadline(sess, now, lim); next-sess.ExpiresAt > int64(lim.Idle.Seconds()/2) {
+			_ = h.Repo.TouchSession(auth.HashToken(plain), next)
 		}
 		// 所有写操作校验 CSRF（9.3 / 13.4.5）。
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {

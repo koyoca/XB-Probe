@@ -142,8 +142,14 @@ func TestFrontendsWireFlagIntoNodeCard(t *testing.T) {
 		if !strings.Contains(src, "var flag = el('span', 'n-flag')") {
 			t.Errorf("%s 的节点卡片没有国旗占位元素", rel)
 		}
-		if !strings.Contains(src, "renderFlag(c.flag, n.country)") {
+		// 写的是 countryOf(n)：管理员设过国家就用设置值，否则按分组名/节点名推断
+		// （见 inferCountry）。只认 n.country 会让"没设国家、但分组写着 美国-洛杉矶"
+		// 的节点一个旗都没有——而那正是用户提这条需求的理由。
+		if !strings.Contains(src, "renderFlag(c.flag, countryOf(n))") {
 			t.Errorf("%s 没有在刷新卡片时写入国旗", rel)
+		}
+		if !strings.Contains(src, "function countryOf(") {
+			t.Errorf("%s 缺少 countryOf()：卡片取不到该画哪面旗（设置值优先、否则按名称推断）", rel)
 		}
 	}
 }
@@ -152,8 +158,8 @@ func TestFrontendsWireFlagIntoNodeCard(t *testing.T) {
 // 少一处就会出现"列表有旗、点进去没有"的不一致。
 func TestPublicDetailHeaderHasFlag(t *testing.T) {
 	src := readFrontend(t, "internal/theme/builtin/app.js")
-	if !strings.Contains(src, "renderFlag($('detail-flag'), n.country)") {
-		t.Errorf("公开看板详情页标题没有渲染国旗")
+	if !strings.Contains(src, "renderFlag($('detail-flag'), countryOf(n))") {
+		t.Errorf("公开看板详情页标题没有渲染国旗（应当与卡片同一套取值规则）")
 	}
 	html := readFrontend(t, "internal/theme/builtin/index.html")
 	if !strings.Contains(stripHTMLComments(html), `id="detail-flag"`) {
@@ -190,6 +196,12 @@ func TestFlagCSSReservesFixedWidth(t *testing.T) {
 		if !strings.Contains(rule, "width: 20px") || !strings.Contains(rule, "height: 14px") {
 			t.Errorf("%s 的 .n-flag 没有固定 20x14：卡片位置会随「有没有国家」跳动（规则：%s）", rel, rule)
 		}
+		// 例外：**没有旗可画**时整格收起（.n-flag:empty）。
+		// 用户反馈"未设置国家时国旗位置空出一块空间"——固定宽度是为了让有旗的
+		// 节点彼此对齐，不该变成"没旗的节点也要占一格"。
+		if !strings.Contains(css, ".n-flag:empty { display: none; }") {
+			t.Errorf("%s 缺少 .n-flag:empty { display: none; }：没有国家/地区时仍会空出一格", rel)
+		}
 	}
 }
 
@@ -207,6 +219,41 @@ func TestFlagSVGRootDeclaresXMLNS(t *testing.T) {
 		block := extractFlagBlock(t, rel)
 		if !strings.Contains(block, `'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 14"`) {
 			t.Errorf("%s 的 flagSVG 根元素缺 xmlns：XML 解析后旗帜落在空命名空间，渲染成 0x0（不可见）", rel)
+		}
+	}
+}
+
+// 国家/地区可以从分组名与节点名里推断出来（用户要求："分组带有关键字美国或者 US，
+// 或者名称带有 US 时，国旗图标位置不需要设置就自动选择美国"）。
+//
+// 这条需求有三个容易做丢的地方，逐个钉住：
+//  1. 表在不在（两个前端都必须有，且由 TestFrontendFlagTablesIdentical 保证逐 token 一致）；
+//  2. 优先级——**管理员显式设过的国家永远优先**，推断只是兜底。反过来（先推断再回落到
+//     设置值）会让手动选择形同虚设，而且没有任何报错；
+//  3. 短代码必须按"独立词"匹配：us 命中 rust 这类误判会画出错误的旗帜，
+//     而且看起来是确定信息——比不画旗更有害。
+func TestCountryInferredFromGroupAndNodeName(t *testing.T) {
+	for _, rel := range frontendFiles {
+		block := extractFlagBlock(t, rel)
+		for _, want := range []string{
+			"var COUNTRY_HINTS = [",
+			"['US', ['美国'", // 用户点名的那个例子
+			"function inferCountry(",
+			"function countryOf(",
+			"function matchCountryHint(",
+			// 短代码走独立词正则，避免 us 命中 rust
+			"'(^|[^a-z0-9])' + hint + '([^a-z0-9]|$)'",
+		} {
+			if !strings.Contains(block, want) {
+				t.Errorf("%s 的国旗公共区块缺少 %q：按名称推断国家这条链断了", rel, want)
+			}
+		}
+		// 优先级：先看设置值，再推断。
+		body := block[strings.Index(block, "function countryOf("):]
+		if i, j := strings.Index(body, "if (n.country) return n.country;"),
+			strings.Index(body, "return inferCountry(n.name, n.group);"); i < 0 || j < 0 || i > j {
+			t.Errorf("%s 的 countryOf 没有把「管理员设过的国家」排在推断之前："+
+				"手动选择会被推断顶掉（且不报错）", rel)
 		}
 	}
 }

@@ -1,9 +1,12 @@
 package api
 
 import (
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/koyoca/xb-probe/internal/auth"
 	"github.com/koyoca/xb-probe/internal/model"
 )
 
@@ -157,5 +160,36 @@ func TestPublicCardNamesAreSafe(t *testing.T) {
 	}
 	if !found {
 		t.Error("卡片目录应包含月费合计卡 kpi_fee")
+	}
+}
+
+// 「登录有效期」设置项的默认值必须与 auth 里的出厂值一致。
+//
+// 两处各写一个数：设置项（settings 表里看得见的默认值）与 auth.SessionAbsoluteTTL
+// （老部署升级前的实际行为）。它们一旦漂移，症状是"后台显示 12 小时、实际按别的数跑"，
+// 或者反过来——**升级后所有人的会话时长悄悄变了**，而没有任何报错。
+func TestSessionTTLSettingMatchesAuthDefault(t *testing.T) {
+	const key = "admin.session_ttl_hours"
+	def, ok := settingDefaults[key]
+	if !ok {
+		t.Fatalf("设置项 %s 没有出厂默认值：后台会显示成空，而实际按代码里的兜底值跑", key)
+	}
+	n, err := strconv.Atoi(def)
+	if err != nil {
+		t.Fatalf("%s 的默认值 %q 不是整数：%v", key, def, err)
+	}
+	if want := int(auth.SessionAbsoluteTTL / time.Hour); n != want {
+		t.Errorf("%s 默认 %d 小时，与 auth.SessionAbsoluteTTL=%v 不一致："+
+			"升级后会话时长会与升级前不同（而界面上显示的又是另一个数）", key, n, auth.SessionAbsoluteTTL)
+	}
+	// 校验规则必须在：少了它，管理员可以把它存成 0 或 -1，把所有人立刻踢下线。
+	if _, ok := settingSpecs[key]; !ok {
+		t.Fatalf("%s 没有取值校验规则", key)
+	}
+	if err := validateSettingValue(key, "0"); err == nil {
+		t.Error("0 应当被拒绝：它会让所有会话立刻失效（下限 1 小时）")
+	}
+	if err := validateSettingValue(key, "24"); err != nil {
+		t.Errorf("24 应当通过：%v", err)
 	}
 }

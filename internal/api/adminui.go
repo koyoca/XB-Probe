@@ -2,6 +2,7 @@ package api
 
 import (
 	"embed"
+	"html"
 	"io/fs"
 	"net/http"
 	"strings"
@@ -32,6 +33,19 @@ func (h *Handler) handleAdminUI(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.NotFound(w, r)
 		return
+	}
+	// 站点标题：登录页是最早出现的画面，那时前端还没登录、拿不到 /settings，
+	// 所以标题只能由服务端在**下发这一刻**填进去（模板占位 __SITE_TITLE__）。
+	// 以前这里写死 "XB-Probe"：管理员把站点标题改成自己的名字后，公开看板已经是
+	// 新名字，登录页却还挂着 XB-Probe——看上去像"设置没生效"。
+	//
+	// 只替换 index.html：css/js 里没有这个占位符，其他静态资源不必过一遍替换。
+	if clean == "index.html" {
+		title := strings.TrimSpace(h.Repo.GetSettingDefault("site.title", "XB-Probe"))
+		if title == "" {
+			title = "XB-Probe"
+		}
+		data = []byte(strings.ReplaceAll(string(data), "__SITE_TITLE__", html.EscapeString(title)))
 	}
 	w.Header().Set("Content-Type", adminContentType(clean))
 	// 后台界面不缓存，避免升级后仍加载旧资源。

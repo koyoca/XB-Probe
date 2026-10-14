@@ -83,7 +83,9 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	csrf := auth.GenerateCSRF(plain)
-	expires := now.Add(auth.SessionIdleTTL).Unix()
+	lim := h.sessionLimits()
+	sess := auth.Session{CreatedAt: now.Unix()}
+	expires := auth.TouchDeadline(&sess, now, lim)
 	if err := h.Repo.CreateSession(idHash, admin.ID, csrf, ip, r.UserAgent(), now.Unix(), expires); err != nil {
 		writeErr(w, http.StatusInternalServerError, model.ErrInternal, "内部错误")
 		return
@@ -91,7 +93,10 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	_ = h.Repo.ResetLoginFailures(admin.ID)
 	_ = h.Repo.Audit(now.Unix(), admin.Username, "auth.login", "", ip)
 
-	h.setSessionCookie(w, r, plain, int(auth.SessionAbsoluteTTL.Seconds()))
+	// Cookie 的 MaxAge 与**服务端**的绝对上限取同一个值：两者不一致时，
+	// 表现为"浏览器还带着 Cookie，服务端已经判过期"（每 3 秒一堆 401），
+	// 或者反过来的"服务端认，浏览器早就不发了"。
+	h.setSessionCookie(w, r, plain, int(lim.Absolute.Seconds()))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"username":   admin.Username,
 		"csrf_token": csrf, // 前端保存并在写请求的 X-CSRF-Token 中回传

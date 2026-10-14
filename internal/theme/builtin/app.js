@@ -227,7 +227,50 @@
     IR: ['伊朗', 'h:#239F40,#FFFFFF,#DA0000'],
     EG: ['埃及', 'h:#CE1126,#FFFFFF,#000000'],
     NG: ['尼日利亚', 'v:#008751,#FFFFFF,#008751'],
-    KE: ['肯尼亚', 'h:#000000,#BB0000,#006600']
+    KE: ['肯尼亚', 'h:#000000,#BB0000,#006600'],
+    PK: ['巴基斯坦', '<rect width="20" height="14" fill="#01411C"/><rect width="5.4" height="14" fill="#FFFFFF"/><circle cx="13.6" cy="7" r="3.4" fill="#FFFFFF"/><circle cx="15.1" cy="6.2" r="2.9" fill="#01411C"/><polygon points="' + starPts(16.6, 3.4, 1.3) + '" fill="#FFFFFF"/>'],
+    BD: ['孟加拉国', '<rect width="20" height="14" fill="#006A4E"/><circle cx="8.4" cy="7" r="4.2" fill="#F42A41"/>'],
+    KH: ['柬埔寨', '<rect width="20" height="14" fill="#032EA1"/><rect y="4" width="20" height="6" fill="#E00025"/><rect y="10" width="20" height="4" fill="#032EA1"/>'],
+    MM: ['缅甸', 'h:#FECB00,#34B233,#EA2839'],
+    LA: ['老挝', '<rect width="20" height="14" fill="#CE1126"/><rect y="3.5" width="20" height="7" fill="#002868"/><circle cx="10" cy="7" r="3" fill="#FFFFFF"/>'],
+    BN: ['文莱', '<rect width="20" height="14" fill="#F7E017"/><path d="M0 3.4l20 5.4M0 8.8l20-5.4" stroke="#FFFFFF" stroke-width="2.4"/><path d="M0 4.4l20 5.4M0 9.8l20-5.4" stroke="#000000" stroke-width=".8"/>'],
+    KZ: ['哈萨克斯坦', '<rect width="20" height="14" fill="#00AFCA"/><circle cx="10" cy="7" r="2.8" fill="#FEC50C"/>'],
+    UZ: ['乌兹别克斯坦', 'h:#0099B5,#FFFFFF,#1EB53A'],
+    AZ: ['阿塞拜疆', 'h:#0092BC,#E4002B,#00AE65'],
+    GE: ['格鲁吉亚', '<rect width="20" height="14" fill="#FFFFFF"/><rect y="5.6" width="20" height="2.8" fill="#FF0000"/><rect x="8.6" width="2.8" height="14" fill="#FF0000"/>'],
+    AM: ['亚美尼亚', 'h:#D90012,#0033A0,#F2A800'],
+    QA: ['卡塔尔', '<rect width="20" height="14" fill="#FFFFFF"/><path d="M5 0l2 1.4-2 1.4 2 1.4-2 1.4 2 1.4-2 1.4 2 1.4-2 1.4 2 1.4-2 1.4h15V0z" fill="#8A1538"/>'],
+    KW: ['科威特', '<rect width="20" height="14" fill="#FFFFFF"/><rect width="20" height="4.67" fill="#007A3D"/><rect y="9.33" width="20" height="4.67" fill="#CE1126"/><path d="M0 0l5.6 7L0 14z" fill="#000000"/>'],
+    BH: ['巴林', '<rect width="20" height="14" fill="#FFFFFF"/><path d="M5 0l2 1.4-2 1.4 2 1.4-2 1.4 2 1.4-2 1.4 2 1.4-2 1.4 2 1.4-2 1.4h15V0z" fill="#CE1126"/>'],
+    CY: ['塞浦路斯', '<rect width="20" height="14" fill="#FFFFFF"/><path d="M4.6 8.6c1.4-1.6 3-2.4 4.2-2 .9.3 1.2 1.4 1.6 1.9.3.4 1 .5 1.6.2.7-.3 1.5-.4 2.2 0 .6.3 1 .9 1.2 1.5" stroke="#D57800" stroke-width="1.2" fill="none" stroke-linecap="round"/>'],
+    MT: ['马耳他', '<rect width="20" height="14" fill="#FFFFFF"/><rect x="10" width="10" height="14" fill="#CF142B"/><rect x="3.4" y="1.4" width="3.2" height="4" fill="#FFFFFF" stroke="#7F7F7F" stroke-width=".4"/><path d="M5 1.9v3M3.9 3.4h2.2" stroke="#7F7F7F" stroke-width=".5"/>'],
+    JO: ['约旦', '<rect width="20" height="14" fill="#FFFFFF"/><rect width="20" height="4.67" fill="#000000"/><rect y="9.33" width="20" height="4.67" fill="#007A3D"/><path d="M0 0l7 7L0 14z" fill="#CE1126"/><polygon points="' + starPts(3.1, 7, 1.5) + '" fill="#FFFFFF"/>'],
+    LB: ['黎巴嫩', '<rect width="20" height="14" fill="#FFFFFF"/><rect width="20" height="3.4" fill="#EE161F"/><rect y="10.6" width="20" height="3.4" fill="#EE161F"/><path d="M10 3.8l1.2 2 2-.3-1.1 1.6 1.1 1.6-2-.3L10 10.2 8.8 8.4l-2 .3L7.9 7.1 6.8 5.5l2 .3z" fill="#00A651"/>'],
+    IQ: ['伊拉克', 'h:#CE1126,#FFFFFF,#000000'],
+    BY: ['白俄罗斯', '<rect width="20" height="14" fill="#C8313E"/><rect y="9" width="20" height="5" fill="#4AA657"/><rect width="3.6" height="14" fill="#FFFFFF"/><path d="M0 .6l3.6 1.2M0 3.2l3.6 1.2M0 5.8l3.6 1.2M0 8.4l3.6 1.2M0 11l3.6 1.2M0 13.2l3.6 1.2" stroke="#C8313E" stroke-width="1"/>'],
+    RS: ['塞尔维亚', 'h:#C6363C,#0C4076,#FFFFFF'],
+    HR: ['克罗地亚', 'h:#FF0000,#FFFFFF,#171796'],
+    SI: ['斯洛文尼亚', 'h:#FFFFFF,#005DA4,#ED1C24'],
+    SK: ['斯洛伐克', 'h:#FFFFFF,#0B4EA2,#EE1C25'],
+    MD: ['摩尔多瓦', 'v:#003DA5,#FFD200,#C8102E'],
+    UY: ['乌拉圭', '<rect width="20" height="14" fill="#FFFFFF"/><g fill="#0038A8"><rect width="20" height="1.75"/><rect y="3.5" width="20" height="1.75"/><rect y="7" width="20" height="1.75"/><rect y="10.5" width="20" height="1.75"/></g><rect width="7.6" height="7" fill="#FFFFFF"/><circle cx="3.8" cy="3.5" r="1.9" fill="#FEDF00"/>'],
+    PY: ['巴拉圭', 'h:#D52B1E,#FFFFFF,#0038A8'],
+    BO: ['玻利维亚', 'h:#D52B1E,#F9E300,#007934'],
+    EC: ['厄瓜多尔', '<rect width="20" height="14" fill="#FFDD00"/><rect y="7" width="20" height="3.5" fill="#0055A4"/><rect y="10.5" width="20" height="3.5" fill="#EF3340"/>'],
+    VE: ['委内瑞拉', 'h:#FFCC00,#00247D,#CF142B'],
+    CR: ['哥斯达黎加', '<rect width="20" height="14" fill="#002B7F"/><rect y="2.3" width="20" height="9.4" fill="#FFFFFF"/><rect y="4.7" width="20" height="4.7" fill="#CE1126"/>'],
+    PA: ['巴拿马', '<rect width="20" height="14" fill="#FFFFFF"/><rect x="10" width="10" height="7" fill="#DA121A"/><rect y="7" width="10" height="7" fill="#005293"/>'],
+    GT: ['危地马拉', 'v:#4997D0,#FFFFFF,#4997D0'],
+    PR: ['波多黎各', '<rect width="20" height="14" fill="#FFFFFF"/><g fill="#ED0000"><rect width="20" height="2.8"/><rect y="5.6" width="20" height="2.8"/><rect y="11.2" width="20" height="2.8"/></g><path d="M0 0l8.4 7L0 14z" fill="#0050F0"/><polygon points="' + starPts(2.7, 7, 1.5) + '" fill="#FFFFFF"/>'],
+    JM: ['牙买加', '<path d="M0 0h20v14H0z" fill="#FED100"/><path d="M0 0l20 14M20 0L0 14" stroke="#000000" stroke-width="3.6"/><path d="M0 0l20 14M20 0L0 14" stroke="#009B3A" stroke-width="1.6"/>'],
+    MA: ['摩洛哥', '<rect width="20" height="14" fill="#C1272D"/><polygon points="' + starPts(10, 7, 3.3) + '" fill="none" stroke="#006233" stroke-width=".7"/>'],
+    TN: ['突尼斯', '<rect width="20" height="14" fill="#E70013"/><circle cx="10" cy="7" r="3.6" fill="#FFFFFF"/><circle cx="11.2" cy="7" r="2.9" fill="#E70013"/><polygon points="' + starPts(11.6, 7, 1.6) + '" fill="#E70013"/>'],
+    DZ: ['阿尔及利亚', '<rect width="20" height="7" fill="#006233"/><rect y="7" width="20" height="7" fill="#FFFFFF"/><circle cx="10.4" cy="7" r="3.4" fill="#D21034"/><circle cx="11.6" cy="7" r="2.8" fill="#FFFFFF"/><polygon points="' + starPts(12, 7, 1.5) + '" fill="#D21034"/>'],
+    GH: ['加纳', 'h:#CE1126,#FCD116,#006B3F'],
+    ET: ['埃塞俄比亚', 'h:#078930,#FCDD09,#DA121A'],
+    TZ: ['坦桑尼亚', '<rect width="20" height="14" fill="#1EB53A"/><path d="M20 14H0L20 0z" fill="#00A3DD"/><path d="M20 0L0 14" stroke="#000000" stroke-width="3.6"/>'],
+    MU: ['毛里求斯', 'h:#EA2839,#1A206D,#FFD500,#00A551'],
+    FJ: ['斐济', '<rect width="20" height="14" fill="#68BFE5"/><rect width="9.4" height="7" fill="#FFFFFF"/><path d="M0 0l9.4 7M9.4 0L0 7" stroke="#C8102E" stroke-width="1.5"/><rect x="4.1" width="1.2" height="7" fill="#C8102E"/><rect y="2.9" width="9.4" height="1.2" fill="#C8102E"/><circle cx="15.2" cy="7" r="2.4" fill="#FFFFFF"/>']
   };
   function flagSVG(code) {
     var e = FLAGS[code];
@@ -267,6 +310,97 @@
     return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 14" width="20" height="14" aria-hidden="true">' +
       '<rect width="20" height="14" fill="#dfe4ee"/>' + inner + '</svg>';
   }
+  // 国家/地区关键词表：分组名或节点名里出现这些词时，卡片自动挂上对应国旗。
+  //
+  // 为什么放在公共区块里：两个前端（公开看板与后台）各有一份同样的卡片渲染，
+  // 只改一处就会出现"看板有旗、后台没有"；表也必须在两边逐字节一致
+  // （internal/theme/flag_test.go 钉住整个区块）。
+  //
+  // 匹配规则见 matchCountryHint：中文与多词英文按子串匹配（"洛杉矶"），
+  // 两位代码这类短词按**独立词**匹配（避免 us 命中 rust、hk 命中某串）。
+  // 表里刻意不收会大量误判的短代码——in / it / my / id / no / is：
+  // 它们在节点名里更可能只是英文单词或序号，这些国家改用中文名或全名匹配。
+  //
+  // 只在"管理员没设过国家/地区"时兜底（见 countryOf）：显式设置永远优先。
+  // 数组顺序即优先级，靠前的先命中。
+  var COUNTRY_HINTS = [
+    ['US', ['美国', '洛杉矶', '圣何塞', '西雅图', '达拉斯', '纽约', '芝加哥', '凤凰城', '硅谷', '迈阿密', 'us', 'usa', 'united states', 'los angeles', 'san jose', 'seattle', 'dallas', 'new york']],
+    ['HK', ['香港', 'hongkong', 'hong kong', 'hk']],
+    ['TW', ['台湾', '台北', 'taiwan', 'taipei', 'tw']],
+    ['JP', ['日本', '东京', '大阪', 'japan', 'tokyo', 'osaka', 'jp']],
+    ['KR', ['韩国', '首尔', 'korea', 'seoul', 'kr']],
+    ['SG', ['新加坡', '狮城', 'singapore', 'sg']],
+    ['MY', ['马来西亚', '吉隆坡', 'malaysia', 'kuala lumpur']],
+    ['TH', ['泰国', '曼谷', 'thailand', 'bangkok', 'th']],
+    ['VN', ['越南', '胡志明', 'vietnam', 'vn']],
+    ['PH', ['菲律宾', '马尼拉', 'philippines', 'manila', 'ph']],
+    ['ID', ['印度尼西亚', '印尼', '雅加达', 'indonesia', 'jakarta']],
+    ['IN', ['印度', '孟买', '班加罗尔', 'india', 'mumbai']],
+    ['AU', ['澳大利亚', '澳洲', '悉尼', '墨尔本', 'australia', 'sydney', 'melbourne', 'au']],
+    ['NZ', ['新西兰', 'new zealand', 'nz']],
+    ['CA', ['加拿大', '多伦多', '蒙特利尔', 'canada', 'toronto', 'montreal', 'ca']],
+    ['BR', ['巴西', '圣保罗', 'brazil', 'sao paulo', 'br']],
+    ['DE', ['德国', '法兰克福', 'germany', 'frankfurt', 'de']],
+    ['FR', ['法国', '巴黎', 'france', 'paris', 'fr']],
+    ['GB', ['英国', '伦敦', 'uk', 'united kingdom', 'britain', 'london']],
+    ['NL', ['荷兰', '阿姆斯特丹', 'netherlands', 'amsterdam', 'nl']],
+    ['RU', ['俄罗斯', '莫斯科', 'russia', 'moscow', 'ru']],
+    ['TR', ['土耳其', '伊斯坦布尔', 'turkey', 'istanbul', 'tr']],
+    ['AE', ['阿联酋', '迪拜', 'emirates', 'dubai', 'ae']],
+    ['SE', ['瑞典', '斯德哥尔摩', 'sweden', 'stockholm', 'se']],
+    ['CH', ['瑞士', '苏黎世', 'switzerland', 'zurich', 'ch']],
+    ['IT', ['意大利', '米兰', 'italy', 'milan']],
+    ['ES', ['西班牙', '马德里', 'spain', 'madrid', 'es']],
+    ['PL', ['波兰', '华沙', 'poland', 'warsaw', 'pl']],
+    ['UA', ['乌克兰', 'ukraine', 'ua']],
+    ['ZA', ['南非', 'south africa', 'za']],
+    ['IE', ['爱尔兰', '都柏林', 'ireland', 'dublin', 'ie']],
+    ['FI', ['芬兰', '赫尔辛基', 'finland', 'helsinki', 'fi']],
+    ['NO', ['挪威', 'norway']],
+    ['AT', ['奥地利', '维也纳', 'austria', 'vienna']]
+  ];
+
+  // matchCountryHint 判断一段（已小写化的）文本里是否出现了某个提示词。
+  //
+  // ASCII 提示词走"独立词"正则：两侧不能是字母数字。少了这一条，
+  // us 会在 "rust" 里命中、hk 会在任何含这两个字母的串里命中——旗子就画错了，
+  // 而且错得不报错、只能靠肉眼发现。
+  // 中文（以及带空格的多词英文）走子串匹配：它们本身就不可能是别的词的一部分。
+  var countryHintRe = {};
+  function matchCountryHint(s, hint) {
+    if (/[^\x00-\x7f]/.test(hint)) return s.indexOf(hint) >= 0;
+    var re = countryHintRe[hint];
+    if (!re) {
+      re = new RegExp('(^|[^a-z0-9])' + hint + '([^a-z0-9]|$)');
+      countryHintRe[hint] = re;
+    }
+    return re.test(s);
+  }
+
+  // inferCountry 从分组名与节点名推断国家/地区代码；推不出来就返回空串
+  // （空串 = 不画旗，而不是画一面猜的旗）。
+  function inferCountry(name, group) {
+    var s = (String(group || '') + ' ' + String(name || '')).toLowerCase();
+    if (!s.replace(/\s/g, '')) return '';
+    for (var i = 0; i < COUNTRY_HINTS.length; i++) {
+      var hints = COUNTRY_HINTS[i][1];
+      for (var k = 0; k < hints.length; k++) {
+        if (matchCountryHint(s, hints[k])) return COUNTRY_HINTS[i][0];
+      }
+    }
+    return '';
+  }
+
+  // countryOf 决定卡片/详情页该画哪面旗：管理员设过就用它，否则按分组名、节点名推断。
+  //
+  // 只在**显示层**兜底，不回写数据库：分组叫"美国-洛杉矶"的节点立刻就有旗，
+  // 而管理员一旦在节点设置里明确选过国家，那个选择永远优先（也不怕设置被覆盖）。
+  function countryOf(n) {
+    if (!n) return '';
+    if (n.country) return n.country;
+    return inferCountry(n.name, n.group);
+  }
+
   // -- 国旗：FLAG-COMMON-END --
 
   // svgNode 把一个 SVG 字符串解析成 DOM 节点（与后台前端同名同实现）。
@@ -364,13 +498,19 @@
 
   function renderLatencyBars(box, bars) {
     var on = cardOn('lat_bars');
-    if (!on) {
+    var list = bars || [];
+    // 一条探测目标都没有（未配置 / 从未上报）：整块收起，连标题一起不画。
+    //
+    // 以前这里会画一行「延迟 / 丢包 · 近 24 小时」加一句"暂无探测数据"——
+    // 对没有探测目标的节点来说，那两行没有任何信息量，只是把卡片撑高
+    // （用户反馈：占用了卡片行数而且不好看）。数据到手后（list 非空）会自动出现，
+    // 因为签名被清空、下一轮就会重建。
+    if (!on || !list.length) {
       box.hidden = true;
       box.textContent = '';
       box._sig = null;
       return;
     }
-    var list = bars || [];
     // 签名带上时间窗：管理员改了 public.lat_window 之后、调度器还没重算完
     // 点阵数据的那一分钟里，标题也要先跟上，别让"近 24 小时"挂着旧文案。
     var sig = latWindow + '|on' + JSON.stringify(list);
@@ -388,13 +528,6 @@
       tip.title = '上行是延迟、下行是丢包，悬浮某点可看该段时间的数值。';
     }
     box.appendChild(tip);
-
-    if (!list.length) {
-      // 一条目标都没有（从未上报 / 未配置）：明确说"没有数据"，
-      // 而不是留一块空白让人以为是渲染坏了。块高由 CSS 钉住，卡片高度不受影响。
-      box.appendChild(el('div', 'lb-empty', '暂无探测数据'));
-      return;
-    }
 
     list.forEach(function (b) { box.appendChild(latRow(b)); });
     // 这里**不再**补占位行把行数凑到 LAT_ROWS：块高由 CSS 固定，卡片照样等高。
@@ -679,10 +812,15 @@
                       cardOn('node_disk') || cardOn('node_traffic'));
     // 速率行与价格行在同一个 .net-line 里（速率左、价格右），两个开关各自
     // 只管自己的那一半；.n-net 整块在两者全关时才隐藏。
-    c.fee.hidden = !cardOn('node_fee');
+    //
+    // 价格行还多一个条件：**这个节点确实有价格/续费信息**（c.hasFee，由
+    // updateCard 每轮写入）。没有的话既不显示"续费 —"、也不为它留高度——
+    // 那一行对这类节点没有任何信息量（用户反馈：卡片上挂着一行"续费 -"很碍眼）。
+    // 显隐是全局一致的开关，这里只是顺带把"没有值"的节点也排除掉。
+    c.fee.hidden = !cardOn('node_fee') || !c.hasFee;
     c.rateRow.hidden = !cardOn('node_net');
     c.totRow.hidden = !cardOn('node_net');
-    c.net.hidden = !(cardOn('node_fee') || cardOn('node_net'));
+    c.net.hidden = !((cardOn('node_fee') && c.hasFee) || cardOn('node_net'));
   }
 
   function updateMetric(m, percent, valueText, subText, labelBold) {
@@ -699,11 +837,31 @@
     setText(c.name, n.name || n.public_id);
     setClass(c.chip, 'n-chip ' + status);
     setText(c.chip, statusText(n, nowSec));
-    renderFlag(c.flag, n.country);
+    renderFlag(c.flag, countryOf(n));
 
     // 先按 public.cards 决定哪些区块出现，再填值。
     // 顺序很重要：块被关掉后仍然照常算值纯属浪费，更重要的是——如果把
     // "关掉"写在填值之后，缺值占位（—）会先写进 DOM，视觉上仍会闪一下。
+    // 续费价格：按支付周期折算到月均（后端 MonthlyEquivalent 口径）。
+    // once/lifetime 折算后是 0，靠 fee_cycle 区分"终身/一次性"与"没配价格"
+    // ——两者数值都是 0，但文案必须不同，不能都写 "—"。
+    //
+    // 放在"区块显隐"之前算：没配价格也没有续费信息的节点整块不显示
+    // （见 applyNodeCardBlocks），而显隐必须在填值前定下来，否则会先闪一下
+    // "续费 —" 再消失。
+    var feeText = '—';
+    if (n.monthly_fee > 0) {
+      feeText = fmtMoney(n.monthly_fee, n.monthly_fee_currency) + ' / 月';
+    } else if (n.fee_cycle === 'lifetime') {
+      feeText = '终身';
+    } else if (n.fee_cycle === 'once') {
+      feeText = '一次性';
+    }
+    // "终身 / 一次性"不是缺值，所以判据是**文案**而不是数值：
+    // 只有算出来仍是占位符 "—" 才认为这个节点没有价格信息。
+    c.hasFee = feeText !== '—';
+    setText(c.feeV, feeText);
+
     applyNodeCardBlocks(c);
 
     // 从未上报过的节点（刚建好、Agent 还没装）：所有指标渲染成 "—"。
@@ -723,19 +881,6 @@
     setText(c.exp, ex.text);
 
     renderStackBadges(c.badges, n.net_stack);
-
-    // 续费价格：按支付周期折算到月均（后端 MonthlyEquivalent 口径）。
-    // once/lifetime 折算后是 0，靠 fee_cycle 区分"终身/一次性"与"没配价格"
-    // ——两者数值都是 0，但文案必须不同，不能都写 "—"。
-    var feeText = '—';
-    if (n.monthly_fee > 0) {
-      feeText = fmtMoney(n.monthly_fee, n.monthly_fee_currency) + ' / 月';
-    } else if (n.fee_cycle === 'lifetime') {
-      feeText = '终身';
-    } else if (n.fee_cycle === 'once') {
-      feeText = '一次性';
-    }
-    setText(c.feeV, feeText);
 
     renderLatencyBars(c.lat, n.lat_bars);
 
@@ -1057,7 +1202,7 @@
   function renderDetail(n) {
     detailNode = n;
     setText($('detail-name'), n.name || n.public_id);
-    renderFlag($('detail-flag'), n.country);
+    renderFlag($('detail-flag'), countryOf(n));
     var st = $('detail-status');
     setText(st, statusText(n, Math.floor(Date.now() / 1000)));
     setClass(st, 'chip ' + (n.status || 'offline'));

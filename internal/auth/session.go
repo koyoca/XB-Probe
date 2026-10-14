@@ -117,6 +117,9 @@ func ReadSessionCookie(r *http.Request) (string, bool) {
 }
 
 // CheckIdleExpiry 判定会话是否因空闲过期（9.3）。
+//
+// 这是"没有任何后台配置"时的默认口径；真实部署请用 CheckSession 走
+// 管理员在后台配的登录有效期（见 SessionLimits.Absolute）。
 func CheckIdleExpiry(s *Session, now time.Time) error {
 	if now.Unix() > s.ExpiresAt {
 		return fmt.Errorf("会话过期")
@@ -125,6 +128,53 @@ func CheckIdleExpiry(s *Session, now time.Time) error {
 		return fmt.Errorf("会话绝对过期")
 	}
 	return nil
+}
+
+// SessionLimits 是会话的两条时间线。
+//
+//	Idle      空闲上限：距上一次活动的时长（默认 2 小时，不可配置）
+//	Absolute  绝对上限：从**登录那一刻**算起，到点必须重新登录。
+//	          这一条是后台设置项「登录有效期」控制的（0 = 不设上限，仅空闲过期）。
+//
+// 为什么绝对上限必须在服务端判：仅仅把 Cookie 的 MaxAge 设成它是不够的——
+// 浏览器不再发送那个 Cookie 只是"客户端行为"，而会话行仍然在库里有效，
+// 拿到过 Cookie 值的人（备份、日志、被偷的设备）可以绕过浏览器继续用。
+type SessionLimits struct {
+	Idle     time.Duration
+	Absolute time.Duration
+}
+
+// DefaultSessionLimits 返回出厂设置下的会话限制（与设置项默认值一致）。
+func DefaultSessionLimits() SessionLimits {
+	return SessionLimits{Idle: SessionIdleTTL, Absolute: SessionAbsoluteTTL}
+}
+
+// CheckSession 判定会话是否仍然有效：绝对上限与空闲上限两条线都要过。
+func CheckSession(s *Session, now time.Time, lim SessionLimits) error {
+	if s == nil {
+		return fmt.Errorf("会话无效")
+	}
+	if lim.Absolute > 0 && now.Unix() >= s.CreatedAt+int64(lim.Absolute.Seconds()) {
+		return fmt.Errorf("登录有效期已到")
+	}
+	if lim.Idle > 0 && now.Unix() > s.ExpiresAt {
+		return fmt.Errorf("会话空闲过期")
+	}
+	return nil
+}
+
+// TouchDeadline 计算续期后的空闲截止时间，且**不超过**绝对上限。
+//
+// 这一点是"登录有效期"能被当真兑现的关键：只要活动就无限往后推的空闲截止时间，
+// 会让一个永不离线的页签把绝对上限架空。
+func TouchDeadline(s *Session, now time.Time, lim SessionLimits) int64 {
+	d := now.Add(lim.Idle).Unix()
+	if lim.Absolute > 0 {
+		if abs := s.CreatedAt + int64(lim.Absolute.Seconds()); d > abs {
+			d = abs
+		}
+	}
+	return d
 }
 
 // BearerToken 从 Authorization 头解析 Bearer 令牌（7.1）。

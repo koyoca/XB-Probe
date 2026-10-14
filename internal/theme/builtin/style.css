@@ -484,6 +484,12 @@ a.icon-btn { text-decoration: none; }
   display: inline-flex; align-items: center; justify-content: center;
 }
 .n-flag svg { display: block; border-radius: 2px; box-shadow: 0 0 0 1px rgba(15, 23, 42, .18); }
+/* 没有旗可画时整格收起（display:none），不留 20px 空白。
+   以前固定宽度在"未设置国家/地区"的节点上表现为标题左侧凭空多一块空档，
+   很显眼也很费解。有旗时仍按上面的尺寸渲染。
+   元素为空是渲染的既定状态：renderFlag 先 textContent = '' 再 appendChild(svg)，
+   所以 :empty 只在"确实没旗"时命中。 */
+.n-flag:empty { display: none; }
 /* 详情页标题旁稍大一点：那里的字号比卡片大，同尺寸会显得小气。 */
 .detail-head .n-flag { width: 26px; height: 18px; }
 .detail-head .n-flag svg { width: 26px; height: 18px; }
