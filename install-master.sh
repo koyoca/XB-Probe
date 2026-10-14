@@ -133,6 +133,11 @@ install-master.sh —— XB-Probe Master 整机一键部署
   --reset-password     只重置管理员密码（不需要源码与 Go，不卸载、不清数据）。
                        口令按 PROBE_ADMIN_PASSWORD / --admin-password / 交互的
                        顺序取；用户名默认 ops，可用 --admin-user 指定。
+  --migrate-legacy     改名之前（probe-master 时代）装过的机器用它搬家：搬
+                       /var/lib/probe-master 与 /etc/probe-master 到新路径、
+                       改写配置里写死的老路径、停用旧单元，然后照常安装。
+                       **指定它即等于选了「安装 / 升级」，不会再问模式**。
+                       目标已有内容绝不覆盖，可反复重跑。
   -h, --help           显示本帮助
 
   其余参数透传给 scripts/deploy-master.sh：
@@ -441,7 +446,17 @@ if [ -z "$UNINSTALL" ] && [ -z "$RELEASE_ONLY" ] &&
 		if download "$_base/scripts/deploy-master.sh" >"$_tmpq/deploy-master.sh" 2>/dev/null &&
 			[ -s "$_tmpq/deploy-master.sh" ]; then
 			# 菜单与提示走它的 stderr（直接显示给用户），答案只可能是 1/2/3/4/5。
-			case "$(sh "$_tmpq/deploy-master.sh" --ask-mode 2>/dev/null || true)" in
+			#
+			# --migrate-legacy 要一起带过去：它把答案说死了（只与"安装 / 升级"
+			# 搭配），部署脚本见到它就不再问这一问。不带的话用户会在这里被问
+			# 一次，选错就白跑——菜单第 4 项"只升级本体"看着最像"升级"，而它
+			# 恰恰是老布局机器上最该避开的那个（见 deploy-master.sh 的 0-1 段）。
+			if [ -n "$MIGRATE_LEGACY" ]; then
+				_ask_out="$(sh "$_tmpq/deploy-master.sh" --ask-mode --migrate-legacy 2>/dev/null || true)"
+			else
+				_ask_out="$(sh "$_tmpq/deploy-master.sh" --ask-mode 2>/dev/null || true)"
+			fi
+			case "$_ask_out" in
 			1) __ASKED_MODE="1" ;;
 			2) UNINSTALL="1" ;;
 			3) RELEASE_ONLY="1" ;;

@@ -88,6 +88,9 @@ RELEASE_ONLY=""
 UPGRADE_ONLY=""
 # 只重置管理员密码（不需要二进制）。
 RESET_PASSWORD=""
+# 老布局（改名前 probe-master 时代）搬迁。**修饰开关**，不是模式：它只与
+# "安装 / 升级"搭配，所以既不进互斥计数，也不参与"做什么"的答案。
+MIGRATE_LEGACY=""
 KEEP_DATA=""
 
 # "做什么"的答案（1 安装/升级、2 卸载、3 只更新发布文件、4 只升级本体、5 重置密码）。
@@ -126,6 +129,11 @@ install-master-bin.sh —— XB-Probe Master 免编译部署（从 Releases 取�
                         地址、证书、监听端口、管理员账号那一套，装完只把新二进制
                         换上去并重启服务（配置、证书、管理员、data_dir/dist 都不动）
   --reset-password      只重置管理员密码（不下载、不卸载、不清数据）
+  --migrate-legacy      改名之前（probe-master 时代）装过的机器用它搬家：搬
+                        /var/lib/probe-master 与 /etc/probe-master 到新路径、
+                        改写配置里写死的老路径、停用旧单元，然后照常安装。
+                        **指定它即等于选了「安装 / 升级」，不会再问模式**。
+                        目标已有内容绝不覆盖，可反复重跑。
   --keep-data           与 --uninstall 同用
   -h, --help            显示本帮助
 
@@ -249,7 +257,7 @@ while [ $# -gt 0 ]; do
 	--release-only) RELEASE_ONLY="1"; PASSTHRU="$PASSTHRU --release-only"; shift ;;
 	--upgrade-only) UPGRADE_ONLY="1"; PASSTHRU="$PASSTHRU --upgrade-only"; shift ;;
 	--reset-password) RESET_PASSWORD="1"; PASSTHRU="$PASSTHRU --reset-password"; shift ;;
-	--migrate-legacy) PASSTHRU="$PASSTHRU --migrate-legacy"; shift ;;
+	--migrate-legacy) MIGRATE_LEGACY="1"; PASSTHRU="$PASSTHRU --migrate-legacy"; shift ;;
 	--keep-data) KEEP_DATA="1"; PASSTHRU="$PASSTHRU --keep-data"; shift ;;
 	-h | --help) usage; exit 0 ;;
 	--)
@@ -371,10 +379,18 @@ elif [ ! -t 0 ]; then
   · 不交互：加 --yes，并显式给出 --public-origin（口令设 PROBE_ADMIN_PASSWORD）
 EOF
 	exit 2
-else
-	# 菜单与提示走它的 stderr（直接显示给用户），答案走 stdout（只可能是 1~5）。
-	MODE="$(sh "$DEPLOY" --ask-mode)" || MODE=""
-	case "$MODE" in
+	else
+		# 菜单与提示走它的 stderr（直接显示给用户），答案走 stdout（只可能是 1~5）。
+		#
+		# --migrate-legacy 必须一起带过去：它把答案说死了（只与"安装 / 升级"搭配），
+		# 部署脚本见到它就不再问这一问。不带的话用户在这里会被问一次，而"选错"
+		# 的代价已经实测过：照提示加了 --migrate-legacy、菜单里顺手选了 4
+		# （看着最像"升级"），于是撞上老布局拦截——一条命令能做完的迁移变成报错。
+		_ask_args="--ask-mode"
+		if [ -n "$MIGRATE_LEGACY" ]; then _ask_args="$_ask_args --migrate-legacy"; fi
+		# shellcheck disable=SC2086
+		MODE="$(sh "$DEPLOY" $_ask_args)" || MODE=""
+		case "$MODE" in
 	1 | 2 | 3 | 4 | 5) MODE_ASKED="1" ;;
 	*)
 		warn "取回的部署脚本不认识 --ask-mode（大概用了较早的 --script-ref），改由它自己提问。"
