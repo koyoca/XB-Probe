@@ -163,7 +163,11 @@ err() { printf '错误：%s\n' "$*" >&2; }
 #   · 请求头 no-cache / Pragma 让 CDN 与中间代理回源校验；
 #   · URL 上带一个每次都不同的查询串——CDN 的缓存键含查询串，于是必然 miss。
 # 查询串对 raw 服务是**无害的**（它按路径取文件，忽略查询），所以不必担心取不到。
-# 取回后再用 check_script_freshness 核对指纹并提示，见下面。
+#
+# 取回来的脚本会**自报身份**：`sh deploy-master.sh` 一开头的 script_self_check 会打印
+# 自己的指纹与"这份脚本里有没有那几处关键修复"——那就是"我跑的是哪一版"的对照物。
+# 本脚本不另外核对一遍指纹（原先这里有句注释提到一个 check_script_freshness，
+# 那个函数从来没有存在过，别照着它去找）。
 download() {
 	_url="$1"
 	_bust="xbp=$(date +%s 2>/dev/null || echo 0)$$"

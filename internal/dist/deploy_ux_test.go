@@ -950,47 +950,87 @@ func TestStdinIsDrainedOnlyWhenNotATTY(t *testing.T) {
 // 这条护栏钉两件事：① 取脚本时必须做缓存规避；② 部署脚本要能自报身份，
 // 让"跑的是哪一版"从猜测变成一个可核对的事实。
 func TestScriptFetchBypassesCDNCache(t *testing.T) {
-	entry := readRepoFile(t, "../../install-master-bin.sh")
-
 	// ① 请求头 + 查询串，两个都要（只加头，有些中间代理照样命中缓存）。
 	//
-	// **两条分支各查各的**：curl 那支与 wget 那支都要带缓存规避。用全文
-	// Contains 查一个子串时，只改 curl 那支、wget 那支留着，护栏照样绿——
-	// 而用 wget 的机器正是复制到旧脚本的那一半（变异验证时踩到过）。
-	if !strings.Contains(entry, "curl -fsSL \\\n\t\t\t-H 'Cache-Control: no-cache'") {
-		t.Error("curl 分支没有发 Cache-Control: no-cache：\n" +
-			"  raw 前面有 CDN，`main` 这种可变引用会被缓存，用户会拿到旧脚本。")
-	}
-	if !strings.Contains(entry, "wget -q --no-cache") {
-		t.Error("wget 分支没有 --no-cache：\n" +
-			"  只用 wget 的机器（最小化容器很常见）会照旧拿到 CDN 缓存的旧脚本。")
-	}
-	// wget 那支有**两条调用**（带进度条优先、失败退回静默），两条都必须是
-	// --no-cache。只查一次 Contains 时，改掉其中一条另一条仍绿——那正是
-	// 变异验证里 H2 仍然绿的原因（护栏判据不够紧，不是实现有问题）。
-	wgetCalls, wgetNoCache := 0, 0
-	for _, line := range strings.Split(entry, "\n") {
-		trimmed := strings.TrimLeft(line, " \t")
-		if strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		if strings.HasPrefix(trimmed, "wget ") {
-			wgetCalls++
-			if strings.Contains(trimmed, "--no-cache") {
-				wgetNoCache++
+	// **两个 sh 入口都要查**：这条链路上有**两个**独立取脚本的 sh 脚本，改一个漏一个
+	// 就是"改一处＝没改"。
+	//   · install-master-bin.sh —— 免编译装：下发布二进制，再 raw 取部署脚本；
+	//   · install-master.sh     —— 源码编译装：同样有两条 raw 取件路（① 先把部署脚本
+	//     取回来问"做什么"的菜单；② 卸载 / 更新发布文件 / 重置密码的单次模式早退）。
+	// 漏掉后者是核对时实际发现的：它的 download() 曾是**裸 curl/wget**——
+	// 同一台机器上"仓库里修好了、CI 全绿、而用户拿到旧脚本"会照样复现，且这条路
+	// （FreeBSD / 通用 Linux 的源码安装）在 CI 上根本不会被走到。
+	//
+	// **逐条命令查**，不要用全文 Contains：curl 那支与 wget 那支各查各的。只查一个
+	// 子串时，改掉 curl 那支、wget 那支留着，护栏照样绿——而用 wget 的机器正是
+	// 复制到旧脚本的那一半（变异验证时踩到过）。
+	//
+	// 查的范围是 **download() 的函数体**（不是全文）：两个入口的用法说明里都有
+	// `curl -fsSL <本脚本的 URL> …` 这类示例，那是文档不是代码。
+	for _, entryFile := range []string{
+		"../../install-master-bin.sh",
+		"../../install-master.sh",
+	} {
+		src := readRepoFile(t, entryFile)
+		dl := shFuncBody(t, entryFile, src, "download")
+
+		curlCalls, wgetCalls := 0, 0
+		for _, cmd := range downloadCommandsIn(dl) {
+			switch {
+			case strings.HasPrefix(cmd, "curl "):
+				curlCalls++
+				if !strings.Contains(cmd, "-H 'Cache-Control: no-cache'") {
+					t.Errorf("%s 有一条 curl 没发 Cache-Control: no-cache：\n%s\n"+
+						"  raw 前面有 CDN，`main` 这种可变引用会被缓存，用户会拿到旧脚本。",
+						entryFile, cmd)
+				}
+			case strings.HasPrefix(cmd, "wget "):
+				wgetCalls++
+				if !strings.Contains(cmd, "--no-cache") {
+					t.Errorf("%s 有一条 wget 没带 --no-cache：\n%s\n"+
+						"  只用 wget 的机器（最小化容器、FreeBSD 很常见）会照旧拿到 CDN 缓存的旧脚本。",
+						entryFile, cmd)
+				}
 			}
 		}
+		// 两条分支都要在：curl 优先、wget 兜底。少一条，那一类机器就回到"拿到旧脚本
+		// 且看不出原因"的状态——而 CI 跑在 Linux 上、curl 又几乎总是存在，发现不了。
+		if curlCalls < 1 {
+			t.Errorf("%s 的 download() 里没有带缓存规避的 curl 调用（判据已与脚本写法脱节）", entryFile)
+		}
+		if wgetCalls < 1 {
+			t.Errorf("%s 的 download() 里没有 wget 兜底（或它没带 --no-cache）：\n"+
+				"  最小化容器与 FreeBSD 上常常只有 wget。", entryFile)
+		}
+		// 查询串：光靠请求头不够（有些中间代理照旧命中自己的缓存），
+		// CDN 的缓存键含查询串，带上它才必然回源。
+		if !strings.Contains(src, "_bust=") || !strings.Contains(src, "date +%s") {
+			t.Errorf("%s 取脚本时 URL 上没有随机会话串：\n"+
+				"  CDN 的缓存键含查询串，带上它才必然回源。", entryFile)
+		}
 	}
-	if wgetCalls == 0 {
-		t.Error("找不到 wget 调用（判据与脚本脱节）")
-	} else if wgetNoCache != wgetCalls {
-		t.Errorf("wget 有 %d 条调用，其中只有 %d 条带 --no-cache：\n"+
-			"  两条分支是「先带进度条、失败退回静默」，退化的那条同样会被 CDN 缓存骗到。",
-			wgetCalls, wgetNoCache)
-	}
-	if !strings.Contains(entry, "_bust=") || !strings.Contains(entry, "date +%s") {
-		t.Error("取脚本时 URL 上没有随机会话串：\n" +
-			"  CDN 的缓存键含查询串，带上它才必然回源。")
+
+	// 查询串在 install-master.sh 里**必须收在 raw 那一个 case 分支内**：它除了取脚本，
+	// 还要下 Go 工具链 tarball（go.dev / golang.google.cn / 阿里云镜像）。那是
+	// **按版本寻址、内容不变**的东西——加查询串没有收益，反而多一个"镜像站认不认这个
+	// 参数、302 跳到另一台机器后参数还在不在"的未知。写成"所有下载一律加"就把它一起
+	// 套了进去（改之前那版 download() 正是没有分支、裸下载的）。
+	//
+	// 判据：raw 的 case 模式（带右括号）出现在前，加查询串的那行出现在后 ⇒ 说明它在
+	// 分支里面，而不是无条件执行的第一句。
+	srcScript := readRepoFile(t, "../../install-master.sh")
+	const rawCasePattern = "https://raw.githubusercontent.com/*)"
+	iCase := strings.Index(srcScript, rawCasePattern)
+	iAppend := strings.Index(srcScript, "xbp=${_bust}")
+	switch {
+	case iCase < 0:
+		t.Error("install-master.sh 里没有 raw 的 case 分支（判据已与脚本写法脱节）")
+	case iAppend < 0:
+		t.Error("install-master.sh 里没有加查询串的那句（判据已与脚本写法脱节）")
+	case iAppend < iCase:
+		t.Error("install-master.sh 的查询串不在 raw 那个 case 分支里：\n" +
+			"  它还要下 Go 工具链 tarball（按版本寻址、内容不变，还会 302 到别的域），\n" +
+			"  一律加查询串是多出来的未知——应该只对 raw 生效。")
 	}
 
 	// ② 部署脚本要打印自己的指纹与关键修复标记。
@@ -1034,6 +1074,29 @@ func TestScriptFetchBypassesCDNCache(t *testing.T) {
 		t.Error("install-master.ps1 里 Save-RawScript 的调用点少于 2 处：\n" +
 			"  只要有一处仍用裸 Invoke-WebRequest，那条路就会拿到 CDN 缓存的旧脚本。")
 	}
+}
+
+// downloadCommandsIn 从一段 shell 里挑出**下载命令**（行首是 curl / wget 的那些）。
+//
+// 复用 logicalLines 拼续行，所以 `curl -fsSL \` ↵ `-H '…'` 算**一条**命令而不是两条；
+// 首行去掉缩进，调用方才能按前缀判 curl / wget。
+//
+// **只传函数体，不要传全文**：入口脚本的用法说明（heredoc）里也写着
+// `curl -fsSL <本脚本的 URL> -o install-master.sh` 这样的示例——那不是代码。
+// 拿全文来数会把示例也算成命令，于是要么误报、要么逼着给文档里那句示例加
+// --no-cache（把护栏变成噪音，下一个人就会把它删掉）。
+func downloadCommandsIn(region string) []string {
+	var out []string
+	for _, ln := range logicalLines(region) {
+		t := strings.TrimLeft(ln, " \t")
+		if t == "" || strings.HasPrefix(t, "#") {
+			continue
+		}
+		if strings.HasPrefix(t, "curl ") || strings.HasPrefix(t, "wget ") {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------

@@ -204,11 +204,43 @@ done
 # ---------------------------------------------------------------------------
 
 # download <url>：把内容写到 stdout。curl / wget 任一即可。
+#
+# **raw.githubusercontent.com 上的东西必须做缓存规避**，两个手段一起用（缺一都可能不够）：
+#   · 请求头 no-cache / Pragma —— 让 CDN 与中间代理回源校验；
+#   · URL 上带一个每次都不同的查询串 —— CDN 的缓存键含查询串，于是必然 miss。
+# 原因：raw 前面有一层 CDN，`main` 这种**可变引用**会被它缓存。文件名不变、内容变了，
+# 它仍可能继续发旧内容（GitHub 侧刷新有延迟）。后果极难查：仓库里已经修好、CI 全绿，
+# 用户取到的却是旧脚本，于是反复失败在同一个地方——install-master-bin.sh 里那次
+# 故障就是这么来的，这里是同一个坑的另一半。
+#
+# 本脚本有**两条路**会从 raw 取 scripts/deploy-master.sh（① 先取回来问"做什么"的菜单；
+# ② 卸载/更新发布文件/重置密码的单次模式早退），两条都走这个函数，所以放在这里一处即可。
+# 主装路径不受影响：它 clone 仓库、用检出里的那份脚本，本来就不是 raw。
+#
+# **只对 raw 加查询串**，别的路径原样取：
+#   · Go 工具链 tarball（go.dev / golang.google.cn / 阿里云镜像）是**按版本寻址、
+#     内容不变**的，加查询串没有收益，反而多一个"镜像站认不认这个参数"的未知——
+#     它还会 302 到另一台机器，参数会不会被丢掉谁也不敢保证。请求头仍照发（无害）。
 download() {
+	_url="$1"
+	case "$_url" in
+	https://raw.githubusercontent.com/*)
+		_bust="$(date +%s 2>/dev/null || echo 0)$$"
+		_sep='?'
+		case "$_url" in *\?*) _sep='&' ;; esac
+		_url="${_url}${_sep}xbp=${_bust}"
+		;;
+	esac
 	if command -v curl >/dev/null 2>&1; then
-		curl -fsSL --max-time 120 "$1"
+		curl -fsSL --max-time 120 \
+			-H 'Cache-Control: no-cache' \
+			-H 'Pragma: no-cache' \
+			"$_url"
 	elif command -v wget >/dev/null 2>&1; then
-		wget -qO- --timeout=120 "$1"
+		wget -qO- --timeout=120 --no-cache \
+			--header='Cache-Control: no-cache' \
+			--header='Pragma: no-cache' \
+			"$_url"
 	else
 		return 1
 	fi
