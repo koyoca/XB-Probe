@@ -3375,6 +3375,43 @@ EOF
 	echo "    已启用并启动 caddy"
 fi
 
+# site_gate_advice <HTTP 码> <域名>：把"服务端**已经答复**了、只是状态不对"讲清楚。
+#
+# 这一类的共同点：不是连不上、也不是证书没拿到，而是服务端明确拒绝了这次请求。
+# 重试一分钟也不会变——所以每个撞上它的地方都当场停手，不做无谓等待。
+# 真机（v0.1.3）就是在这里空等了 60 秒，最后只拿到四条猜测；而事实是
+# 站点形态按**域名**门控，配置里生效的公开域名不是用户正在用的那个。
+site_gate_advice() {
+	_dga_code="${1:-}"
+	_dga_dom="${2:-}"
+	echo "  请求已经走完网络、进了服务端，只是被**拒**了——所以这不是证书或端口问题，" >&2
+	echo "  再等下去也不会变，原因在配置里：" >&2
+	case "$_dga_code" in
+	421)
+		echo "  · HTTP 421 = 域名不在白名单。站点形态是按域名门控的，$_dga_dom 不在" >&2
+		echo "    当前生效的公开域名清单里——那样**所有**请求都会被拒（含本机自检）。" >&2
+		echo "    最常见的原因是：本机 $CFG 是**上一次安装留下的**。第 3 步对已存在的" >&2
+		echo "    配置只做「保留」，所以你在问答里填的新域名根本没写进去。" >&2
+		echo "    先看它现在记的是什么：" >&2
+		echo "      grep -nE 'public_origin|public_hosts|admin_origin|admin_hosts' $CFG" >&2
+		echo "    修法（任选其一）：" >&2
+		echo "      ① 按本次答案重写配置后重跑本脚本：加 --force-config" >&2
+		echo "         （旧配置会先备份成 $CFG.bak）" >&2
+		echo "      ② 进后台「系统设置 → 站点形态」把公开域名改成 $_dga_dom ——" >&2
+		echo "         但域名被拒时后台同样打不开，这条路通常走不通。" >&2
+		;;
+	404)
+		echo "  · HTTP 404 = 这个路径在服务端不存在，通常是**脚本与二进制版本错配**" >&2
+		echo "    （脚本取 main，二进制取 Release 标签）。换成配套的版本重跑。" >&2
+		;;
+	*)
+		echo "  · HTTP $_dga_code：去服务端日志找原因——" >&2
+		echo "      journalctl -u xb-probe-master --no-pager -n 50" >&2
+		;;
+	esac
+	return 0
+}
+
 echo "==> 6/7 健康检查"
 # 公开站 /site 是免鉴权的，用它确认进程真的在听；最多等 20 秒。
 #
@@ -3383,18 +3420,38 @@ echo "==> 6/7 健康检查"
 # selfsigned 用 -k 是**有意**的：这里问的是"进程在不在听"，不是"证书链可不可信"，
 # 两者混在一起会让自签部署次次看起来像失败。acme 同理——首张证书由服务前台申请，
 # 此刻要么已经拿到、要么服务没起来，证书链验证失败并不代表服务没起来。
+#
+# 反代在前的部署还必须**带上对外域名当 Host**：站点形态是按域名门控的，
+# 拿 127.0.0.1 当 Host 会被判 421。以前这里正是这样——于是这个"健康检查"
+# 永远看不出服务到底行不行，只是白等 20 秒再打印一段状态（v0.1.3 真机上
+# 它就把一次配置错配完整地掩盖了过去）。
 case "$TLS_MODE" in
 none) SCHEME="http"; CURL_EXTRA="" ;;
 files) SCHEME="https"; CURL_EXTRA="" ;;
 selfsigned | acme) SCHEME="https"; CURL_EXTRA="-k" ;;
 esac
+HC_HOST=""
+if [ "$TLS_TERMINATOR" = "caddy" ] && [ -n "${_cd_dom:-}" ]; then
+	HC_HOST="$_cd_dom"
+fi
 i=0
+_hc_code=""
 while [ $i -lt 20 ]; do
 	if command -v curl >/dev/null 2>&1; then
-		if curl -fsS $CURL_EXTRA "${SCHEME}://${HEALTH_ADDR}/api/public/v1/site" >/dev/null 2>&1; then break; fi
+		if [ -n "$HC_HOST" ]; then
+			_hc_code="$(curl -sS -o /dev/null -w '%{http_code}' $CURL_EXTRA -H "Host: $HC_HOST" "${SCHEME}://${HEALTH_ADDR}/api/public/v1/site" 2>/dev/null)" || _hc_code="000"
+		else
+			_hc_code="$(curl -sS -o /dev/null -w '%{http_code}' $CURL_EXTRA "${SCHEME}://${HEALTH_ADDR}/api/public/v1/site" 2>/dev/null)" || _hc_code="000"
+		fi
+		case "$_hc_code" in
+		2*) break ;;
+		0*) : ;; # 连接层没通：服务可能还在起，继续等
+		*) break ;; # 已经答复了但状态不对：等也没用，交给下面判
+		esac
 	elif command -v wget >/dev/null 2>&1; then
 		# wget 在自签/未签发证书下必须 --no-check-certificate，否则同样白等 20 秒。
 		if wget -q --no-check-certificate -O- "${SCHEME}://${HEALTH_ADDR}/api/public/v1/site" >/dev/null 2>&1; then break; fi
+		_hc_code=""
 	else
 		break
 	fi
@@ -3402,6 +3459,28 @@ while [ $i -lt 20 ]; do
 	sleep 1
 done
 systemctl --no-pager status xb-probe-master | sed -n '1,8p' || true
+# 非 2xx 是**确定性的拒绝**，不是"还没起来"：当场停手，并把断点说清楚。
+# 以前这里只是白等 20 秒，然后交给后面那步 60 秒超时去猜——两次都猜错了方向。
+#
+# 但只有"探的 Host 就是我们要对外发布的那个域名"时才敢据此判失败（HC_HOST 非空）。
+# 其余情形（自签/ACME 由 Master 自己终结 TLS，探的是 127.0.0.1）里，
+# 拿回环 Host 去问一个按域名门控的服务，本来就会被判"域名不对"——
+# 那是探测方式的偏差，不是部署坏了，所以只提示、不回滚。
+case "$_hc_code" in
+2* | 0* | "") : ;;
+*)
+	if [ -n "$HC_HOST" ]; then
+		echo "" >&2
+		echo "错误：Master 用域名 $HC_HOST 访问 /api/public/v1/site 回了 HTTP $_hc_code。" >&2
+		site_gate_advice "$_hc_code" "$HC_HOST"
+		echo "" >&2
+		rollback "Master 拒绝服务这个域名（HTTP $_hc_code）"
+	else
+		echo "    注：Master 对 $HEALTH_ADDR 回了 HTTP $_hc_code（本次探测用的是监听地址当 Host）。" >&2
+		echo "      站点形态按域名门控的部署里这属正常现象，继续走后面的证书步骤。" >&2
+	fi
+	;;
+esac
 
 echo "==> 6/7 证书"
 # 这一步是本轮改动里最要紧的一处，用户的原话是：
@@ -3433,21 +3512,64 @@ if [ "$TLS_TERMINATOR" = "caddy" ]; then
 	# Host 仍然是域名。一次问清三件事：证书对这个域名有效、路由指到反代目标、
 	# 目标活着。而**不能**用"本机访问自己的公网域名"来判——
 	#
-	# v0.1.3 首次部署真机撞到的就是它：Caddy 起来了、证书早就在
-	# /root/.local/share/caddy 里（日志里连一行 tls.obtain 都没有）、站外打开正常，
-	# 但这台主机的公网 IP 由机房做映射、本机只有私网地址，**回不到自己的公网 IP**，
-	# curl 60 秒不通。脚本于是判定"反代未生效"，把一次本来成功的部署整份回滚，
-	# 站点反而被脚本自己弄下线了——判据问错了对象：外面能不能进来，是网络拓扑的
-	# 事情（机房/安全组放不放行），不是这次安装装坏了什么。
+	# 站外可达性另算：公网 IP 由机房做映射的主机**回不到自己的公网地址**，
+	# 拿"本机访问自己的公网域名"当回滚依据会误杀一次本来成功的部署
+	# （站点反而被脚本自己弄下线）。所以那一趟只提示、不回滚。
+	# 而回环探测若也失败，说明问题确实在服务端这一侧——那就别猜了，
+	# 按下面分段探测的结果说话。
+
+	# _cd_hop <url> [curl 参数…]：探一次，打印 HTTP 码（非 2xx 时附上服务端原话），
+	# 连不上则打印 curl 的退出码。分段探测共用它，格式一致，一眼能看出断点在哪层。
+	_cd_hop() {
+		_cdh_url="$1"
+		shift
+		_cdh_rc=0
+		_cdh_raw="$(curl -sS --max-time 5 -o - -w '\n%{http_code}' "$@" "$_cdh_url" 2>/dev/null)" || _cdh_rc=$?
+		_cdh_code="$(printf '%s\n' "$_cdh_raw" | tail -n 1)"
+		_cdh_body="$(printf '%s\n' "$_cdh_raw" | sed '$d' | tr -d '\r\n' | cut -c1-160)"
+		if [ -z "$_cdh_code" ] || [ "$_cdh_code" = "000" ]; then
+			printf '连不上（curl 退出码 %s）' "$_cdh_rc"
+		else
+			printf 'HTTP %s' "$_cdh_code"
+			# `${x#2} = $x` 为真 ⇔ 这个状态码不是 2 开头。用参数展开而不是 case，
+			# 免得为一个判断再嵌一层。
+			if [ -n "$_cdh_body" ] && [ "${_cdh_code#2}" = "$_cdh_code" ]; then
+				printf '  ← %s' "$_cdh_body"
+			fi
+		fi
+		return 0
+	}
+	# 本机回环探测**不该**经过代理：设了 http_proxy/https_proxy 的机器上，
+	# curl 会把请求交给代理，--resolve 也就一并失效——现象是"本机连不上自己的
+	# 回环"，而 Caddy 那边一行日志都没有。所以探测一律带 --noproxy '*'。
+	_cd_proxy="${https_proxy:-${HTTPS_PROXY:-}}"
+	if [ -n "$_cd_proxy" ]; then
+		echo "    注：本机设了 https_proxy=$_cd_proxy；回环探测已用 --noproxy '*' 直连，不受它影响。" >&2
+	fi
 	echo "    正在等待 Caddy 为 $_cd_dom 就绪（最多 60 秒，本机回环探测）…"
+	# 连接层与 HTTP 层必须分开判，否则会把两种完全不同的病报成同一句话：
+	#   · 连接层没通（curl 到不了 443）——证书可能还在申请，值得等；
+	#   · 服务端**已经答复**了但状态不对——配置问题，再等 60 秒也是同一个答案。
+	# 真机（v0.1.3）栽的就是第二种：脚本空等 60 秒，然后把"打不开"归因到
+	# 证书 / DNS / 端口占用，四条猜测全错。
 	_cd_ok=""
+	_cd_hf=""
 	i=0
 	while [ $i -lt 30 ]; do
-		if curl -fsS --max-time 5 --resolve "$_cd_dom:443:127.0.0.1" \
-			"https://$_cd_dom/api/public/v1/site" >/dev/null 2>&1; then
+		_cd_code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 --noproxy '*' \
+			--resolve "$_cd_dom:443:127.0.0.1" "https://$_cd_dom/api/public/v1/site" 2>/dev/null)" || _cd_code="000"
+		case "$_cd_code" in
+		2*)
 			_cd_ok="1"
 			break
-		fi
+			;;
+		0*) : ;; # 连接层没通：证书可能还在申请，继续等
+		4*)
+			_cd_hf="$_cd_code"
+			break
+			;; # 4xx：服务端明确拒绝，等下去也不会变
+		*) : ;; # 5xx：反代够不着上游或上游出错，可能还在起，继续等
+		esac
 		i=$((i + 1))
 		sleep 2
 	done
@@ -3455,7 +3577,7 @@ if [ "$TLS_TERMINATOR" = "caddy" ]; then
 		echo "    https://$_cd_dom 已就绪（Caddy 终结 TLS，证书与反代本机自证通过）"
 		# 站外可达性是**另一个问题**，所以单独判，而且只警告、不回滚：
 		# 本机够不着自己的公网地址只说明网络拓扑，用它当回滚依据会误杀（见上）。
-		if curl -fsS --max-time 8 -o /dev/null "https://$_cd_dom/api/public/v1/site" 2>/dev/null; then
+		if curl -fsS --max-time 8 --noproxy '*' -o /dev/null "https://$_cd_dom/api/public/v1/site" 2>/dev/null; then
 			echo "    https://$_cd_dom 公网回路可达"
 		else
 			echo "" >&2
@@ -3467,18 +3589,85 @@ if [ "$TLS_TERMINATOR" = "caddy" ]; then
 			echo "        · 机房/安全组是否放行 443 与 80（80 供证书续期）" >&2
 			echo "" >&2
 		fi
+	elif [ -n "$_cd_hf" ]; then
+		# 已经答复了：请求走完了 Caddy、进了 Master，是**它**拒的。
+		# 这是配置问题（域名不认），不是证书问题，重试再久也不会变。
+		echo "" >&2
+		echo "错误：Caddy 与 TLS 都已就绪，但 https://$_cd_dom 对本机（回环）请求回了" >&2
+		echo "      HTTP $_cd_hf —— 请求已经穿过 Caddy 到达 Master，是它拒绝了这次访问。" >&2
+		_cd_body="$(curl -sS --max-time 5 --noproxy '*' -o - \
+			--resolve "$_cd_dom:443:127.0.0.1" "https://$_cd_dom/api/public/v1/site" 2>/dev/null)" || true
+		_cd_body="$(printf '%s' "$_cd_body" | tr -d '\r\n' | cut -c1-300)"
+		if [ -n "$_cd_body" ]; then
+			echo "      服务端原话：$_cd_body" >&2
+		fi
+		site_gate_advice "$_cd_hf" "$_cd_dom"
+		echo "" >&2
+		rollback "站点对该域名回了 HTTP $_cd_hf（配置不认这个域名，重试无用）"
 	else
 		# 失败要给出**能直接照做**的诊断，而不是"稍后再看看"。
 		echo "" >&2
 		echo "错误：Caddy 起来了，但 https://$_cd_dom 在本机（回环）60 秒内仍不可用。" >&2
-		echo "  这个判据连的是 127.0.0.1:443、SNI 与 Host 都是域名——它不通就说明" >&2
-		echo "  问题在 Caddy 这一侧（公网通不通、外面能不能进来都不参与这条判据）：" >&2
-		echo "  1) 证书没拿到（域名没解析到本机 / 80 端口不通 / CA 拒绝/限流）" >&2
-		echo "     → 看：journalctl -u caddy --no-pager | grep -iE 'acme|tls\\.obtain' | tail -n 30" >&2
-		echo "     → 确认域名指向本机：getent hosts $_cd_dom" >&2
-		echo "  2) Caddyfile 里没有这个域名的站点块 → 看：grep -n '$_cd_dom' $CADDYFILE" >&2
-		echo "  3) 80/443 被别的服务占用（x-ui、nginx、其他 caddy）→ 看：ss -lntp | grep -E ':(80|443)\\b'" >&2
-		echo "  4) Caddy 活着但反代目标不通（Master 没在听 $PUBLIC_LISTEN）→ 看：ss -lntp | grep 8080" >&2
+		echo "  这条判据连的是 127.0.0.1:443、SNI 与 Host 都是域名；公网通不通、" >&2
+		echo "  外面能不能进来都不参与。所以断点只可能是下面这几处之一。" >&2
+		echo "  curl 的原话（以前这段把它丢进了 /dev/null，最要紧的事实从未露面）：" >&2
+		_cd_rc=0
+		_cd_err="$(curl -sS -o /dev/null --max-time 5 --noproxy '*' \
+			--resolve "$_cd_dom:443:127.0.0.1" "https://$_cd_dom/api/public/v1/site" 2>&1 >/dev/null)" || _cd_rc=$?
+		if [ -n "$_cd_err" ]; then
+			echo "    $_cd_err（退出码 $_cd_rc）" >&2
+		else
+			echo "    （curl 没报错，说明它连上了；看下面的分段探测）" >&2
+		fi
+		echo "" >&2
+		echo "  ── 分段探测：三层各探一次，直接看断在哪一层 ──" >&2
+		printf '    · Master 直连（Host=%s）：' "$_cd_dom" >&2
+		_cd_hop "http://$HEALTH_ADDR/api/public/v1/site" -H "Host: $_cd_dom" >&2
+		printf '\n' >&2
+		printf '    · Master 直连（不带域名 Host）  ：' >&2
+		_cd_hop "http://$HEALTH_ADDR/api/public/v1/site" >&2
+		printf '\n' >&2
+		printf '    · 经 Caddy（--resolve 到回环）   ：' >&2
+		_cd_hop "https://$_cd_dom/api/public/v1/site" --noproxy '*' --resolve "$_cd_dom:443:127.0.0.1" >&2
+		printf '\n' >&2
+		# 监听状态：一次取回、逐个判。没有 ss/netstat 就直说"未知"，
+		# 不装作查过了——那正是上一轮四条猜测的来源。
+		_cd_ports=""
+		if command -v ss >/dev/null 2>&1; then
+			_cd_ports="$(ss -lnt 2>/dev/null)" || true
+		elif command -v netstat >/dev/null 2>&1; then
+			_cd_ports="$(netstat -lnt 2>/dev/null)" || true
+		fi
+		if [ -z "$_cd_ports" ]; then
+			echo "    · 监听状态：未知（本机没有 ss / netstat）" >&2
+		else
+			_cd_l=""
+			for _cd_p in 80 443 "${HEALTH_ADDR##*:}"; do
+				# 公开端口可能正好是 80/443，去重一次免得同一行出现两次。
+				case "$_cd_l" in
+				*" $_cd_p:"*) continue ;;
+				esac
+				if printf '%s\n' "$_cd_ports" | grep -qE "[:.]$_cd_p([^0-9]|$)"; then
+					_cd_l="$_cd_l $_cd_p:在听"
+				else
+					_cd_l="$_cd_l $_cd_p:不在听"
+				fi
+			done
+			echo "    · 监听状态：$_cd_l" >&2
+		fi
+		if Caddyfile_has_domain "$_cd_dom"; then
+			echo "    · $CADDYFILE 里 $_cd_dom 的站点块：有" >&2
+		else
+			echo "    · $CADDYFILE 里 $_cd_dom 的站点块：**没有**" >&2
+		fi
+		echo "    · 域名指向：$(getent hosts "$_cd_dom" 2>/dev/null | awk '{print $1}' | head -n1 || true)" >&2
+		echo "" >&2
+		echo "  按断点对号入座：" >&2
+		echo "    · 只有「经 Caddy」那层连不上 → 证书没拿到，看上面 curl 的原话：" >&2
+		echo "        journalctl -u caddy --no-pager | grep -iE 'acme|tls\\.obtain|error' | tail -n 30" >&2
+		echo "    · 「经 Caddy」那层回 502/504 → 反代够不着上游：Master 没在听 $HEALTH_ADDR" >&2
+		echo "    · 443 不在听 → Caddyfile 或端口被占（x-ui、nginx、其他 caddy）" >&2
+		echo "    · 「Master 直连」那两层也连不上 → Master 没在听 $HEALTH_ADDR" >&2
 		echo "" >&2
 		journalctl -u caddy --no-pager -n 20 2>/dev/null | sed 's/^/    /' >&2 || true
 		rollback "Caddy 反代未生效（本机回环探测 https://$_cd_dom 打不开，原因见上）"
