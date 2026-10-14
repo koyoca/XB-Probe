@@ -812,8 +812,8 @@ func TestUninstallStopsAndCleansCaddy(t *testing.T) {
 	//     本次装的 Caddy），它是另一条路径的实现，不能替卸载那段作证。
 	// 所以：只在"卸载段"这个区间里找行首的真实命令。
 	// 区的边界用卸载独有的步骤标题——它们只在卸载路径里出现。
-	uniStart := strings.Index(body, "==> 1/8 停止并注销服务")
-	uniEnd := strings.Index(body, "==> 8/8 删除系统用户")
+	uniStart := strings.Index(body, `say "1/8 停止并注销服务"`)
+	uniEnd := strings.Index(body, `say "8/8 删除系统用户"`)
 	if uniStart < 0 || uniEnd < 0 || uniEnd <= uniStart {
 		t.Fatal("找不到卸载段的边界标记（判据与脚本脱节）")
 	}
@@ -1438,7 +1438,7 @@ func TestDeployPullsReleaseFilesForNodeBootstrap(t *testing.T) {
 
 	// ---- 6c：部署流程里的策略层（切区间，见上面的说明）----
 	region := shRegion(t, "scripts/deploy-master.sh", body,
-		"6c/7 发布文件入库", `echo "==> 7/7 完成"`)
+		"6c/7 发布文件入库", `say "7/7 完成"`)
 
 	// ③ 版本号不是发布版本时（本地自编译的 dev）必须跳过，而不是硬去 GitHub 撞 404。
 	if !strings.Contains(region, `*[!0-9.]*`) {

@@ -8,8 +8,9 @@
 #
 # 不传 -AdminPassword 时会交互式提示（推荐）。
 #
-# 交互问答：**参数没给全时会问你**——TLS 方式（要不要 https）与校验方式、公开站/管理端
-# 各监听哪个端口、对外访问地址、管理员用户名，最后把将要做的事列一遍让你确认。
+# 交互问答：**参数没给全时会问你**——对外访问方式（要不要 https、证书谁办）与校验
+# 方式、公开站/管理端各监听哪个端口、对外访问地址、管理员用户名，紧接着是口令，
+# 最后把将要做的事列一遍让你确认（账号口令在确认之前就都问完了）。
 # 三种情况不问：-Yes ／ 标准输入被重定向 ／ 该项已显式给出。
 # 想在任何环境下都走一遍问答（自测用）：$env:PROBE_ASK_FORCE = "1"。
 #
@@ -101,6 +102,7 @@ $DefaultPublicListen = "0.0.0.0:8080"
 $DefaultAdminListen = ""
 
 function Write-Step { param([string]$Msg) Write-Host "==> $Msg" -ForegroundColor Cyan }
+function Write-Ok { param([string]$Msg) Write-Host $Msg -ForegroundColor Green }
 function Write-Warn2 { param([string]$Msg) Write-Host "警告：$Msg" -ForegroundColor Yellow }
 function Write-Err2 { param([string]$Msg) Write-Host "错误：$Msg" -ForegroundColor Red }
 
@@ -140,28 +142,14 @@ if ($env:PROBE_ASK_FORCE) { $Ask = $true }
 # ——调用方要拿到一个干净的数字，不能被菜单文本污染。
 function Show-ModeMenu {
     Write-Host ""
-    Write-Host "这个脚本可以做五件事："
+    Write-Host "这个脚本可以做五件事（回车=1）：" -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "  1) 安装 / 升级 Master"
-    Write-Host "     装（或升级）Master 本体：二进制、配置、开机自启，以及新节点要用的"
-    Write-Host "     Agent 发布文件。**会重新收敛整站配置**：重写 master.yaml、按需要申请"
-    Write-Host "     证书、初始化管理员。适合首次安装，或配置被改坏了要拉回正轨。"
-    Write-Host ""
-    Write-Host "  2) 卸载 Master"
-    Write-Host "     停任务 -> 删计划任务、二进制、配置、数据。默认**连数据一起删**。"
-    Write-Host ""
-    Write-Host "  3) 只更新 Agent 发布文件"
-    Write-Host "     去 GitHub 查最新 Release，把它的 Agent 发布文件拉进 data_dir/dist/。"
-    Write-Host "     不动 Master 的二进制、配置与自启（不重启、也不重问任何配置）。"
-    Write-Host ""
-    Write-Host "  4) 只升级 Master 本体"
-    Write-Host "     只换二进制并重启任务。**不重写 master.yaml、不申请证书、不碰管理员"
-    Write-Host "     账号、也不重拉 Agent 发布文件**。适合「网站已经跑得好好的，只想把"
-    Write-Host "     Master 升到新版本」。启动失败会自动换回旧二进制。"
-    Write-Host ""
-    Write-Host "  5) 重置管理员密码"
-    Write-Host "     只改一个管理员的登录口令（用户名默认 ops，可用 -AdminUser 指定），"
-    Write-Host "     其它什么都不动。忘了后台密码时用它，不必卸载重装。"
+    Write-Host "  1) 安装 / 升级 Master —— 二进制、配置、开机自启、Agent 发布文件一并装好；"
+    Write-Host "     会重写 master.yaml、按需申请证书、初始化管理员（升级走同一路径，配置不变的部分自动保留）"
+    Write-Host "  2) 卸载 Master —— 停任务并删除计划任务、二进制、配置、数据（默认连数据一起删）"
+    Write-Host "  3) 只更新 Agent 发布文件 —— 拉取最新 Release 的发布文件，不动 Master 本体"
+    Write-Host "  4) 只升级 Master 本体 —— 只换二进制并重启任务，不重写配置、不动证书与管理员"
+    Write-Host "  5) 重置管理员密码 —— 只改一个管理员的登录口令，其它什么都不动"
     Write-Host ""
 }
 
@@ -216,12 +204,15 @@ if (-not $DryRun -and -not $pr.IsInRole([Security.Principal.WindowsBuiltInRole]:
 
 # Read-Answer：读一行，空答案取默认值。不问时直接把默认值交回去——
 # "问"与"不问"对后面的逻辑是同一件事。
+# 提示用 Write-Host -NoNewline 上色（Read-Host 自己的 -Prompt 不支持颜色），
+# 冒号与空格由这里补上，视觉上与原来一致。
 function Read-Answer {
     param([string]$Prompt, [string]$Default = "")
     if (-not $Ask) { return $Default }
     $p = $Prompt
     if ($Default) { $p = "$Prompt [$Default]" }
-    $a = Read-Host $p
+    Write-Host "${p}: " -ForegroundColor Cyan -NoNewline
+    $a = Read-Host
     if (-not $a) { return $Default }
     return $a
 }
@@ -231,9 +222,10 @@ function Read-Required {
     param([string]$Prompt)
     if (-not $Ask) { return "" }
     for ($i = 0; $i -lt 3; $i++) {
-        $a = Read-Host $Prompt
+        Write-Host "${Prompt}: " -ForegroundColor Cyan -NoNewline
+        $a = Read-Host
         if ($a) { return $a }
-        Write-Host "  （这一项不能为空）"
+        Write-Host "  （这一项不能为空）" -ForegroundColor Yellow
     }
     return ""
 }
@@ -243,14 +235,16 @@ function Read-Required {
 function Read-Secret {
     param([string]$Prompt)
     if (-not $Ask) { return "" }
-    $sec = Read-Host "$Prompt（不回显）" -AsSecureString
+    Write-Host "${Prompt}（不回显）: " -ForegroundColor Cyan -NoNewline
+    $sec = Read-Host -AsSecureString
     return [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec))
 }
 
 function Confirm-Yes {
     param([string]$Prompt)
     if (-not $Ask) { return $true }
-    $a = Read-Host "$Prompt [Y/n]"
+    Write-Host "${Prompt} [Y/n]: " -ForegroundColor Cyan -NoNewline
+    $a = Read-Host
     if ($a -match "^(n|N|no|NO|No)$") { return $false }
     return $true
 }
@@ -913,14 +907,12 @@ if (-not $TlsMode) {
         Write-Host ""
         Write-Host "下面几个问题决定对外访问方式，直接回车取方括号里的默认值。" -ForegroundColor Cyan
         Write-Host ""
-        Write-Host "对外访问方式："
-        Write-Host "  1) none        不使用 https，只提供纯 HTTP（默认；也适合本机/内网调试）"
-        Write-Host "  2) acme        使用 https，证书由 Master 内置 ACME 客户端自动申请"
-        Write-Host "                 （需要一个已解析到本机的域名）"
+        Write-Host "对外访问方式（对外看起来是什么，证书谁来办）："
+        Write-Host "  1) plain       不使用 https，只提供纯 HTTP（默认；也适合本机/内网调试，或由前置反代终结 TLS）"
+        Write-Host "  2) acme        使用 https，证书由 Master 内置 ACME 客户端自动申请（需要一个已解析到本机的域名）"
         Write-Host "  3) selfsigned  使用 https，但用自签证书（用纯 IP 访问时，这是唯一可行的方式）"
         Write-Host "  4) files       使用 https，证书与私钥用你已有的文件"
         Write-Host ""
-        Write-Host "想让 Agent 直接用 https 连上来，就得在这里选一种；选 1 就只能由前置反代终结 TLS。" -ForegroundColor Gray
     }
     $ans = Read-Answer "选择对外访问方式（1/2/3/4）" "1"
     switch ($ans) {
@@ -942,7 +934,7 @@ if ($TlsMode -eq "acme") {
     }
     if (-not $AcmeChallenge -and $Ask) {
         Write-Host ""
-        Write-Host "证书的校验方式（三个前提条件不同，选错了会在申请时才失败）：" -ForegroundColor Cyan
+        Write-Host "证书的校验方式（前提条件不同，选错了要在申请时才失败）：" -ForegroundColor Cyan
         Write-Host "  1) http-01      本机在 80 端口应答（默认；最省事，需要 80 可达且没被别的服务占着）"
         Write-Host "  2) tls-alpn-01  本机在 443 端口用 ALPN 应答（80 被占用、443 由本进程直接监听时选它）"
         Write-Host "  3) dns-01       在 DNS 服务商处写一条 TXT 记录（支持通配符 *.example.com；需要 API Token）"
@@ -1000,7 +992,7 @@ if (-not $AdminListenGiven -and $Ask) {
     $admTries = 0
     $admWarned = $false
     while ($admTries -lt 3) {
-        $v = Read-Answer "管理端监听（回车=$AdminMergeLabel，即与公开站同一个监听、后台在公开地址的 /admin/ 下；也可填 IP:端口 单独开一个）" $admDefault
+        $v = Read-Answer "管理端监听（回车=与公开站同一个监听，后台在 /admin/ 下；也可填 IP:端口 单独开一个）" $admDefault
         if (-not $v -or $v -eq $AdminMergeLabel -or $v -eq "same" -or $v -eq "merge") {
             $AdminListen = ""
             break
@@ -1079,6 +1071,24 @@ if (-not $AdminUser) { $AdminUser = "ops" }
 if (-not (Test-AdminUserOk $AdminUser)) {
     Write-Err2 "管理员用户名只允许字母、数字与 . _ @ -（收到 $AdminUser）。"
     exit 2
+}
+
+# ---- 口令紧跟在用户名后面问，然后才轮到"即将执行"确认 ----
+#
+# 顺序与 scripts/deploy-master.sh 一致（用户原话："要求输入管理员用户名时，
+# 紧接着要求输入密码，下一步才是确认"）：账号口令是同一件事的两半，中间插一大段
+# 别的输出只会让人以为口令环节已经过去了；放在确认之前，用户按下回车时整套凭据
+# 已经定下，不存在"确认完才知道还要输什么"。
+#
+# 仍然只有**没给过**口令时才问（-AdminPassword / $env:PROBE_ADMIN_PASSWORD 优先，
+# 无人值守场景不该被一个问题卡住）。空口令不在这里判死：留空往下走，第 4 步那句
+# "口令不能为空"是唯一的判处，免得同一个规则在两处各说各话。
+if (-not $AdminPassword -and $Ask) {
+    for ($i = 0; $i -lt 3; $i++) {
+        $AdminPassword = Read-Secret "管理员 $AdminUser 的口令"
+        if ($AdminPassword) { break }
+        Write-Host "  （口令不能为空）" -ForegroundColor Yellow
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -1162,15 +1172,21 @@ if ($Ask) {
     Write-Host "即将执行：" -ForegroundColor Cyan
     $tlsNote = $TlsMode
     if ($TlsMode -eq "acme") { $tlsNote = "$TlsMode（challenge=$AcmeChallenge）" }
-    Write-Host "  公开站监听：$PublicListen"
-    Write-Host "  管理端监听：$(if ($AdminListen) { $AdminListen } else { "（与公开站同一个监听：后台在公开地址的 /admin/ 下）" })"
-    Write-Host "  公开地址：$(if ($PublicOrigin) { $PublicOrigin } else { '（留空：按请求 Host 回填）' })"
-    Write-Host "  管理地址：$(if ($AdminOrigin) { $AdminOrigin } else { '（与公开站同一个域名）' })"
-    Write-Host "  TLS：$tlsNote"
-    Write-Host "  管理员：$AdminUser（口令随后输入）"
-    Write-Host "  配置目录：$Dir"
-    Write-Host "  数据目录：$Data"
-    Write-Host "  自启：$(if ($NoStartupTask) { '不注册（-NoStartupTask）' } else { '计划任务 xb-probe-master（开机自启）' })"
+    # 标签加粗、值用默认色：扫一眼先看到"这是什么"，再看得到值。
+    Write-Host "  公开站监听：" -ForegroundColor White -NoNewline; Write-Host " $PublicListen"
+    Write-Host "  管理端监听：" -ForegroundColor White -NoNewline; Write-Host " $(if ($AdminListen) { $AdminListen } else { "（与公开站同一个监听：后台在 /admin/ 下）" })"
+    Write-Host "  公开地址：" -ForegroundColor White -NoNewline; Write-Host " $(if ($PublicOrigin) { $PublicOrigin } else { '（留空：按请求 Host 回填）' })"
+    Write-Host "  管理地址：" -ForegroundColor White -NoNewline; Write-Host " $(if ($AdminOrigin) { $AdminOrigin } else { '（与公开站同一个域名）' })"
+    Write-Host "  TLS：" -ForegroundColor White -NoNewline; Write-Host " $tlsNote"
+    # 口令已经在上一步问过了（用户名 → 口令 → 这里才确认），所以清单里说的是实情。
+    if ($AdminPassword) {
+        Write-Host "  管理员：" -ForegroundColor White -NoNewline; Write-Host " $AdminUser（口令已输入，不再显示）"
+    } else {
+        Write-Host "  管理员：" -ForegroundColor White -NoNewline; Write-Host " $AdminUser（口令随后输入）"
+    }
+    Write-Host "  配置目录：" -ForegroundColor White -NoNewline; Write-Host " $Dir"
+    Write-Host "  数据目录：" -ForegroundColor White -NoNewline; Write-Host " $Data"
+    Write-Host "  自启：" -ForegroundColor White -NoNewline; Write-Host " $(if ($NoStartupTask) { '不注册（-NoStartupTask）' } else { '计划任务 xb-probe-master（开机自启）' })"
     Write-Host ""
     if (-not (Confirm-Yes "继续？")) {
         Write-Host "已取消，未改动系统。" -ForegroundColor Yellow
@@ -1302,6 +1318,9 @@ if ((Test-Path $cfg) -and -not $ForceConfig) {
 # 4) 初始化管理员
 Write-Step "4/6 初始化管理员"
 if (-not $AdminPassword) {
+    # 交互路径下口令在问答段就已经问过（用户名 → 口令 → 确认的顺序），走到这里
+    # 必然是**没问成**的几种情况：-Yes / 非交互忘了设 PROBE_ADMIN_PASSWORD、
+    # 或用户在问答里三次都输了空口令。所以这里是唯一的判处点，也是最后的机会。
     $AdminPassword = Read-Secret "管理员 $AdminUser 的口令"
 }
 if (-not $AdminPassword) {

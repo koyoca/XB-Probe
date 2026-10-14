@@ -143,9 +143,36 @@ install-master.sh —— XB-Probe Master 整机一键部署
 EOF
 }
 
-say() { printf '==> %s\n' "$*"; }
-warn() { printf '警告：%s\n' "$*" >&2; }
-err() { printf '错误：%s\n' "$*" >&2; }
+# 输出着色：步骤头（青）、警告（黄）、错误（红）。
+#
+# 与 scripts/deploy-master.sh、install-master-bin.sh 同一套约定：颜色码先算好，
+# **用不用由每个 helper 在调用时按输出流现判**（_color_ok）——命令替换（`$(...)`）
+# 会把 fd 换成管道，启动时判一次的话颜色码会被写进调用方正要解析的内容里。
+# 管道 / `> 日志 2>&1` / CI 因此拿到纯文本。尊重 NO_COLOR 与 TERM=dumb。
+C_STEP="$(printf '\033[1;36m')"
+C_WARN="$(printf '\033[1;33m')"
+C_ERR="$(printf '\033[1;31m')"
+C_RST="$(printf '\033[0m')"
+
+_color_ok() {
+	[ -t "$1" ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-}" != "dumb"
+}
+
+# say <内容>：步骤头（青）。与原先的 `printf '==> %s\n'` 同文同流（stdout）。
+say() {
+	if _color_ok 1; then printf '%s==> %s%s\n' "$C_STEP" "$*" "$C_RST"
+	else printf '==> %s\n' "$*"; fi
+}
+# warn <内容>：警告（黄，stderr）。
+warn() {
+	if _color_ok 2; then printf '%s警告：%s%s\n' "$C_WARN" "$*" "$C_RST" >&2
+	else printf '警告：%s\n' "$*" >&2; fi
+}
+# err <内容>：错误（红，stderr）。
+err() {
+	if _color_ok 2; then printf '%s错误：%s%s\n' "$C_ERR" "$*" "$C_RST" >&2
+	else printf '错误：%s\n' "$*" >&2; fi
+}
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -603,17 +630,13 @@ if [ -z "$NON_INTERACTIVE" ]; then
 	echo "下面几个问题决定对外访问方式，直接回车取方括号里的默认值。" >&2
 	echo >&2
 	cat >&2 <<'EOF'
-对外访问方式：
-  1) caddy      使用 HTTPS。证书自动申请与续期，反代也一并配好——本脚本会装好
-                Caddy 并把请求转给 Master，你只需要把域名解析到本机。
-                **最省事，推荐**
-  2) master     使用 HTTPS。证书由 Master 进程自己申请（内置 ACME 客户端），
-                Master 自己监听 443 并终结 TLS（需要一个已解析到本机的域名）
-  3) selfsigned 使用 HTTPS，但用自签证书（用纯 IP 访问时，这是唯一可行的加密
-                方式；浏览器会提示证书不受信任）。Master 自己终结
-  4) files      使用 HTTPS，证书与私钥用你已有的文件。Master 自己终结
+对外访问方式（对外看起来是什么，证书谁来办）：
+  1) caddy       HTTPS，证书自动申请与续期，反代也一并配好——只需把域名解析到本机（最省事，推荐）
+  2) master      HTTPS，证书由 Master 自己申请，Master 自己监听 443 终结 TLS（需要一个已解析到本机的域名）
+  3) selfsigned  HTTPS，自签证书——没有域名、只能用纯 IP 访问时唯一可行的加密方式（浏览器会提示不受信任）
+  4) files       HTTPS，证书与私钥用你已有的文件
 
-选 1 不需要你自己装 Caddy 或 Nginx 并手写配置；选 2~4 由 Master 自己扛下 443。
+选 2~4 由 Master 自己扛下 443；选 1 反代与证书都交给 Caddy，不必自己装、也不必手写配置。
 EOF
 fi
 

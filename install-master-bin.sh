@@ -144,9 +144,36 @@ TLS 方式、监听端口、公开/管理端地址、管理员与口令（选 4 
 EOF
 }
 
-say() { printf '==> %s\n' "$*"; }
-warn() { printf '警告：%s\n' "$*" >&2; }
-err() { printf '错误：%s\n' "$*" >&2; }
+# 输出着色：步骤头（青）、警告（黄）、错误（红）。
+#
+# 与 scripts/deploy-master.sh 同一套约定：颜色码先算好，**用不用由每个 helper 在
+# 调用时按输出流现判**（_color_ok）——命令替换（`$(...)`）会把 fd 换成管道，启动时
+# 判一次的话颜色码会被写进调用方正要解析的内容里（--ask-mode 的答案就是这么取的）。
+# 管道 / `> 日志 2>&1` / CI 因此拿到纯文本。尊重 NO_COLOR 与 TERM=dumb。
+C_STEP="$(printf '\033[1;36m')"
+C_WARN="$(printf '\033[1;33m')"
+C_ERR="$(printf '\033[1;31m')"
+C_RST="$(printf '\033[0m')"
+
+_color_ok() {
+	[ -t "$1" ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-}" != "dumb"
+}
+
+# say <内容>：步骤头（青）。与原先的 `printf '==> %s\n'` 同文同流（stdout）。
+say() {
+	if _color_ok 1; then printf '%s==> %s%s\n' "$C_STEP" "$*" "$C_RST"
+	else printf '==> %s\n' "$*"; fi
+}
+# warn <内容>：警告（黄，stderr）。
+warn() {
+	if _color_ok 2; then printf '%s警告：%s%s\n' "$C_WARN" "$*" "$C_RST" >&2
+	else printf '警告：%s\n' "$*" >&2; fi
+}
+# err <内容>：错误（红，stderr）。
+err() {
+	if _color_ok 2; then printf '%s错误：%s%s\n' "$C_ERR" "$*" "$C_RST" >&2
+	else printf '错误：%s\n' "$*" >&2; fi
+}
 
 # download <URL>：curl 或 wget 二选一，把内容写到 stdout。
 # 失败时不打印 HTML 错误页——那会让后面的 sha256 校验报出"被篡改"这种

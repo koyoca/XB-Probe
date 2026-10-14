@@ -14,8 +14,9 @@
 # 不传 --admin-password 时会交互式提示输入（推荐：口令不进 shell 历史）。
 # 也可以先 export PROBE_ADMIN_PASSWORD=... 再执行。
 #
-# 交互问答：**参数没给全时会问你**——TLS 方式（要不要 https）、公开站/管理端的
-# 访问地址、两边各监听哪个端口、管理员用户名与口令，最后把将要做的事列一遍让你确认。
+# 交互问答：**参数没给全时会问你**——对外访问方式（要不要 https、证书谁办）、
+# 公开站/管理端的访问地址、两边各监听哪个端口、管理员用户名，紧接着是口令，
+# 最后把将要做的事列一遍让你确认（账号口令在确认之前就都问完了）。
 # 之所以问在这一层（而不是各自的 install-*.sh 里）：
 #   · 默认值（监听地址、TLS 模式、目录）只有本文件这一份来源，问题里方括号中的
 #     默认值必须与真正生效的值同源，否则迟早出现"提示写 8080、实际听 8081"；
@@ -154,6 +155,64 @@ if [ -z "${PROBE_REEXEC:-}" ] && [ -z "${BASH_VERSION:-}" ] && command -v bash >
 		exec bash "$0" "$@"
 	fi
 fi
+
+# ---------------------------------------------------------------------------
+# 输出着色：步骤头（青）、成功（绿）、警告（黄）、错误（红）
+# ---------------------------------------------------------------------------
+#
+# 颜色码本身先算好，**用不用由每个 helper 在调用时按输出流现判**（_color_ok）：
+#   · 管道 / `> 日志 2>&1` / CI / 测试抓取 → 该流不是终端，一个 ESC 都不落，
+#     断言不会因为颜色码莫名失败，日志里也不会出现一团 ^[36m；
+#   · 命令替换（`$(...)`）会把 fd 换成管道——启动时判一次的话，颜色码会被
+#     写进调用方正要解析的内容里（--ask-mode 的答案就是这么取的），所以必须现判；
+#   · `say … >&2` 这类重定向也由此自动判对（函数里看到的 fd 1 已是重定向后的）。
+# 另外尊重 NO_COLOR 与 TERM=dumb。
+#
+# 交互题的提示**刻意不着色**：它们由 readline 打印（`read -e -r -p`），ANSI 序列
+# 会被当成可打印宽度参与行编辑计算，退格到行首重绘时光标算错——那正是 read_line
+# 上面那段注释里踩过的坑。所以颜色只上在**整行输出**上（步骤头、清单、警告、
+# 错误、收尾汇总），提问行保持原样。
+C_STEP="$(printf '\033[1;36m')"
+C_OK="$(printf '\033[1;32m')"
+C_WARN="$(printf '\033[1;33m')"
+C_ERR="$(printf '\033[1;31m')"
+C_DIM="$(printf '\033[2m')"
+C_BLD="$(printf '\033[1m')"
+C_RST="$(printf '\033[0m')"
+
+# _color_ok <fd>：这个流当下是不是终端、且用户没关颜色。
+_color_ok() {
+	[ -t "$1" ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-}" != "dumb"
+}
+
+# _clr <fd> <颜色码>：这个流是终端才返回颜色码，否则返回空串。
+# 给"一大块输出只判一次"用：`_lb="$(_clr 2 "$C_BLD")"` 之后整块复用。
+# 注意判的是**传进去的那个 fd**：命令替换只会把 fd 1 换成管道，fd 2 原样继承，
+# 所以 `"$(_clr 2 …)"` 在 stderr 仍是终端时照样拿得到颜色。
+_clr() {
+	if _color_ok "$1"; then printf '%s' "$2"; fi
+}
+
+# say <内容>：步骤头（青）。与原先的 `echo "==> …"` 同文同流（stdout）。
+say() {
+	if _color_ok 1; then printf '%s==> %s%s\n' "$C_STEP" "$*" "$C_RST"
+	else printf '==> %s\n' "$*"; fi
+}
+# ok <内容>：成功行（绿）。
+ok() {
+	if _color_ok 1; then printf '%s%s%s\n' "$C_OK" "$*" "$C_RST"
+	else printf '%s\n' "$*"; fi
+}
+# warn <内容>：警告（黄，stderr）。
+warn() {
+	if _color_ok 2; then printf '%s警告：%s%s\n' "$C_WARN" "$*" "$C_RST" >&2
+	else printf '警告：%s\n' "$*" >&2; fi
+}
+# err <内容>：错误（红，stderr）。
+err() {
+	if _color_ok 2; then printf '%s错误：%s%s\n' "$C_ERR" "$*" "$C_RST" >&2
+	else printf '错误：%s\n' "$*" >&2; fi
+}
 
 BIN_SRC=""
 DIR="${PROBE_DIR:-/etc/xb-probe-master}"
@@ -528,7 +587,7 @@ config_parses_ok() {
 config_mismatch_report() {
 	_CM_BAD_KEY="$(printf '%s\n' "${1:-}" | sed -n 's/.*field \([A-Za-z0-9_]*\) not found.*/\1/p' | head -n 1)"
 	echo >&2
-	echo "错误：$CFG 里有当前二进制不认识的键${_CM_BAD_KEY:+（$_CM_BAD_KEY）}。" >&2
+	err "$CFG 里有当前二进制不认识的键${_CM_BAD_KEY:+（$_CM_BAD_KEY）}。"
 	echo >&2
 	echo "  这通常不是你填错了，而是**两边版本不一致**：" >&2
 	echo "    · 二进制来自 GitHub Release 标签，部署脚本来自 main 分支；" >&2
@@ -616,7 +675,7 @@ case "${MODE_IN:-}" in
 	MODE_GIVEN="1"
 	;;
 *)
-	echo "错误：--mode 只能是 1、2、3、4 或 5（收到「$MODE_IN」）。" >&2
+	err "--mode 只能是 1、2、3、4 或 5（收到「$MODE_IN」）。"
 	echo "  1 = 安装 / 升级 Master，2 = 卸载 Master，3 = 只更新 Agent 发布文件，" >&2
 	echo "  4 = 只升级 Master 本体，5 = 重置管理员密码。" >&2
 	exit 2
@@ -643,7 +702,7 @@ if [ -n "$RELEASE_ONLY" ]; then _oneshot_note --release-only; fi
 if [ -n "$UPGRADE_ONLY" ]; then _oneshot_note --upgrade-only; fi
 if [ -n "$RESET_PASSWORD" ]; then _oneshot_note --reset-password; fi
 if [ "$_oneshot_count" -gt 1 ]; then
-	echo "错误：这几项都只做一件事，不能同时使用：$_oneshot_names" >&2
+	err "这几项都只做一件事，不能同时使用：$_oneshot_names"
 	echo "  「卸载」「只更新发布文件」「只升级本体」「重置密码」一次只能选一个。" >&2
 	exit 2
 fi
@@ -848,7 +907,13 @@ ask() {
 # 刻意**不用** read -e：readline 会重新打开回显，把刚敲的 Token 打到屏幕上。
 ask_secret() {
 	if [ -z "$ASK" ]; then ASK_REPLY=""; return 0; fi
-	printf '%s（不回显）: ' "$1" >&2
+	# 这里可以放心着色：它**不是** readline 打印的提示（readline 会把 ANSI 序列
+	# 当成可打印宽度算进行编辑，光标会错），而是自己 printf 的，终端原样显示。
+	if _color_ok 2; then
+		printf '%s%s（不回显）:%s ' "$C_STEP" "$1" "$C_RST" >&2
+	else
+		printf '%s（不回显）: ' "$1" >&2
+	fi
 	stty -echo 2>/dev/null || true
 	IFS= read -r ASK_REPLY || ASK_REPLY=""
 	stty echo 2>/dev/null || true
@@ -863,7 +928,7 @@ ask_required() {
 	while [ "$_ai" -lt 3 ]; do
 		ask "$1" ""
 		if [ -n "$ASK_REPLY" ]; then return 0; fi
-		printf '  （这一项不能为空）\n' >&2
+		printf '%s  （这一项不能为空）%s\n' "$(_clr 2 "$C_WARN")" "$(_clr 2 "$C_RST")" >&2
 		_ai=$((_ai + 1))
 	done
 	return 0
@@ -973,13 +1038,13 @@ pull_agent_release() {
 	# 版本号是本函数唯一的参数来源；空值绝不能带进 dist pull —— 那会拼出
 	# `--version ""`，而下游按目录名去创建 data_dir/dist//，症状是"拉了个空版本"。
 	if [ -z "$_pa_ver" ]; then
-		echo "错误：没有可用的发布版本号，不拉取。" >&2
+		err "没有可用的发布版本号，不拉取。"
 		return 1
 	fi
 	# 同理：二进制没给或不可执行就当场说清楚，不要让它变成一句
 	# "unbound variable"（那既不说明是哪个变量，也不说明该怎么办）。
 	if [ -z "$_pa_bin" ] || [ ! -x "$_pa_bin" ]; then
-		echo "错误：找不到可执行的 Master 二进制：${_pa_bin:-（调用方没给）}" >&2
+		err "找不到可执行的 Master 二进制：${_pa_bin:-（调用方没给）}"
 		echo "      它要用 dist pull 把发布文件写进 $DATA/dist/。用 --bin-dir 指定已安装" >&2
 		echo "      的 Master 在哪，或用 --bin 给一份二进制（例如刚编译出来的那份）。" >&2
 		return 1
@@ -1115,30 +1180,14 @@ resolve_latest_agent_version() {
 #   · 答案（`1` ~ `5`）走 **stdout** —— 那是"给脚本用的"，调用方要能
 #     `$(...)` 拿到一个干净的数字，不会被菜单文本污染。
 ask_mode_menu() {
+	printf '%s这个脚本可以做五件事（回车=1）：%s\n\n' "$(_clr 2 "$C_STEP")" "$(_clr 2 "$C_RST")" >&2
 	cat >&2 <<'EOF'
-
-这个脚本可以做五件事：
-
-  1) 安装 / 升级 Master
-     装（或升级）Master 本体：二进制、配置、systemd 服务，以及新节点要用的
-     Agent 发布文件。**会重新收敛整站配置**：重写 master.yaml、按需要申请证书、
-     初始化管理员。适合首次安装，或配置被改坏了要拉回正轨。
-
-  2) 卸载 Master
-     停服务 → 删单元、二进制、配置、数据、系统用户。默认**连数据一起删**。
-
-  3) 只更新 Agent 发布文件
-     去 GitHub 查最新 Release，把它的 Agent 发布文件拉进 data_dir/dist/。
-     不动 Master 的二进制、配置与服务（不重启、也不重问任何配置）。
-
-  4) 只升级 Master 本体
-     只换二进制并重启服务。**不重写 master.yaml、不申请证书、不动 Caddy、
-     不碰管理员账号、也不重拉 Agent 发布文件**。适合"网站已经跑得好好的，
-     只想把 Master 升到新版本"。启动失败会自动换回旧二进制。
-
-  5) 重置管理员密码
-     只改一个管理员的登录口令（用户名默认 ops，可用 --admin-user 指定），
-     其它什么都不动。忘了后台密码时用它，不必卸载重装。
+  1) 安装 / 升级 Master —— 二进制、配置、systemd 服务、Agent 发布文件一并装好；
+     会重写 master.yaml、按需申请证书、初始化管理员（升级走同一路径，配置不变的部分自动保留）
+  2) 卸载 Master —— 停服务并删除二进制、配置、数据、系统用户（默认连数据一起删）
+  3) 只更新 Agent 发布文件 —— 拉取最新 Release 的发布文件，不动 Master 本体
+  4) 只升级 Master 本体 —— 只换二进制并重启服务，不重写配置、不动证书与管理员
+  5) 重置管理员密码 —— 只改一个管理员的登录口令，其它什么都不动
 
 EOF
 	read_line _mode "请输入 1、2、3、4 或 5 [1]: " || _mode=""
@@ -1222,7 +1271,7 @@ fi
 # 放在卸载块**之前**：两者都是"只做一件事就退出"的模式，紧挨着 0b 更好读。
 # 同时给 --uninstall 与 --release-only 的组合已在 0-0 段拒绝，不会走到这里。
 if [ -n "$RELEASE_ONLY" ]; then
-	echo "==> 只更新 Agent 发布文件"
+	say "只更新 Agent 发布文件"
 	echo "    不动 Master 的二进制、配置与服务——只把 Agent 发布文件拉进数据目录。"
 
 	# 用哪个二进制去取件，优先级：--bin（调用方刚编译/刚下载的那份）> 已安装的那份。
@@ -1249,7 +1298,7 @@ if [ -n "$RELEASE_ONLY" ]; then
 			echo "    [dry-run] 注意：$_ro_bin 不可执行，正式执行会在这里停下。" >&2
 			echo "              （用 --bin-dir 指定已安装的 Master 在哪，或用 --bin 给一份二进制）" >&2
 		else
-			echo "错误：找不到可执行的 Master 二进制：$_ro_bin（$_ro_from）" >&2
+			err "找不到可执行的 Master 二进制：$_ro_bin（$_ro_from）"
 			echo "      它要用来读 $CFG 并把发布文件写进 $DATA/dist/。" >&2
 			echo "      用 --bin-dir 指定已安装的 Master 在哪，或用 --bin 给一份二进制" >&2
 			echo "      （例如刚编译出来的那份）。这台机器还没装过 Master 的话，请改选 1（安装）。" >&2
@@ -1260,13 +1309,13 @@ if [ -n "$RELEASE_ONLY" ]; then
 	# 版本查询要在取件之前完成，**失败即止**。这时候退回去拉"本机二进制版本"
 	# 是静默换成另一件事：用户以为更新到了最新，实际拉的是他早就在跑的旧版本，
 	# 而一路上没有任何提示。
-	echo "==> 正在查 GitHub 上的最新 Release（${RELEASE_REPO}）…"
+	say "正在查 GitHub 上的最新 Release（${RELEASE_REPO}）…"
 	if [ -n "$DRY_RUN" ]; then
 		if _ro_probe="$(resolve_latest_agent_version)"; then
 			_ro_ver="$_ro_probe"
 		else
 			echo "    [dry-run] 版本查询失败（原因见上）；正式执行时这里会中止。" >&2
-			echo "==> dry-run：未改动任何东西。"
+			say "dry-run：未改动任何东西。"
 			exit 1
 		fi
 	else
@@ -1278,7 +1327,7 @@ if [ -n "$RELEASE_ONLY" ]; then
 	# 而不是押在"查询函数有没有做过校验"这件事上。
 	case "$_ro_ver" in
 	'' | *[!0-9.]* | .* | *. | *..*)
-		echo "错误：查到的版本号「$_ro_ver」不是纯数字点分，拒绝使用。" >&2
+		err "查到的版本号「$_ro_ver」不是纯数字点分，拒绝使用。"
 		exit 1
 		;;
 	esac
@@ -1295,22 +1344,22 @@ if [ -n "$RELEASE_ONLY" ]; then
 	if [ -n "$_ro_local" ]; then
 		_ro_binmsg="$_ro_bin（$_ro_from，版本 $_ro_local）"
 	fi
-	echo "==> 最新发布版本：v$_ro_ver"
+	say "最新发布版本：v$_ro_ver"
 	echo "    取件用的二进制：$_ro_binmsg"
 
 	if [ -n "$DRY_RUN" ]; then
 		echo "    [dry-run] 将会拉取到 $DATA/dist/$_ro_ver/，来源 $(default_dist_source "$_ro_ver")"
 		echo "    [dry-run] 正式执行时还会问一次「拉全部平台还是只拉本机」，再校验落盘（dry-run 不问）。"
-		echo "==> dry-run：未改动任何东西。"
+		say "dry-run：未改动任何东西。"
 		exit 0
 	fi
 
 	if [ "$(id -u)" -ne 0 ]; then
-		echo "错误：更新发布文件要往 $DATA/dist/ 里写，需要 root 或 sudo。" >&2
+		err "更新发布文件要往 $DATA/dist/ 里写，需要 root 或 sudo。"
 		exit 1
 	fi
 	if [ ! -f "$CFG" ]; then
-		echo "错误：读不到 $CFG —— 这台机器上还没有部署过 Master？" >&2
+		err "读不到 $CFG —— 这台机器上还没有部署过 Master？"
 		echo "      首次部署请选 1（安装 / 升级）。" >&2
 		exit 1
 	fi
@@ -1323,16 +1372,16 @@ if [ -n "$RELEASE_ONLY" ]; then
 		exit 0
 	fi
 	if [ "$DIST_PULL" = "local" ] && [ -z "$_mp_plat" ]; then
-		echo "错误：认不出本机平台（uname 结果不在已知表里），不能只拉本机。" >&2
+		err "认不出本机平台（uname 结果不在已知表里），不能只拉本机。"
 		echo "      可以改选全部平台，或直接用 xb-probe-master dist pull 手工指定。" >&2
 		exit 1
 	fi
 	if pull_agent_release "$_ro_ver" "$DIST_PULL" "$_ro_bin"; then
-		echo "==> 完成：$DATA/dist/$_ro_ver 已就绪（新节点装到的 Agent 就是这一版）"
+		say "完成：$DATA/dist/$_ro_ver 已就绪（新节点装到的 Agent 就是这一版）"
 		echo "    新节点：后台「节点 → 注册码」生成注册码，按页面给的命令装即可"
 		echo "    已装节点：sudo xb-probe-agent upgrade --check && sudo xb-probe-agent upgrade"
 	else
-		echo "错误：发布文件没有入库（$DATA/dist/$_ro_ver 里没有可用的 SHA256SUMS）。" >&2
+		err "发布文件没有入库（$DATA/dist/$_ro_ver 里没有可用的 SHA256SUMS）。"
 		dist_pull_hint "$_ro_ver"
 		exit 1
 	fi
@@ -1363,7 +1412,7 @@ fi
 # ——而本模式从头到尾没动过配置，回滚回去的状态是确定可用的。
 upgrade_only_rollback() {
 	echo >&2
-	echo "错误：$1" >&2
+	err "$1"
 	systemctl --no-pager status xb-probe-master 2>/dev/null | sed -n '1,10p' >&2 || true
 	journalctl -u xb-probe-master --no-pager -n 20 2>/dev/null | sed 's/^/    /' >&2 || true
 	if [ -f "${UPGRADE_BACKUP:-}" ]; then
@@ -1391,19 +1440,19 @@ upgrade_only_rollback() {
 }
 
 if [ -n "$UPGRADE_ONLY" ]; then
-	echo "==> 只升级 Master 本体"
+	say "只升级 Master 本体"
 
 	# 新二进制从哪来：只认 --bin。入口脚本（install-master.sh 编译、
 # install-master-bin.sh 下载）本来就是这么把二进制交给本脚本的，
 	# 用户从菜单选第 4 项时走的就是那条路。
 	if [ -z "$BIN_SRC" ]; then
-		echo "错误：只升级本体需要指定新二进制。" >&2
+		err "只升级本体需要指定新二进制。"
 		echo "  · 走一键安装脚本的话直接选第 4 项即可（脚本会把新二进制带过来）；" >&2
 		echo "  · 手工执行时用 --bin 指到新版：--bin /path/to/xb-probe-master" >&2
 		exit 2
 	fi
 	if [ ! -f "$BIN_SRC" ]; then
-		echo "错误：--bin 指向的文件不存在：$BIN_SRC" >&2
+		err "--bin 指向的文件不存在：$BIN_SRC"
 		exit 2
 	fi
 	if [ "$BIN_SRC" = "$BIN_DIR/xb-probe-master" ]; then
@@ -1414,7 +1463,7 @@ if [ -n "$UPGRADE_ONLY" ]; then
 	# 三件事全部在**停服务之前**做完。这是本模式唯一能"在动系统之前失败"的机会：
 	# 等停了服务才发现二进制跑不起来或读不懂现有配置，就白白断了一次服务。
 	if ! _uo_new_ver="$("$BIN_SRC" version 2>/dev/null)"; then
-		echo "错误：$BIN_SRC 跑不起来（架构不对？文件没传完？）。" >&2
+		err "$BIN_SRC 跑不起来（架构不对？文件没传完？）。"
 		echo "      本机平台：$_mp_plat。用 --bin 换成正确的那个文件再试。" >&2
 		exit 2
 	fi
@@ -1425,7 +1474,7 @@ if [ -n "$UPGRADE_ONLY" ]; then
 		# 换上去服务必定起不来。到这里直接停，比"装上去 → 起不来 → 回滚"更干净。
 		# 返回 2 = 判不了（旧二进制没有 tls 子命令之类），**不猜**，放行。
 		if [ "$_uo_cp_rc" = "1" ]; then
-			echo "错误：$BIN_SRC 读不懂现有的 $CFG —— 换上去服务起不来，已中止（什么都没改）。" >&2
+			err "$BIN_SRC 读不懂现有的 $CFG —— 换上去服务起不来，已中止（什么都没改）。"
 			config_mismatch_report "$_CP_OUT"
 			# config_mismatch_report **只报告不退出**（它另一个使用者要接着回滚），
 			# 所以这里必须自己 exit，否则会一路走到"停服务 → 换二进制"上去。
@@ -1438,17 +1487,17 @@ if [ -n "$UPGRADE_ONLY" ]; then
 
 	if [ -n "$DRY_RUN" ]; then
 		echo "    [dry-run] 停服务 → 备份 $BIN_DIR/xb-probe-master → 拷入 $BIN_SRC → 起服务 → 验活"
-		echo "==> dry-run：未改动任何东西。"
+		say "dry-run：未改动任何东西。"
 		exit 0
 	fi
 	if [ "$(id -u)" -ne 0 ]; then
-		echo "错误：升级本体要写 $BIN_DIR 并重启服务，需要 root 或 sudo（--dry-run 不需要）。" >&2
+		err "升级本体要写 $BIN_DIR 并重启服务，需要 root 或 sudo（--dry-run 不需要）。"
 		exit 1
 	fi
 	# 没有 systemd 时不猜也不硬来：Master 官方只注册 systemd（见第 5 步），
 	# 容器/Alpine 容器里本来就是手工托管的，那就把替换步骤说清楚由用户执行。
 	if ! command -v systemctl >/dev/null 2>&1; then
-		echo "警告：本机没有 systemctl（容器或非 systemd 发行版），不会替你重启服务。" >&2
+		warn "本机没有 systemctl（容器或非 systemd 发行版），不会替你重启服务。"
 		echo "      手工替换步骤：停掉 Master 进程 → 用 $BIN_SRC 覆盖 $BIN_DIR/xb-probe-master → 重新启动" >&2
 		echo "      当前配置是 $CFG（本模式不改它）。" >&2
 		exit 0
@@ -1457,7 +1506,7 @@ if [ -n "$UPGRADE_ONLY" ]; then
 	UPGRADE_BACKUP="$BIN_DIR/xb-probe-master.bak"
 	if [ -f "$BIN_DIR/xb-probe-master" ]; then
 		cp -f "$BIN_DIR/xb-probe-master" "$UPGRADE_BACKUP" || {
-			echo "错误：备份现有二进制到 $UPGRADE_BACKUP 失败，已中止（不升级没有退路的二进制）。" >&2
+			err "备份现有二进制到 $UPGRADE_BACKUP 失败，已中止（不升级没有退路的二进制）。"
 			exit 1
 		}
 		echo "    已备份旧二进制到 $UPGRADE_BACKUP"
@@ -1482,7 +1531,7 @@ if [ -n "$UPGRADE_ONLY" ]; then
 
 	# 验活：服务活着 + 版本是新的那个。两条都要，缺一条都不算"升级成功"。
 	_uo_now="$(systemctl show -p MainPID --value xb-probe-master 2>/dev/null || echo "")"
-	echo "==> 升级完成"
+	say "升级完成"
 	echo "    运行中的版本：${_uo_new_ver:-（未报告版本）}"
 	echo "    服务状态：$(systemctl is-active xb-probe-master 2>/dev/null || echo unknown)${_uo_now:+（MainPID $_uo_now）}"
 	echo "    未改动：$CFG、证书、Caddy、管理员账号、$DATA/dist/"
@@ -1504,24 +1553,24 @@ fi
 # 反过来说：这也意味着本模式不该出现在任何"无人值守的默认路径"里，
 # 所以它不参与 --yes 之外的自动选择（菜单默认项仍是 1）。
 if [ -n "$RESET_PASSWORD" ]; then
-	echo "==> 重置管理员密码"
+	say "重置管理员密码"
 	if [ -n "$DRY_RUN" ]; then
 		echo "    [dry-run] 将会执行：$BIN_DIR/xb-probe-master reset-admin -config $CFG -username ${ADMIN_USER:-ops}"
 		echo "    [dry-run] 口令在正式执行时交互输入（或由 --admin-password / PROBE_ADMIN_PASSWORD 提供）。"
-		echo "==> dry-run：未改动任何东西。"
+		say "dry-run：未改动任何东西。"
 		exit 0
 	fi
 	if [ "$(id -u)" -ne 0 ]; then
-		echo "错误：重置口令要写 $DATA 里的数据库，需要 root 或 sudo（--dry-run 不需要）。" >&2
+		err "重置口令要写 $DATA 里的数据库，需要 root 或 sudo（--dry-run 不需要）。"
 		exit 1
 	fi
 	if [ ! -x "$BIN_DIR/xb-probe-master" ]; then
-		echo "错误：找不到可执行的 $BIN_DIR/xb-probe-master —— 这台机器上还没有装 Master？" >&2
+		err "找不到可执行的 $BIN_DIR/xb-probe-master —— 这台机器上还没有装 Master？"
 		echo "      首次部署请选 1（安装 / 升级）。" >&2
 		exit 1
 	fi
 	if [ ! -f "$CFG" ]; then
-		echo "错误：读不到 $CFG —— 拿不到数据目录，不敢继续。" >&2
+		err "读不到 $CFG —— 拿不到数据目录，不敢继续。"
 		exit 1
 	fi
 
@@ -1540,12 +1589,12 @@ if [ -n "$RESET_PASSWORD" ]; then
 		stty echo 2>/dev/null || true
 		printf '\n' >&2
 		if [ "$ADMIN_PASSWORD" != "$_rp_again" ]; then
-			echo "错误：两次输入的口令不一致，未做任何改动。" >&2
+			err "两次输入的口令不一致，未做任何改动。"
 			exit 2
 		fi
 	fi
 	if [ -z "$ADMIN_PASSWORD" ]; then
-		echo "错误：口令不能为空。" >&2
+		err "口令不能为空。"
 		exit 2
 	fi
 
@@ -1569,12 +1618,12 @@ if [ -n "$RESET_PASSWORD" ]; then
 			config_mismatch_report "$_rp_out"
 			;;
 		esac
-		echo "错误：重置口令失败（上面是 xb-probe-master 的输出）。" >&2
+		err "重置口令失败（上面是 xb-probe-master 的输出）。"
 		echo "      用户名「${ADMIN_USER:-ops}」不存在时也会这样——可用 --admin-user 指定。" >&2
 		exit 1
 	fi
 	unset ADMIN_PASSWORD
-	echo "==> 完成：管理员 ${ADMIN_USER:-ops} 的口令已更新，其它任何东西都没动。"
+	say "完成：管理员 ${ADMIN_USER:-ops} 的口令已更新，其它任何东西都没动。"
 	echo "    用新口令登录后，建议在「系统设置 → 安全」里核对 TOTP 状态。"
 	exit 0
 fi
@@ -1596,7 +1645,7 @@ fi
 # 想留数据加 --keep-data。
 if [ -n "$UNINSTALL" ]; then
 	if [ -z "$DRY_RUN" ] && [ "$(id -u)" -ne 0 ]; then
-		echo "错误：卸载需要 root 或 sudo（--dry-run 不需要）。" >&2
+		err "卸载需要 root 或 sudo（--dry-run 不需要）。"
 		exit 1
 	fi
 
@@ -1625,7 +1674,7 @@ if [ -n "$UNINSTALL" ]; then
 
 	for _p in "$DIR" "$DATA"; do
 		if ! uninstall_path_ok "$_p"; then
-			echo "错误：拒绝删除 $_p —— 它不像本脚本创建的目录（路径中应含 probe）。" >&2
+			err "拒绝删除 $_p —— 它不像本脚本创建的目录（路径中应含 probe）。"
 			echo "      确认要删请手工执行：rm -rf '$_p'" >&2
 			exit 2
 		fi
@@ -1665,12 +1714,12 @@ if [ -n "$UNINSTALL" ]; then
 		fi
 	}
 
-	echo "==> 卸载 XB-Probe Master"
+	say "卸载 XB-Probe Master"
 	if [ -n "$DRY_RUN" ]; then
 		echo "    （dry-run：只列出将要做的事，不删除任何东西）"
 	fi
 
-	echo "==> 1/8 停止并注销服务"
+	say "1/8 停止并注销服务"
 	UNIT_PATH=/etc/systemd/system/xb-probe-master.service
 	if [ -n "$DRY_RUN" ]; then
 		echo "    [dry-run] systemctl disable --now xb-probe-master；删除 $UNIT_PATH"
@@ -1689,7 +1738,7 @@ if [ -n "$UNINSTALL" ]; then
 		echo "    没有 systemctl：跳过（若用 OpenRC，见下一步）"
 	fi
 
-	echo "==> 2/8 其它 init 系统残留"
+	say "2/8 其它 init 系统残留"
 	for _f in /etc/init.d/xb-probe-master /etc/supervisor/conf.d/xb-probe-master.conf; do
 		if [ -e "$_f" ]; then
 			rm_path "$_f" "其它进程管理器的单元"
@@ -1701,20 +1750,20 @@ if [ -n "$UNINSTALL" ]; then
 		fi
 	done
 
-	echo "==> 3/8 删除二进制"
+	say "3/8 删除二进制"
 	rm_path "$BIN_DIR/xb-probe-master" "Master 可执行文件"
 
-	echo "==> 4/8 删除配置目录"
+	say "4/8 删除配置目录"
 	rm_path "$DIR" "配置（master.yaml、master.key）"
 
-	echo "==> 5/8 删除数据目录"
+	say "5/8 删除数据目录"
 	if [ -n "$KEEP_DATA" ]; then
 		echo "    保留（--keep-data）：$DATA"
 	else
 		rm_path "$DATA" "数据（数据库、主题、发布件、证书）"
 	fi
 
-	echo "==> 6/8 停止并清理 Caddy（仅当它由本脚本安装/配置）"
+	say "6/8 停止并清理 Caddy（仅当它由本脚本安装/配置）"
 	# 用户的原话："卸载脚本时候，caddy并没有停止监听和卸载"。
 	# 这里最难的不是停服务，而是**分清哪些是我们的、哪些是别人的**：
 	# 这台机器上很可能原本就有一个 Caddy（发行版包、x-ui 之类），把它一并停掉删掉
@@ -1820,7 +1869,7 @@ if [ -n "$UNINSTALL" ]; then
 		fi
 	fi
 
-	echo "==> 8/8 删除系统用户"
+	say "8/8 删除系统用户"
 	if [ -n "$DRY_RUN" ]; then
 		echo "    [dry-run] userdel probe；groupdel probe"
 	elif id -u probe >/dev/null 2>&1; then
@@ -1839,9 +1888,9 @@ if [ -n "$UNINSTALL" ]; then
 
 	echo
 	if [ -n "$DRY_RUN" ]; then
-		echo "==> dry-run 结束：以上操作均未执行。去掉 --dry-run 即真正卸载。"
+		say "dry-run 结束：以上操作均未执行。去掉 --dry-run 即真正卸载。"
 	else
-		echo "==> 卸载完成。"
+		say "卸载完成。"
 		echo "    未删除的只有系统包（本脚本从未安装过它们）与你自己放进来的文件。"
 		# 卸载后还留着监听端口的进程，是"卸载完成"这句话最容易骗人的地方。
 		# 直接把还在听的端口列出来，用户不必自己 netstat 去对。
@@ -2077,22 +2126,17 @@ if [ -z "$PUBLIC_ORIGIN" ] && [ -n "$ASK" ]; then PUBIP="$(detect_public_ip)"; f
 # 所以现在一问到底，终结者由这一问的答案**推导**（见下面的 case），不再单独问。
 if [ -z "$TLS_MODE_GIVEN" ]; then
 	if [ -n "$ASK" ]; then
+		printf '%s下面几个问题决定对外访问方式，直接回车取方括号里的默认值。%s\n' "$(_clr 2 "$C_STEP")" "$(_clr 2 "$C_RST")" >&2
 		cat >&2 <<'EOF'
 
-下面几个问题决定对外访问方式，直接回车取方括号里的默认值。
+对外访问方式（对外看起来是什么，证书谁来办）：
+  1) caddy       HTTPS，证书自动申请与续期，反代也一并配好——只需把域名解析到本机（最省事，推荐）
+  2) master      HTTPS，证书由 Master 自己申请，Master 自己监听 443 终结 TLS（需要一个已解析到本机的域名）
+  3) selfsigned  HTTPS，自签证书——没有域名、只能用纯 IP 访问时唯一可行的加密方式（浏览器会提示不受信任）
+  4) files       HTTPS，证书与私钥用你已有的文件
+  5) plain       不使用 HTTPS，只提供纯 HTTP（不装任何反代，证书与 443 都不涉及）
 
-对外访问方式：
-  1) caddy      使用 HTTPS。证书自动申请与续期，反代也一并配好——本脚本会装好
-                Caddy 并把请求转给 Master，你只需要把域名解析到本机。
-                **最省事，推荐**
-  2) master     使用 HTTPS。证书由 Master 进程自己申请（内置 ACME 客户端），
-                Master 自己监听 443 并终结 TLS（需要一个已解析到本机的域名）
-  3) selfsigned 使用 HTTPS，但用自签证书（没有域名、只能用纯 IP 访问时，这是
-                唯一可行的加密方式；浏览器会提示证书不受信任）。Master 自己终结
-  4) files      使用 HTTPS，证书与私钥用你已有的文件。Master 自己终结
-  5) plain      不使用 HTTPS，只提供纯 HTTP（不装任何反代，证书与 443 都不涉及）
-
-选 1 不需要你自己去装 Caddy/Nginx 并手写反代配置；选 2~4 由 Master 自己扛下 443。
+选 2~4 由 Master 自己扛下 443；选 1 反代与证书都交给 Caddy，不必自己装、也不必手写配置。
 EOF
 	fi
 	ask "选择对外访问方式（1/2/3/4/5）" "1"
@@ -2130,12 +2174,12 @@ master | caddy) : ;;
 '')
 	# 只有 pure HTTP 允许空终结者；其它情况空值意味着上面某一段漏了赋值。
 	if [ "$TLS_MODE" != "plain" ]; then
-		echo "错误：未能确定 TLS 终结者（tls.mode=$TLS_MODE）。请显式给 --tls-terminator。" >&2
+		err "未能确定 TLS 终结者（tls.mode=$TLS_MODE）。请显式给 --tls-terminator。"
 		exit 2
 	fi
 	;;
 *)
-	echo "错误：--tls-terminator 只能是 master 或 caddy（收到 $TLS_TERMINATOR）。" >&2
+	err "--tls-terminator 只能是 master 或 caddy（收到 $TLS_TERMINATOR）。"
 	exit 2
 	;;
 esac
@@ -2181,7 +2225,7 @@ fi
 # 但与用户意图（"我不要 https"）相反——把反代装上、证书办下来，对外就是 https 了。
 # 所以按**意图**拦住，而不是按配置的形状放过。
 if [ -n "$PLAIN_HTTP" ] && [ "$TLS_TERMINATOR" = "caddy" ]; then
-	echo "错误：选了纯 HTTP（对外访问方式 5）就不该让 Caddy 终结 TLS（--tls-terminator caddy）。" >&2
+	err "选了纯 HTTP（对外访问方式 5）就不该让 Caddy 终结 TLS（--tls-terminator caddy）。"
 	echo "      要 HTTPS 请选对外访问方式 1/2/3/4；坚持纯 HTTP 请去掉 --tls-terminator。" >&2
 	exit 2
 fi
@@ -2197,9 +2241,8 @@ if [ "$TLS_MODE" = "acme" ]; then
 		ACME_EMAIL="$ASK_REPLY"
 	fi
 	if [ -z "$ACME_CHALLENGE_GIVEN" ] && [ -n "$ASK" ]; then
+		printf '%s证书的校验方式（前提条件不同，选错了要在申请时才失败）：%s\n' "$(_clr 2 "$C_STEP")" "$(_clr 2 "$C_RST")" >&2
 		cat >&2 <<'EOF'
-
-证书的校验方式（三个前提条件不同，选错了会在申请时才失败）：
   1) http-01      本机在 80 端口应答（默认；最省事，需要 80 可达且没被别的服务占着）
   2) tls-alpn-01  本机在 443 端口用 ALPN 应答（80 被占用、且 443 由本进程直接监听时选它）
   3) dns-01       在 DNS 服务商处写一条 TXT 记录（支持通配符 *.example.com；需要 API Token）
@@ -2286,25 +2329,18 @@ fi
 # 默认地址里的端口会和用户刚选的端口对不上（提示 8080、实际听 9000）。
 if [ -z "$PUBLIC_LISTEN_GIVEN" ] && [ -n "$ASK" ]; then
 	if [ "$TLS_TERMINATOR" = "caddy" ]; then
-		cat >&2 <<'EOF'
-
-公开站监听：Caddy 会反代到这个地址，所以这里**只需监听回环**
-（推荐 127.0.0.1:8080）。写 0.0.0.0 的话 8080 会直接暴露在公网上，
-绕过 Caddy 的 https 与访问控制。
-EOF
+		printf '%s公开站监听：Caddy 会反代到这个地址，只需监听回环（推荐 127.0.0.1:8080）；%s\n' "$(_clr 2 "$C_STEP")" "$(_clr 2 "$C_RST")" >&2
+		printf '%s写 0.0.0.0 会把这个端口直接暴露在公网上，绕过 Caddy 的 https 与访问控制。%s\n' "$(_clr 2 "$C_DIM")" "$(_clr 2 "$C_RST")" >&2
 	elif [ "$TLS_TERMINATOR" = "master" ]; then
-		cat >&2 <<'EOF'
-
-公开站监听：Master 自己终结 TLS，所以要监听**对外的 443**（推荐 0.0.0.0:443）。
-        写别的端口也能用，但地址里必须带上端口（如 https://你的域名:8443）。
-EOF
+		printf '%s公开站监听：Master 自己终结 TLS，要监听对外的 443（推荐 0.0.0.0:443）；%s\n' "$(_clr 2 "$C_STEP")" "$(_clr 2 "$C_RST")" >&2
+		printf '%s写别的端口也能用，但对外地址里必须带上端口（如 https://你的域名:8443）。%s\n' "$(_clr 2 "$C_DIM")" "$(_clr 2 "$C_RST")" >&2
 	fi
 	ask "公开站监听（端口，或 IP:端口；0.0.0.0 表示所有网卡）" "$PUBLIC_LISTEN"
 	_new_listen="$(normalize_listen "$ASK_REPLY" "0.0.0.0")"
 	if listen_port_ok "$_new_listen"; then
 		PUBLIC_LISTEN="$_new_listen"
 	else
-		printf '警告：%s 不是合法端口，沿用 %s\n' "$ASK_REPLY" "$PUBLIC_LISTEN" >&2
+		warn "$ASK_REPLY 不是合法端口，沿用 $PUBLIC_LISTEN"
 	fi
 fi
 
@@ -2371,7 +2407,7 @@ _admin_tries=0
 _adm_loop_warned=""
 _adm_default="${ADMIN_LISTEN:-$ADMIN_MERGE_LABEL}"
 while [ -z "$ADMIN_LISTEN_GIVEN" ] && [ -n "$ASK" ]; do
-	ask "管理端监听（回车=$ADMIN_MERGE_LABEL，即与公开站同一个监听、后台在公开地址的 /admin/ 下；也可填 IP:端口 单独开一个）" "$_adm_default"
+	ask "管理端监听（回车=与公开站同一个监听，后台在 /admin/ 下；也可填 IP:端口 单独开一个）" "$_adm_default"
 	case "$ASK_REPLY" in
 	"" | "$ADMIN_MERGE_LABEL" | same | merge)
 		ADMIN_LISTEN=""
@@ -2380,7 +2416,7 @@ while [ -z "$ADMIN_LISTEN_GIVEN" ] && [ -n "$ASK" ]; do
 	esac
 	_new_listen="$(normalize_listen "$ASK_REPLY" "127.0.0.1")"
 	if ! listen_port_ok "$_new_listen"; then
-		printf '警告：%s 不是合法端口，沿用 %s\n' "$ASK_REPLY" "${ADMIN_LISTEN:-$ADMIN_MERGE_LABEL}" >&2
+		warn "$ASK_REPLY 不是合法端口，沿用 ${ADMIN_LISTEN:-$ADMIN_MERGE_LABEL}"
 		break
 	fi
 	if [ "$_new_listen" = "$PUBLIC_LISTEN" ]; then
@@ -2401,12 +2437,10 @@ while [ -z "$ADMIN_LISTEN_GIVEN" ] && [ -n "$ASK" ]; do
 	if [ "$TLS_TERMINATOR" != "caddy" ] && [ -z "$_adm_loop_warned" ] &&
 		is_loopback_listen "$_new_listen"; then
 		_adm_loop_warned="1"
-		printf '\n注意：这次是 Master 自己终结 TLS，**没有前置反代**。\n' >&2
-		printf '      管理端只监听 %s 的话，谁也接不出来：公开看板照常，\n' "$_new_listen" >&2
-		printf '      但 https://<你的地址>/admin/ 打不开（真机上就是这么撞上的）。\n' >&2
+		printf '\n%s注意：这次是 Master 自己终结 TLS，没有前置反代。%s\n' "$(_clr 2 "$C_WARN")" "$(_clr 2 "$C_RST")" >&2
+		printf '      管理端只监听 %s 谁也接不出来：公开看板照常，但 https://<你的地址>/admin/ 打不开。\n' "$_new_listen" >&2
 		printf '      · 回车 = %s（后台在公开地址的 /admin/ 下，不占新端口，推荐）\n' "$ADMIN_MERGE_LABEL" >&2
-		printf '      · 或者填 0.0.0.0:8081 单独开一个（记得防火墙放行该端口）\n' >&2
-		printf '      · 确实只想用 SSH 隧道访问后台：把 %s 再输一次即可。\n' "$_new_listen" >&2
+		printf '      · 或填 0.0.0.0:8081 单独开一个（记得防火墙放行）；只想 SSH 隧道访问就把 %s 再输一次\n' "$_new_listen" >&2
 		_adm_default="$ADMIN_MERGE_LABEL"
 		continue
 	fi
@@ -2418,7 +2452,7 @@ done
 # 而 `--public-listen/--admin-listen` 显式给出时不经过问答——那条路径必须
 # 也能拦下来，否则同样会装出一个启动即退出的服务。一处判、两处调用。
 if [ "$PUBLIC_LISTEN" = "$ADMIN_LISTEN" ]; then
-	echo "错误：公开站与管理端不能监听同一个地址端口（$PUBLIC_LISTEN）。" >&2
+	err "公开站与管理端不能监听同一个地址端口（$PUBLIC_LISTEN）。"
 	echo "      一个进程无法在同一地址端口上监听两次，启动时会以" >&2
 	echo "      「address already in use」退出。" >&2
 	echo "      想让后台跟公开看板共用一个监听：把管理端监听留空（$ADMIN_MERGE_LABEL）。" >&2
@@ -2464,15 +2498,38 @@ if [ -z "$ADMIN_USER_GIVEN" ] && [ -n "$ASK" ]; then
 			ADMIN_USER="$ASK_REPLY"
 			break
 		fi
-		printf '  （用户名只允许字母、数字与 . _ @ -）\n' >&2
+		printf '%s  （用户名只允许字母、数字与 . _ @ -）%s\n' "$(_clr 2 "$C_WARN")" "$(_clr 2 "$C_RST")" >&2
 		_ui=$((_ui + 1))
 	done
 fi
 if [ -z "$ADMIN_USER" ]; then ADMIN_USER="ops"; fi
 # 兜底：--admin-user / PROBE_ADMIN_USER 那条路径不经过上面的循环。
 if ! admin_user_ok "$ADMIN_USER"; then
-	echo "错误：管理员用户名只允许字母、数字与 . _ @ -（收到 $ADMIN_USER）。" >&2
+	err "管理员用户名只允许字母、数字与 . _ @ -（收到 $ADMIN_USER）。"
 	exit 2
+fi
+
+# ---- 口令紧跟在用户名后面问，然后才轮到"即将执行"确认 ----
+#
+# 顺序是刻意安排的（用户原话："要求输入管理员用户名时，紧接着要求输入密码，
+# 下一步才是确认"）：账号口令是**同一件事的两半**，中间插一大段别的输出只会
+# 让人以为口令环节已经过去了；放在确认之前，用户按下回车时整套凭据已经定下，
+# 不存在"确认完才知道还要输什么"。
+#
+# 仍然只有**没给过**口令时才问（--admin-password / PROBE_ADMIN_PASSWORD 优先，
+# 无人值守场景不该被一个问题卡住）；问法沿用 ask_secret（不回显、不用 read -e，
+# readline 会重新打开回显，把刚敲的口令打到屏幕上）。
+# 空口令不在这里判死：留空往下走，第 4 步那句"口令不能为空"是唯一的判处，
+# 免得同一个规则在两处各说各话。口令绝不进 .answers（见 ans_put 的排除表）。
+if [ -z "$ADMIN_PASSWORD" ] && [ -n "$ASK" ]; then
+	_pi=0
+	while [ "$_pi" -lt 3 ]; do
+		ask_secret "管理员 $ADMIN_USER 的口令"
+		ADMIN_PASSWORD="$ASK_REPLY"
+		[ -n "$ADMIN_PASSWORD" ] && break
+		printf '%s  （口令不能为空）%s\n' "$(_clr 2 "$C_WARN")" "$(_clr 2 "$C_RST")" >&2
+		_pi=$((_pi + 1))
+	done
 fi
 
 # ---- 把这一轮答过的非敏感项存下来 ----
@@ -2532,16 +2589,19 @@ if [ "$TLS_TERMINATOR" = "master" ] && [ -z "$DRY_RUN" ] && command -v systemctl
 fi
 
 if [ -n "$ASK" ]; then
+	# 整块输出前判一次流：stderr 是终端才着色（管道/日志里一个 ESC 都不落）。
+	_lb="$(_clr 2 "$C_BLD")"
+	_rs="$(_clr 2 "$C_RST")"
 	echo >&2
-	echo "即将执行：" >&2
+	printf '%s即将执行：%s\n' "$(_clr 2 "$C_STEP")" "$_rs" >&2
 	if [ -n "$ANSWERS_HINT" ]; then
-		printf '  %s\n' "（方括号里的默认值来自上次的答案：$ANSWERS_FILE）" >&2
-		printf '  %s\n' "（想全部重答一遍：PROBE_FRESH_ANSWERS=1 重跑本脚本）" >&2
+		printf '%s  （方括号里的默认值来自上次的答案：%s）%s\n' "$(_clr 2 "$C_DIM")" "$ANSWERS_FILE" "$_rs" >&2
+		printf '%s  （想全部重答一遍：PROBE_FRESH_ANSWERS=1 重跑本脚本）%s\n' "$(_clr 2 "$C_DIM")" "$_rs" >&2
 	fi
-	printf '  %s：%s\n' "公开站监听" "$PUBLIC_LISTEN" >&2
-	printf '  %s：%s\n' "管理端监听" "${ADMIN_LISTEN:-（与公开站同一个监听：后台在公开地址的 /admin/ 下）}" >&2
-	printf '  %s：%s\n' "公开地址" "${PUBLIC_ORIGIN:-（留空：按请求 Host 回填）}" >&2
-	printf '  %s：%s\n' "管理地址" "${ADMIN_ORIGIN:-（与公开站同一个域名）}" >&2
+	printf '  %s%s%s：%s\n' "$_lb" "公开站监听" "$_rs" "$PUBLIC_LISTEN" >&2
+	printf '  %s%s%s：%s\n' "$_lb" "管理端监听" "$_rs" "${ADMIN_LISTEN:-（与公开站同一个监听：后台在 /admin/ 下）}" >&2
+	printf '  %s%s%s：%s\n' "$_lb" "公开地址" "$_rs" "${PUBLIC_ORIGIN:-（留空：按请求 Host 回填）}" >&2
+	printf '  %s%s%s：%s\n' "$_lb" "管理地址" "$_rs" "${ADMIN_ORIGIN:-（与公开站同一个域名）}" >&2
 	# 清单里的 TLS 一行要说清"对外是 http 还是 https、证书谁办"，
 	# 而不是把内部的 tls.mode 值原样抛给用户——`none` 这个词在两种场景下
 	# 对外含义完全相反（Caddy 终结时对外是 https），直接显示只会误导。
@@ -2559,21 +2619,26 @@ if [ -n "$ASK" ]; then
 		*) _tls_note="$TLS_MODE（终结者=$TLS_TERMINATOR）" ;;
 		esac
 	fi
-	printf '  %s：%s\n' "对外访问" "$_tls_note" >&2
+	printf '  %s%s%s：%s\n' "$_lb" "对外访问" "$_rs" "$_tls_note" >&2
 	if [ "$TLS_TERMINATOR" = "caddy" ]; then
-		printf '  %s：%s\n' "反代" "安装 Caddy，反代 ${PROXY_DOMAINS:-$PUBLIC_ORIGIN} → $PUBLIC_LISTEN" >&2
+		printf '  %s%s%s：%s\n' "$_lb" "反代" "$_rs" "安装 Caddy，反代 ${PROXY_DOMAINS:-$PUBLIC_ORIGIN} → $PUBLIC_LISTEN" >&2
 	fi
-	printf '  %s：%s\n' "管理员" "$ADMIN_USER（口令随后输入）" >&2
-	printf '  %s：%s\n' "配置目录" "$DIR" >&2
-	printf '  %s：%s\n' "数据目录" "$DATA" >&2
-	if [ -n "$NO_SERVICE" ]; then
-		printf '  %s：%s\n' "服务" "不注册（--no-service）" >&2
+	# 口令已经在上一步问过了（用户名 → 口令 → 这里才确认），所以清单里说的是实情。
+	if [ -n "$ADMIN_PASSWORD" ]; then
+		printf '  %s%s%s：%s（口令已输入，不再显示）\n' "$_lb" "管理员" "$_rs" "$ADMIN_USER" >&2
 	else
-		printf '  %s：%s\n' "服务" "systemd（xb-probe-master，开机自启）" >&2
+		printf '  %s%s%s：%s（口令随后输入）\n' "$_lb" "管理员" "$_rs" "$ADMIN_USER" >&2
+	fi
+	printf '  %s%s%s：%s\n' "$_lb" "配置目录" "$_rs" "$DIR" >&2
+	printf '  %s%s%s：%s\n' "$_lb" "数据目录" "$_rs" "$DATA" >&2
+	if [ -n "$NO_SERVICE" ]; then
+		printf '  %s%s%s：%s\n' "$_lb" "服务" "$_rs" "不注册（--no-service）" >&2
+	else
+		printf '  %s%s%s：%s\n' "$_lb" "服务" "$_rs" "systemd（xb-probe-master，开机自启）" >&2
 	fi
 	echo >&2
 	if ! confirm "继续？"; then
-		echo "已取消，未改动系统。" >&2
+		warn "已取消，未改动系统。"
 		exit 0
 	fi
 fi
@@ -2587,20 +2652,20 @@ fi
 case "$TLS_MODE" in
 none | files | selfsigned | acme) : ;;
 *)
-	echo "错误：--tls-mode 只能是 none / files / selfsigned / acme（收到 $TLS_MODE）。" >&2
+	err "--tls-mode 只能是 none / files / selfsigned / acme（收到 $TLS_MODE）。"
 	exit 2
 	;;
 esac
 
 if [ -n "$TLS_DOMAINS$TLS_IPS$ACME_EMAIL$TLS_CERT$TLS_KEY" ] && [ "$TLS_MODE" = "none" ]; then
-	echo "错误：给了证书相关参数却 --tls-mode none。要么把模式写对，要么去掉这些参数——" >&2
+	err "给了证书相关参数却 --tls-mode none。要么把模式写对，要么去掉这些参数——"
 	echo "      否则证书不会生效，而命令行看起来像「配了 TLS」。" >&2
 	exit 2
 fi
 
 if [ "$TLS_MODE" = "files" ]; then
 	[ -n "$TLS_CERT" ] && [ -n "$TLS_KEY" ] || {
-		echo "错误：mode=files 必须同时给 --tls-cert 与 --tls-key。" >&2
+		err "mode=files 必须同时给 --tls-cert 与 --tls-key。"
 		exit 2
 	}
 	for f in "$TLS_CERT" "$TLS_KEY"; do
@@ -2610,7 +2675,7 @@ fi
 
 if [ "$TLS_MODE" = "acme" ]; then
 	if [ -z "$TLS_DOMAINS$TLS_IPS" ]; then
-		echo "错误：mode=acme 至少要给一个 --tls-domain 或 --tls-ip（否则没有可申请的标识符）。" >&2
+		err "mode=acme 至少要给一个 --tls-domain 或 --tls-ip（否则没有可申请的标识符）。"
 		exit 2
 	fi
 	case "$ACME_CHALLENGE" in
@@ -2621,12 +2686,12 @@ if [ "$TLS_MODE" = "acme" ]; then
 	# 那时的错误信息离原因很远（"写入 dns-01 挑战记录失败"），排起来要绕一大圈。
 	if [ "$ACME_CHALLENGE" = "dns-01" ]; then
 		if [ -z "$TLS_DOMAINS" ]; then
-			echo "错误：challenge=dns-01 只支持域名（DNS 里没有 IP 的挑战记录可写），" >&2
+			err "challenge=dns-01 只支持域名（DNS 里没有 IP 的挑战记录可写），"
 			echo "      请用 --tls-domain 给出域名，或改用 http-01/tls-alpn-01。" >&2
 			exit 2
 		fi
 		if [ -z "$ACME_DNS_TOKEN" ]; then
-			echo "错误：challenge=dns-01 必须提供 DNS API Token。" >&2
+			err "challenge=dns-01 必须提供 DNS API Token。"
 			echo "      交互执行时会被提示输入；无人值守请设 PROBE_ACME_DNS_TOKEN。" >&2
 			exit 2
 		fi
@@ -2651,7 +2716,7 @@ if [ "$TLS_MODE" = "acme" ]; then
 				'/[Ll][Ii][Ss][Tt][Ee][Nn]/ && $4 ~ p {print; exit}')"
 		fi
 		if [ -n "$_pv_use" ]; then
-			echo "警告：challenge=$ACME_CHALLENGE 需要 Master 自己监听 $_pv_port 端口，但它已被占用：" >&2
+			warn "challenge=$ACME_CHALLENGE 需要 Master 自己监听 $_pv_port 端口，但它已被占用："
 			printf '      %s\n' "$_pv_use" >&2
 			echo "      Master 会因此起不来、证书随之申请失败。如果该端口由前置反代占用，" >&2
 			echo "      让反代把 /.well-known/acme-challenge/ 转给 Master，并把配置里的" >&2
@@ -2679,12 +2744,12 @@ if [ -n "$PUBLIC_ORIGIN" ]; then
 			# 一条用不上的警告会让真正需要动作的警告失去分量。
 			:
 		else
-			echo "警告：--tls-mode none 但 --public-origin 是 https://。若 TLS 由前置反代终结，" >&2
+			warn "--tls-mode none 但 --public-origin 是 https://。若 TLS 由前置反代终结，"
 			echo "      请把反代网段填进 trusted_proxies，否则 Cookie / HSTS 判定会走明文分支。" >&2
 		fi
 		;;
 	files:http://* | selfsigned:http://* | acme:http://*)
-		echo "错误：--tls-mode $TLS_MODE 与 --public-origin $PUBLIC_ORIGIN 不一致。" >&2
+		err "--tls-mode $TLS_MODE 与 --public-origin $PUBLIC_ORIGIN 不一致。"
 		echo "      配了证书就应当对外宣告 https://（端口不是 443 时写成 https://host:端口）。" >&2
 		exit 2
 		;;
@@ -2968,22 +3033,22 @@ install_caddy() {
 	_ca_url="https://caddyserver.com/api/download?os=linux&arch=$_ca_arch"
 	if command -v curl >/dev/null 2>&1; then
 		curl -fsSL "$_ca_url" -o "$BIN_DIR/caddy" || {
-			echo "错误：下载 caddy 失败（$_ca_url）。" >&2
+			err "下载 caddy 失败（$_ca_url）。"
 			echo "      若网络受限，可自己装好 caddy 后重跑本脚本。" >&2
 			return 1
 		}
 	elif command -v wget >/dev/null 2>&1; then
 		wget -q -O "$BIN_DIR/caddy" "$_ca_url" || {
-			echo "错误：下载 caddy 失败（$_ca_url）。" >&2
+			err "下载 caddy 失败（$_ca_url）。"
 			return 1
 		}
 	else
-		echo "错误：找不到 curl 或 wget，无法下载 caddy。" >&2
+		err "找不到 curl 或 wget，无法下载 caddy。"
 		return 1
 	fi
 	chmod 0755 "$BIN_DIR/caddy"
 	if ! "$BIN_DIR/caddy" version >/dev/null 2>&1; then
-		echo "错误：下载到的 caddy 无法执行。" >&2
+		err "下载到的 caddy 无法执行。"
 		return 1
 	fi
 	echo "    已安装 $("$BIN_DIR/caddy" version)"
@@ -3037,7 +3102,7 @@ rollback() {
 	echo "============================================================" >&2
 	printf '  失败原因：%s\n' "$1" >&2
 	echo >&2
-	echo "==> 回滚 1/6 停止服务" >&2
+	say "回滚 1/6 停止服务" >&2
 	# 先停再删：服务还在跑着的时候删二进制，systemd 会按 Restart=always 反复重启，
 	# 而它每次重启都会在日志里留一条"找不到可执行文件"——把真正的失败原因淹掉。
 	systemctl stop xb-probe-master >/dev/null 2>&1 || true
@@ -3048,7 +3113,7 @@ rollback() {
 	fi
 	echo "    已停止" >&2
 
-	echo "==> 回滚 2/6 服务单元" >&2
+	say "回滚 2/6 服务单元" >&2
 	if [ -z "$PREE_HAVE_UNIT" ]; then
 		rm -f /etc/systemd/system/xb-probe-master.service 2>/dev/null || true
 		echo "    已删除 xb-probe-master.service（本次新建）" >&2
@@ -3065,7 +3130,7 @@ rollback() {
 	systemctl reset-failed xb-probe-master >/dev/null 2>&1 || true
 	systemctl reset-failed caddy >/dev/null 2>&1 || true
 
-	echo "==> 回滚 3/6 二进制" >&2
+	say "回滚 3/6 二进制" >&2
 	if [ -z "$PREE_HAVE_BIN" ] && [ -n "$BIN_SRC" ]; then
 		rm -f "$BIN_DIR/xb-probe-master" 2>/dev/null || true
 		echo "    已删除 $BIN_DIR/xb-probe-master（本次新建）" >&2
@@ -3073,7 +3138,7 @@ rollback() {
 		echo "    保留 $BIN_DIR/xb-probe-master（安装前就存在；升级失败时旧二进制已被覆盖）" >&2
 	fi
 
-	echo "==> 回滚 4/6 配置与反代配置" >&2
+	say "回滚 4/6 配置与反代配置" >&2
 	if [ -n "$PREE_HAVE_DIR" ]; then
 		# 升级场景：只撤本次写的东西。--force-config 覆盖过的配置从 .bak 还原
 		# （备份是写配置那一步做的），没备份就保留原样——**绝不删目录**。
@@ -3093,7 +3158,7 @@ rollback() {
 		else echo "    已删除 $DIR（本次新建）" >&2; fi
 	fi
 
-	echo "==> 回滚 5/6 数据目录" >&2
+	say "回滚 5/6 数据目录" >&2
 	if [ -z "$PREE_HAVE_DATA" ]; then
 		# 只删本次新建的。而且**必须**确认路径像我们自己建的（与 --uninstall 同一判据）：
 		# --data 是可传参的，`--data /var/lib` 这种手滑不该在回滚路径上变成灾难。
@@ -3114,7 +3179,7 @@ rollback() {
 		echo "    保留 $DATA（安装前就存在，可能有你的数据）" >&2
 	fi
 
-	echo "==> 回滚 6/6 系统用户" >&2
+	say "回滚 6/6 系统用户" >&2
 	if [ -z "$PREE_HAVE_USER" ]; then
 		userdel probe >/dev/null 2>&1 || true
 		groupdel probe >/dev/null 2>&1 || true
@@ -3128,7 +3193,7 @@ rollback() {
 	fi
 
 	echo >&2
-	echo "==> 回滚完成。系统已恢复到运行本脚本之前的状态。" >&2
+	say "回滚完成。系统已恢复到运行本脚本之前的状态。" >&2
 	echo "    修好上面的原因后重跑本脚本即可（它是幂等的）。" >&2
 	echo >&2
 	exit 1
@@ -3137,7 +3202,7 @@ rollback() {
 # --dry-run 不写任何东西，因此不需要 root——这样可以在桌面机上先把将要写入的
 # master.yaml 打出来看一遍。
 if [ -z "$DRY_RUN" ] && [ "$(id -u)" -ne 0 ] && [ -z "$NO_SERVICE" ]; then
-	echo "错误：请用 root 或 sudo 执行（容器场景可加 --no-service 并以 --dir/--data 指定可写目录）。" >&2
+	err "请用 root 或 sudo 执行（容器场景可加 --no-service 并以 --dir/--data 指定可写目录）。"
 	exit 1
 fi
 
@@ -3152,11 +3217,11 @@ case "$HEALTH_ADDR" in
 esac
 
 if [ -z "$BIN_SRC" ] && [ ! -x "$BIN_DIR/xb-probe-master" ]; then
-	echo "错误：既没有 --bin，$BIN_DIR 里也没有已安装的 xb-probe-master。" >&2
+	err "既没有 --bin，$BIN_DIR 里也没有已安装的 xb-probe-master。"
 	exit 2
 fi
 if [ -n "$BIN_SRC" ] && [ ! -f "$BIN_SRC" ]; then
-	echo "错误：找不到二进制 $BIN_SRC（先跑 make master 或 build.ps1）。" >&2
+	err "找不到二进制 $BIN_SRC（先跑 make master 或 build.ps1）。"
 	exit 2
 fi
 
@@ -3169,27 +3234,27 @@ precheck_state
 # 那是这个开关最有用的部分。
 if [ -n "$DRY_RUN" ]; then
 	echo
-	echo "==> dry-run：以下是将要写入 $CFG 的内容（未改动系统）"
+	say "dry-run：以下是将要写入 $CFG 的内容（未改动系统）"
 	echo
 	render_config
 	if [ "$TLS_TERMINATOR" = "caddy" ]; then
 		echo
-		echo "==> dry-run：以下是将要写入 $CADDYFILE 的内容"
+		say "dry-run：以下是将要写入 $CADDYFILE 的内容"
 		echo
 		render_caddyfile
 		echo
-		echo "==> dry-run：还会安装 Caddy 并注册 caddy.service（若尚未安装）"
+		say "dry-run：还会安装 Caddy 并注册 caddy.service（若尚未安装）"
 	fi
 	echo
-	echo "==> dry-run：未创建用户/目录、未安装二进制、未注册服务、未初始化管理员。"
+	say "dry-run：未创建用户/目录、未安装二进制、未注册服务、未初始化管理员。"
 	echo "    去掉 --dry-run 即执行（其余参数完全一致）。"
 	echo
-	echo "==> dry-run：最后还会把 Agent 发布文件拉进 $DATA/dist/（xb-probe-master dist pull）。"
+	say "dry-run：最后还会把 Agent 发布文件拉进 $DATA/dist/（xb-probe-master dist pull）。"
 	echo "    不拉的话一键安装脚本会在下载 xb-probe-agent 那一步 404；用 --no-dist-pull 跳过。"
 	exit 0
 fi
 
-echo "==> 1/7 创建系统用户与目录"
+say "1/7 创建系统用户与目录"
 # 服务以专用低权限用户运行（3.2）。Alpine/BusyBox 没有 useradd，退回 adduser。
 if ! id -u probe >/dev/null 2>&1; then
 	if command -v useradd >/dev/null 2>&1; then
@@ -3197,9 +3262,9 @@ if ! id -u probe >/dev/null 2>&1; then
 			useradd -r -s /usr/sbin/nologin probe || echo "警告：创建用户失败，继续（将以现有用户运行）" >&2
 	elif command -v adduser >/dev/null 2>&1; then
 		adduser -S -H -D probe 2>/dev/null || adduser -S -H probe 2>/dev/null || \
-			echo "警告：创建用户失败，继续" >&2
+			warn "创建用户失败，继续"
 	else
-		echo "警告：找不到 useradd/adduser，将以 root 运行（建议手工建 probe 用户）" >&2
+		warn "找不到 useradd/adduser，将以 root 运行（建议手工建 probe 用户）"
 	fi
 fi
 mkdir -p "$DIR" "$DATA" "$DATA/themes"
@@ -3210,7 +3275,7 @@ if id -u probe >/dev/null 2>&1; then
 	chown -R probe:probe "$DATA" 2>/dev/null || chown -R probe "$DATA" 2>/dev/null || true
 fi
 
-echo "==> 2/7 安装二进制"
+say "2/7 安装二进制"
 if [ -n "$BIN_SRC" ]; then
 	# 只读根文件系统（部分 LXC 模板、distroless）上 /usr/local/bin 不可写，
 	# 用 --bin-dir 指到可写目录即可——systemd 单元里的 ExecStart 会跟着走。
@@ -3234,7 +3299,7 @@ _cfg_scalar() {
 	sed -n "s/^$2$3:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$1" 2>/dev/null | head -n1
 }
 
-echo "==> 3/7 写配置文件 $CFG"
+say "3/7 写配置文件 $CFG"
 if [ -f "$CFG" ] && [ -z "$FORCE_CONFIG" ]; then
 	# 不能一句"已存在，保留"就完事：保留的前提是**旧配置与本次回答说的是同一套**。
 	# v0.1.3 真机连着栽在这里——旧配置是 acme+旧域名，这一轮问答里改成了
@@ -3320,8 +3385,11 @@ case "$_cp_rc" in
 1) fail_config_mismatch "$_CP_OUT" ;;
 esac
 
-echo "==> 4/7 初始化管理员"
+say "4/7 初始化管理员"
 if [ -z "$ADMIN_PASSWORD" ]; then
+	# 交互路径下口令在问答段就已经问过（用户名 → 口令 → 确认的顺序），走到这里
+	# 必然是**没问成**的几种情况：--yes / 非交互忘了给 PROBE_ADMIN_PASSWORD、
+	# 或用户在问答里三次都输了空口令。所以这里是唯一的判处点，也是最后的机会。
 	# 与 ask_secret 同一个道理：这里也**不用** read -e（readline 会重新打开回显），
 	# 但提示仍然要打在光标所在处、读完后补一个换行，否则下一条输出会接在这一行后面。
 	printf '管理员 %s 的口令（不回显）：' "$ADMIN_USER" >&2
@@ -3331,7 +3399,7 @@ if [ -z "$ADMIN_PASSWORD" ]; then
 	printf '\n' >&2
 fi
 if [ -z "$ADMIN_PASSWORD" ]; then
-	echo "错误：口令不能为空。" >&2
+	err "口令不能为空。"
 	exit 2
 fi
 # init-admin 在管理员已存在时会报错退出，这属于预期（幂等升级），所以不用
@@ -3381,7 +3449,7 @@ if [ "$_ia_rc" -ne 0 ]; then
 		;;
 	*)
 		echo >&2
-		echo "错误：初始化管理员失败（上面是 xb-probe-master 的输出）。" >&2
+		err "初始化管理员失败（上面是 xb-probe-master 的输出）。"
 		rollback "初始化管理员失败"
 		;;
 	esac
@@ -3416,7 +3484,7 @@ else
 fi
 
 if [ -n "$NO_SERVICE" ]; then
-	echo "==> 5~7 跳过（--no-service）"
+	say "5~7 跳过（--no-service）"
 	case "$TLS_MODE" in
 	none) _ns_scheme="http" ;;
 	*) _ns_scheme="https" ;;
@@ -3433,7 +3501,7 @@ if [ -n "$NO_SERVICE" ]; then
 	exit 0
 fi
 
-echo "==> 5/7 写 systemd 单元"
+say "5/7 写 systemd 单元"
 UNIT=/etc/systemd/system/xb-probe-master.service
 if command -v systemctl >/dev/null 2>&1 && [ -d /etc/systemd/system ]; then
 	# 自己终结 TLS 时（acme / selfsigned / files），进程要绑 443；challenge 选
@@ -3515,7 +3583,7 @@ EOF
 		rollback "xb-probe-master 启动后立即退出（日志见上；端口被占用、配置键写错都会这样）"
 	fi
 else
-	echo "警告：没有 systemd（Alpine/OpenRC 或容器），请自行用进程管理器托管：" >&2
+	warn "没有 systemd（Alpine/OpenRC 或容器），请自行用进程管理器托管："
 	echo "      $BIN_DIR/xb-probe-master -config $CFG" >&2
 	exit 0
 fi
@@ -3528,7 +3596,7 @@ fi
 # 失败即回滚，而不是"打印警告继续"。理由是反代是用户选的主路径：
 # 它没配好，站点就访问不了，而"部署完成"这句话会与事实相反。
 if [ "$TLS_TERMINATOR" = "caddy" ]; then
-	echo "==> 5b/7 安装 Caddy 反代（证书由 Caddy 自动申请与续期）"
+	say "5b/7 安装 Caddy 反代（证书由 Caddy 自动申请与续期）"
 	if ! install_caddy; then
 		rollback "Caddy 安装失败"
 	fi
@@ -3832,7 +3900,7 @@ probe_scene_evidence() {
 	return 0
 }
 
-echo "==> 6/7 健康检查"
+say "6/7 健康检查"
 # 公开站 /site 是免鉴权的，用它确认进程真的在听；最多等 20 秒。
 #
 # 配了 TLS 就必须用 https 探：明文探一个 TLS 端口永远失败，会白等 20 秒再打印
@@ -3939,7 +4007,7 @@ case "$_hc_code" in
 		fi
 	else
 		echo "" >&2
-		echo "错误：20 秒内连不上 $HEALTH_ADDR——Master 没有在这个地址上提供服务。" >&2
+		err "20 秒内连不上 $HEALTH_ADDR——Master 没有在这个地址上提供服务。"
 		echo "      $TLS_MODE 模式下不存在\"证书还没好\"这回事，连不上就是服务没起来：" >&2
 		echo "        systemctl status xb-probe-master" >&2
 		echo "        journalctl -u xb-probe-master --no-pager -n 50" >&2
@@ -3950,7 +4018,7 @@ case "$_hc_code" in
 *)
 	if [ -n "$HC_HOST" ]; then
 		echo "" >&2
-		echo "错误：Master 用域名 $HC_HOST 访问 /api/public/v1/site 回了 HTTP $_hc_code。" >&2
+		err "Master 用域名 $HC_HOST 访问 /api/public/v1/site 回了 HTTP $_hc_code。"
 		if [ -n "$_hc_body" ]; then
 			echo "  服务端的原话（先看这行——它通常直接说明了原因）：" >&2
 			echo "    $_hc_body" >&2
@@ -3972,7 +4040,7 @@ case "$_hc_code" in
 	;;
 esac
 
-echo "==> 6/7 证书"
+say "6/7 证书"
 # 这一步是本轮改动里最要紧的一处，用户的原话是：
 #
 #   "它在后台申请，但是脚本直接结束了，它是否申请成功也不知道，而且，没申请成功前
@@ -4085,7 +4153,7 @@ if [ "$TLS_TERMINATOR" = "caddy" ]; then
 		# 若是看板开关关掉这种运行期状态，证书与反代其实**已经证明是通的**
 		# （能读到 Master 自己的话就是证明），那就只警告、不撤销。
 		echo "" >&2
-		echo "错误：Caddy 与 TLS 都已就绪，但 https://$_cd_dom 对本机（回环）请求回了" >&2
+		err "Caddy 与 TLS 都已就绪，但 https://$_cd_dom 对本机（回环）请求回了"
 		echo "      HTTP $_cd_hf —— 请求已经穿过 Caddy 到达 Master，是它拒绝了这次访问。" >&2
 		_cd_body="$(curl -sS --max-time 5 --noproxy '*' -o - \
 			--resolve "$_cd_dom:443:127.0.0.1" "https://$_cd_dom/api/public/v1/site" 2>/dev/null)" || true
@@ -4105,7 +4173,7 @@ if [ "$TLS_TERMINATOR" = "caddy" ]; then
 	else
 		# 失败要给出**能直接照做**的诊断，而不是"稍后再看看"。
 		echo "" >&2
-		echo "错误：Caddy 起来了，但 https://$_cd_dom 在本机（回环）60 秒内仍不可用。" >&2
+		err "Caddy 起来了，但 https://$_cd_dom 在本机（回环）60 秒内仍不可用。"
 		echo "  这条判据连的是 127.0.0.1:443、SNI 与 Host 都是域名；公网通不通、" >&2
 		echo "  外面能不能进来都不参与。所以断点只可能是下面这几处之一。" >&2
 		echo "  curl 的原话（以前这段把它丢进了 /dev/null，最要紧的事实从未露面）：" >&2
@@ -4248,7 +4316,7 @@ else
 	esac
 fi
 
-echo "==> 6c/7 发布文件入库（/dist/ 里放的是 Agent 二进制，新节点的自举来源）"
+say "6c/7 发布文件入库（/dist/ 里放的是 Agent 二进制，新节点的自举来源）"
 # ---------------------------------------------------------------------------
 # 为什么这一步必须在部署里，而不是留给用户"稍后自己跑"
 # ---------------------------------------------------------------------------
@@ -4392,7 +4460,7 @@ EOF
 	fi
 fi
 
-echo "==> 7/7 完成"
+say "7/7 完成"
 if [ -z "$PUBLIC_ORIGIN" ]; then
 	cat >&2 <<'EOF'
 ⚠ 没有给 --public-origin，配置文件里就没有 public_origin，install.master_url
@@ -4422,11 +4490,11 @@ PUBLIC_URL="${PUBLIC_ORIGIN:-$SCHEME://$HEALTH_ADDR}"
 resolve_admin_entry "$SCHEME"
 
 echo
-echo "============================================================"
-echo " 部署完成"
-echo "============================================================"
-printf '  公开看板    %s\n' "$PUBLIC_URL"
-printf '  管理后台    %s\n' "$ADMIN_URL"
+printf '%s============================================================%s\n' "$(_clr 1 "$C_OK")" "$(_clr 1 "$C_RST")"
+printf '%s 部署完成%s\n' "$(_clr 1 "$C_OK")" "$(_clr 1 "$C_RST")"
+printf '%s============================================================%s\n' "$(_clr 1 "$C_OK")" "$(_clr 1 "$C_RST")"
+printf '  %s公开看板%s    %s\n' "$(_clr 1 "$C_BLD")" "$(_clr 1 "$C_RST")" "$PUBLIC_URL"
+printf '  %s管理后台%s    %s\n' "$(_clr 1 "$C_BLD")" "$(_clr 1 "$C_RST")" "$ADMIN_URL"
 if [ -n "$ADMIN_NOTE" ]; then printf '              %s\n' "$ADMIN_NOTE"; fi
 case "$TLS_MODE" in
 none)
@@ -4486,17 +4554,17 @@ case "${SELF_ENTRY:-}" in
 bin)
 	# 免编译入口：它是从 raw.githubusercontent 取回来执行的，所以卸载也照原样。
 	_sh_url="${SCRIPT_ENTRY_URL:-https://raw.githubusercontent.com/koyoca/XB-Probe/main/install-master-bin.sh}"
-	printf '  卸载        sudo sh -c "$(curl -fsSL %s)" xb --uninstall\n' "$_sh_url"
+	printf '  %s卸载%s        sudo sh -c "$(curl -fsSL %s)" xb --uninstall\n' "$(_clr 1 "$C_BLD")" "$(_clr 1 "$C_RST")" "$_sh_url"
 	printf '              （加 --keep-data 保留数据目录；--dry-run 只预览不删）\n'
 	;;
 src)
 	_sh_url="${SCRIPT_ENTRY_URL:-https://raw.githubusercontent.com/koyoca/XB-Probe/main/install-master.sh}"
-	printf '  卸载        sudo sh -c "$(curl -fsSL %s)" xb --uninstall\n' "$_sh_url"
+	printf '  %s卸载%s        sudo sh -c "$(curl -fsSL %s)" xb --uninstall\n' "$(_clr 1 "$C_BLD")" "$(_clr 1 "$C_RST")" "$_sh_url"
 	printf '              （加 --keep-data 保留数据目录；--dry-run 只预览不删）\n'
 	;;
 ps1)
-	printf '  卸载        irm %s -OutFile install-master.ps1; .\\install-master.ps1 -Uninstall\n' \
-		"${SCRIPT_ENTRY_URL:-https://raw.githubusercontent.com/koyoca/XB-Probe/main/install-master.ps1}"
+	printf '  %s卸载%s        irm %s -OutFile install-master.ps1; .\\install-master.ps1 -Uninstall\n' \
+		"$(_clr 1 "$C_BLD")" "$(_clr 1 "$C_RST")" "${SCRIPT_ENTRY_URL:-https://raw.githubusercontent.com/koyoca/XB-Probe/main/install-master.ps1}"
 	printf '              （加 -KeepData 保留数据目录；-DryRun 只预览不删）\n'
 	;;
 *)
