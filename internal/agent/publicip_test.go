@@ -16,14 +16,19 @@ import (
 // 替身"已生效"由断言本身证明：这些用例断言的是**替身给的值**（203.0.113.9），
 // 若接缝没接上（还是真的去打网络），拿到的一定是空串，用例必红。
 
-// stubPublicIP 把探测函数换成替身，返回被调用次数的指针。
+// stubPublicIP 把探测函数换成替身（两个协议族都返回同一个地址），返回被调用次数的指针。
 func stubPublicIP(t *testing.T, ip string, err error) *int {
+	return stubPublicIPFamily(t, map[string]string{"tcp4": ip, "tcp6": ip}, err)
+}
+
+// stubPublicIPFamily 按协议族给不同的答案（tcp4 / tcp6；没给的族返回空串）。
+func stubPublicIPFamily(t *testing.T, byFamily map[string]string, err error) *int {
 	t.Helper()
 	calls := 0
 	orig := httpGetPublicIP
-	httpGetPublicIP = func(context.Context, string) (string, error) {
+	httpGetPublicIP = func(_ context.Context, _ string, network string) (string, error) {
 		calls++
-		return ip, err
+		return byFamily[network], err
 	}
 	t.Cleanup(func() { httpGetPublicIP = orig })
 	return &calls
@@ -42,21 +47,22 @@ func TestRefreshPublicIPStoresValueAndKeepsItOnFailure(t *testing.T) {
 	ctx := context.Background()
 
 	calls := stubPublicIP(t, "203.0.113.9", nil)
-	if got := env.d.refreshPublicIP(ctx, cfg.PublicIPURL); got != "203.0.113.9" {
-		t.Fatalf("探测返回值 = %q，期望 203.0.113.9（若为空说明接缝没生效、真的去打了网络）", got)
-	}
-	if *calls != 1 {
-		t.Fatalf("替身被调用 %d 次，期望 1", *calls)
+	env.d.refreshPublicIP(ctx, cfg.PublicIPURL)
+	// v4 与 v6 各探一次；替身对 tcp6 也回了点分 v4，按族核对会被拒掉，
+	// 所以只有 v4 列有值。
+	if *calls != 2 {
+		t.Fatalf("替身被调用 %d 次，期望 2（v4/v6 各一次）", *calls)
 	}
 	if got := env.d.observedPublicIP(); got != "203.0.113.9" {
 		t.Fatalf("探测结果未写入运行态：%q", got)
 	}
+	if got := env.d.observedPublicIP6(); got != "" {
+		t.Fatalf("tcp6 那次拿到的是点分 IPv4，却被当成了 v6 的答案：%q", got)
+	}
 
 	// 服务不可达 → 保留上一次的地址。
 	stubPublicIP(t, "", errors.New("connection refused"))
-	if got := env.d.refreshPublicIP(ctx, cfg.PublicIPURL); got != "" {
-		t.Errorf("失败时应返回空串，得到 %q", got)
-	}
+	env.d.refreshPublicIP(ctx, cfg.PublicIPURL)
 	if got := env.d.observedPublicIP(); got != "203.0.113.9" {
 		t.Errorf("单次探测失败把已知的公网地址清掉了：%q", got)
 	}
@@ -64,14 +70,43 @@ func TestRefreshPublicIPStoresValueAndKeepsItOnFailure(t *testing.T) {
 	// 拿到了响应但里面没有公网地址（例如服务经代理返回了 127.0.0.1）→ 同样不当成新值。
 	// netutil 那一侧负责拒绝，这里断言 Agent 不会把空当有效值写进去。
 	calls2 := stubPublicIP(t, "", nil)
-	if got := env.d.refreshPublicIP(ctx, cfg.PublicIPURL); got != "" {
-		t.Errorf("响应里没有公网地址时应返回空串，得到 %q", got)
-	}
-	if *calls2 != 1 {
-		t.Errorf("替身被调用 %d 次，期望 1", *calls2)
+	env.d.refreshPublicIP(ctx, cfg.PublicIPURL)
+	if *calls2 != 2 {
+		t.Errorf("替身被调用 %d 次，期望 2", *calls2)
 	}
 	if got := env.d.observedPublicIP(); got != "203.0.113.9" {
 		t.Errorf("取不到地址时把已知地址清掉了：%q", got)
+	}
+}
+
+// TestRefreshPublicIPFillsBothFamilies 钉住双栈探测：同一句话强制走 v4 与 v6
+// 各问一次，两列地址各自落位、互不顶替——这是"IPv6 一直获取不到"的修复。
+func TestRefreshPublicIPFillsBothFamilies(t *testing.T) {
+	m := newFakeMaster(t, "")
+	cfg := defaultTestConfig()
+	cfg.PublicIPURL = "https://ip.example.invalid/"
+	env := newAgentEnv(t, m, cfg)
+
+	stubPublicIPFamily(t, map[string]string{
+		"tcp4": "203.0.113.9",
+		"tcp6": "2606:4700::1",
+	}, nil)
+	env.d.refreshPublicIP(context.Background(), cfg.PublicIPURL)
+	if got := env.d.observedPublicIP(); got != "203.0.113.9" {
+		t.Errorf("v4 列 = %q，期望 203.0.113.9", got)
+	}
+	if got := env.d.observedPublicIP6(); got != "2606:4700::1" {
+		t.Errorf("v6 列 = %q，期望 2606:4700::1（单栈探测修完这里还是空，就是没接上）", got)
+	}
+
+	// v6 探测失败不影响 v4；反过来也一样。
+	stubPublicIPFamily(t, map[string]string{
+		"tcp4": "203.0.113.9",
+		"tcp6": "",
+	}, nil)
+	env.d.refreshPublicIP(context.Background(), cfg.PublicIPURL)
+	if got := env.d.observedPublicIP6(); got != "2606:4700::1" {
+		t.Errorf("v6 单次失败把已知地址清掉了：%q", got)
 	}
 }
 
@@ -87,9 +122,7 @@ func TestTickReportsProbedPublicIP(t *testing.T) {
 	env := newAgentEnv(t, m, cfg)
 
 	stubPublicIP(t, "203.0.113.9", nil)
-	if got := env.d.refreshPublicIP(context.Background(), cfg.PublicIPURL); got != "203.0.113.9" {
-		t.Fatalf("探测失败：%q", got)
-	}
+	env.d.refreshPublicIP(context.Background(), cfg.PublicIPURL)
 
 	if _, err := env.d.tick(context.Background()); err != nil {
 		t.Fatalf("上报失败: %v", err)
@@ -190,9 +223,7 @@ func TestReloadDropsStaleProbedIPWhenURLChanges(t *testing.T) {
 	env := newAgentEnv(t, m, cfg)
 
 	stubPublicIP(t, "203.0.113.9", nil)
-	if got := env.d.refreshPublicIP(context.Background(), cfg.PublicIPURL); got != "203.0.113.9" {
-		t.Fatalf("探测失败：%q", got)
-	}
+	env.d.refreshPublicIP(context.Background(), cfg.PublicIPURL)
 
 	// 写一份新的本地配置（换了 URL）后 Reload。
 	yaml := "" +

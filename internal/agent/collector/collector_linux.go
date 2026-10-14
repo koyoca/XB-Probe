@@ -589,6 +589,38 @@ func detectVirt() string {
 	case exists("/proc/vz"):
 		return "openvz"
 	}
+	// DMI（SMBIOS）：/proc/cpuinfo 里的 "QEMU" 字样在 CPU 直通/自定义型号的
+	// KVM 虚机上**不出现**（真机上大量 KVM VPS 因此被误判成 none——用户看到
+	// 的"虚拟化 一直是 none"就是它）。DMI 在虚机里几乎总是落着厂商指纹，
+	// 而且读文件不需要任何权限。识别的签名与 virt-what / systemd-detect-virt
+	// 的常用判据一致，全小写化后匹配。
+	dmi := strings.ToLower(readFileLine("/sys/class/dmi/id/sys_vendor") +
+		" " + readFileLine("/sys/class/dmi/id/product_name") +
+		" " + readFileLine("/sys/class/dmi/id/board_name") +
+		" " + readFileLine("/sys/class/dmi/id/product_family"))
+	switch {
+	case contains(dmi, "qemu"), contains(dmi, "kvm"),
+		contains(dmi, "red hat"), // RHEL 系宿主机常见的 product_name（"RHEL 7.0.0 PC" 等）
+		contains(dmi, "openstack"), contains(dmi, "amazon ec2"), contains(dmi, "alibaba cloud"),
+		contains(dmi, "tencent cloud"), contains(dmi, "bochs"):
+		return "kvm"
+	case contains(dmi, "vmware"):
+		return "vmware"
+	case contains(dmi, "virtualbox"), contains(dmi, "innotek"):
+		return "virtualbox"
+	case contains(dmi, "microsoft corporation") && contains(dmi, "virtual machine"):
+		return "hyper-v"
+	case contains(dmi, "xen"), contains(dmi, "hvm domU"):
+		return "xen"
+	case contains(dmi, "bhyve"):
+		return "bhyve"
+	case contains(dmi, "google compute engine"):
+		return "gce"
+	}
+	// Xen 半虚拟化还有一条独立于 DMI 的标记。
+	if readFileLine("/sys/hypervisor/type") == "xen" {
+		return "xen"
+	}
 	if contains(readFileLine("/proc/version"), "Microsoft") || contains(readFileLine("/proc/sys/kernel/osrelease"), "Microsoft") {
 		return "wsl"
 	}

@@ -374,9 +374,11 @@ a.icon-btn { text-decoration: none; }
 
 .nodes {
   grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-  /* 行高等高：卡片内容结构固定，因此行高恒定，不会出现"错位" */
-  grid-auto-rows: 1fr;
-  align-items: stretch;
+  /* 卡片高度随内容：探测目标少的节点不再拖着一大段空白。
+     以前是 grid-auto-rows:1fr + align-items:stretch 强制等高（配 .n-lat 定高 4 行），
+     结果 1~3 条目标的节点底部空出一大块。改成 start 之后同一行的卡片
+     底边可以不齐——这是"不留空白"必然的代价。 */
+  align-items: start;
 }
 
 .node {
@@ -388,7 +390,6 @@ a.icon-btn { text-decoration: none; }
   display: flex;
   flex-direction: column;
   gap: 8px;
-  height: 100%;
   transition: border-color .12s ease;
 }
 .node:hover { border-color: var(--line-strong); }
@@ -496,16 +497,18 @@ a.icon-btn { text-decoration: none; }
   gap: 6px;
   padding-top: 8px;
   border-top: 1px dashed var(--line);
-  /* 高度恒定（等高卡片的硬约束）：标题(13) + 间隙(6) + 4×行(37) + 3×间隙(6)
+  /* 用 **max-height** 封顶而不是 height 定高：块随实际行数收缩，
+     目标 1~3 条时不再在卡片底部留一大段空白（真机反馈）。
+     上限按 4 行算：标题(13) + 间隙(6) + 4×行(37) + 3×间隙(6)
      + 上内边距(8) + 顶部分隔线(1) = 194。行内每段的高度都在下面显式钉住
      （.lb-title 行高 13 / .lb-head 15 / .lb-dots 8 / .lb-row 间隙 3），
      改任何一处都要同步这里的算式。目标多于 4 条时在块内滚动（细滚动条）。
 
-     这个 4 是**预留高度**，不是行数上限，更不是"补几行占位"的依据：
+     这个 4 是**上限**，不是行数下限，更不是"补几行占位"的依据：
      JS 只按实际有几条目标渲染几行，空出来的地方就空着。
      以前补占位行（全灰点 + —）来填满这 4 行，结果"只有 1 条探测目标"的节点
      看起来像"1 条通 + 3 条全挂"——凭空造出一个需要立刻处理的故障形态。 */
-  height: calc(13px + 6px + 4 * 37px + 3 * 6px + 8px + 1px);
+  max-height: calc(13px + 6px + 4 * 37px + 3 * 6px + 8px + 1px);
   overflow-y: auto;
   scrollbar-width: thin;
 }

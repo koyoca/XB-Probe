@@ -121,6 +121,9 @@ type ReportRequest struct {
 	// Master 侧只把它当作**候选值**：只有当节点还没被手工指定过地址（ip_auto=1）
 	// 且这个值确实是公网地址时才会写进 nodes.ip_v4。
 	PublicIP string `json:"public_ip,omitempty"`
+	// PublicIP6 同上，但走 IPv6 出口问的（探测 URL 双栈时才能拿到）。
+	// Master 按值里含不含冒号分列写入，v4/v6 互不顶替。
+	PublicIP6 string `json:"public_ip6,omitempty"`
 }
 
 // ReportResponse 携带 config_version，Agent 据此判断是否需要拉取配置（3.1 / 8.1）。

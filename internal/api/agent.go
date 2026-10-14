@@ -60,7 +60,7 @@ func (h *Handler) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = h.Repo.Audit(now.Unix(), fmt.Sprintf("node:%d", nodeID), "token.issue", hint, RealIP(r))
-	h.recordObservedIP(nodeID, r, "")
+	h.recordObservedIP(nodeID, r, "", "")
 
 	// 记录运行环境（12.2 新增字段）。
 	//
@@ -188,7 +188,7 @@ func (h *Handler) handleReport(w http.ResponseWriter, r *http.Request) {
 	if dropped > 0 {
 		h.logErr("report", fmt.Errorf("节点 %d 丢弃 %d 条越界样本", nodeID, dropped))
 	}
-	h.recordObservedIP(nodeID, r, req.PublicIP)
+	h.recordObservedIP(nodeID, r, req.PublicIP, req.PublicIP6)
 
 	// 状态由调度器按 4.1 的判定逻辑推进；这里只刷新 last_seen。
 	_ = h.Registry.Update(nodeID, func(n *state.NodeRuntime) {
@@ -225,15 +225,32 @@ func (h *Handler) handleReport(w http.ResponseWriter, r *http.Request) {
 //
 // 两个候选都不合法时**什么都不写**（保持原值），而不是写一个空串：
 // "暂时不知道"与"我知道它没有公网地址"是两件事，清空会把管理员手工填的值也抹掉。
-func (h *Handler) recordObservedIP(nodeID int64, r *http.Request, reported string) {
-	for _, cand := range []string{reported, RealIP(r)} {
+//
+// 候选按族各取第一个合法值：reported（v4 链路）/ reported6（v6 链路）各自优先，
+// RealIP 兜底——它是连接的来源地址，两个族都可能。某一族定了就不再看那一族
+// 后面的候选（老实现"命中即 return"会漏掉另一族：reported 命中 v4 后，
+// 经 IPv6 连上来的节点的来源地址就再也没机会写进 ip_v6 了）。
+func (h *Handler) recordObservedIP(nodeID int64, r *http.Request, reported, reported6 string) {
+	gotV4, gotV6 := false, false
+	for _, cand := range []string{reported, reported6, RealIP(r)} {
+		if gotV4 && gotV6 {
+			return
+		}
 		if !netutil.IsPublicIP(cand) {
+			continue
+		}
+		isV6 := strings.Contains(cand, ":")
+		if (isV6 && gotV6) || (!isV6 && gotV4) {
 			continue
 		}
 		if _, err := h.Repo.UpdateNodeObservedIP(nodeID, cand); err != nil {
 			h.logErr("update node observed ip", err)
 		}
-		return
+		if isV6 {
+			gotV6 = true
+		} else {
+			gotV4 = true
+		}
 	}
 }
 

@@ -14,9 +14,9 @@ import (
 //  2. 有的节点有专属目标、有的没有，行数随节点变化 → 卡片高度参差不齐。
 //
 // 前端侧的修复是两件事：标签优先用目标名（缺省才退回运营组常量）；
-// 行数与目标数一致（有几条画几行，**不补占位行**）。卡片等高由 CSS 的固定
-// 块高保证，而不是靠在 JS 里补出几行假数据。这里的护栏钉住这两件事
-// 不被改回去——它们单独看都"只是显示问题"，一起决定卡片等高这一硬约束。
+// 行数与目标数一致（有几条画几行，**不补占位行**）。卡片高度的处理后来又
+// 反转过一次（见 TestLatencyBarsCSSCapsHeight）：等高换成 max-height 封顶、
+// 内容自适应。这里的护栏钉住这几件事不被改回去——它们单独看都"只是显示问题"。
 func TestLatencyBarsUseTargetName(t *testing.T) {
 	src := readFrontend(t, "internal/theme/builtin/app.js")
 	// 注意：funcBodyOf 的签名参数不要带前导缩进——缩进是它从签名行自己
@@ -41,7 +41,8 @@ func TestLatencyBarsUseTargetName(t *testing.T) {
 //	问题：  占位行与真实行**长得一模一样**。"只有 1 条探测目标"的节点因此画成
 //	        "1 条有数据 + 3 条全挂"——而后者正是需要立刻处理的故障形态，
 //	        被凭空造出来了。用户看到的是一张"三个目标全挂"的卡片。
-//	新做法：有几条目标画几行；等高改由 CSS 的固定块高保证（空白就老实空着）。
+//	新做法：有几条目标画几行；块高由 CSS 的 max-height 封顶（内容自适应，
+//	        见 TestLatencyBarsCSSCapsHeight），不再补假数据。
 //
 // 判据挑的是"补位那两样东西在不在"：只断言"渲染了 list.forEach"的话，
 // 既补占位行又渲染真行的实现同样是绿的。
@@ -69,16 +70,23 @@ func TestLatencyBarsNeverFabricatePlaceholderRows(t *testing.T) {
 	}
 }
 
-// TestLatencyBarsCSSStillPinsHeight 钉住"等高"这个真正的约束没有被上面那次改动弄丢。
+// TestLatencyBarsCSSCapsHeight 钉住"上限封顶、内容自适应"这个约束（真机反馈后**再次反转**）。
 //
-// 去掉占位行之后，卡片等高**只剩** CSS 固定块高这一条保障了：一旦有人把
-// .n-lat 的 height 改成 auto 或删掉，卡片会立刻参差不齐，而且不会有任何报错。
-func TestLatencyBarsCSSPinsHeight(t *testing.T) {
+//	旧做法：.n-lat 用 height 定高 4 行 + 网格 grid-auto-rows:1fr 强制等高——
+//	        等高是保住了，但探测目标只有 1~3 条的节点底部空出一大块
+//	        （卡片是固定大小的，目标越少空白越多）。
+//	新做法：.n-lat 用 **max-height** 封顶（块随实际行数收缩，超过 4 条在块内滚），
+//	        网格 align-items:start 让卡片高度随内容——同一行卡片底边可以不齐，
+//	        这是"不留空白"必然的代价，不再视为缺陷。
+func TestLatencyBarsCSSCapsHeight(t *testing.T) {
 	css := readFrontend(t, "internal/theme/builtin/style.css")
 	rule := cssRuleBody(t, css, ".n-lat")
-	// 高度恒定 + 超出滚动：目标多于 4 条的节点在块内滚，所有卡片外框一致。
-	if !strings.Contains(rule, "height: calc(") {
-		t.Errorf(".n-lat 没有用 calc 钉住固定高度，卡片高度会随目标数量变化（规则：%s）", rule)
+	// 4 行封顶 + 超出滚动：目标多于 4 条的节点在块内滚，块本身不会被无限撑高。
+	if !strings.Contains(rule, "max-height: calc(") {
+		t.Errorf(".n-lat 没有用 max-height:calc 封顶（规则：%s）", rule)
+	}
+	if strings.Contains(rule, "height: calc(") && !strings.Contains(rule, "max-height: calc(") {
+		t.Errorf(".n-lat 又回到了 height 定高：目标 1~3 条时卡片底部会空出一大块（规则：%s）", rule)
 	}
 	if !strings.Contains(rule, "overflow-y: auto") {
 		t.Errorf(".n-lat 没有块内滚动：目标超过 4 条时会把卡片撑高")
@@ -86,7 +94,16 @@ func TestLatencyBarsCSSPinsHeight(t *testing.T) {
 	// calc 依赖的行内各段高度必须显式钉住，否则算式与实际渲染脱节。
 	title := cssRuleBody(t, css, ".lb-title")
 	if !strings.Contains(title, "line-height: 13px") {
-		t.Errorf(".lb-title 没有钉住 line-height: 13px，.n-lat 的 calc 高度算式会失准")
+		t.Errorf(".lb-title 没有钉住 line-height: 13px，.n-lat 的 calc 算式会失准")
+	}
+	// 网格不再强制等高：grid-auto-rows:1fr + align-items:stretch 是"空白"的另一半来源。
+	nodes := cssRuleBody(t, css, ".nodes")
+	if strings.Contains(nodes, "grid-auto-rows: 1fr") || strings.Contains(nodes, "align-items: stretch") {
+		t.Errorf(".nodes 又回到了强制等高（规则：%s）——\n"+
+			"  目标少的节点会被拉伸到同最高者一样，底部整块留白。", nodes)
+	}
+	if !strings.Contains(nodes, "align-items: start") {
+		t.Errorf(".nodes 缺少 align-items: start：卡片高度不会随内容收缩（规则：%s）", nodes)
 	}
 }
 

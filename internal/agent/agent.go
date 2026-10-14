@@ -58,7 +58,8 @@ type Daemon struct {
 	curEtcd     string
 	version     string
 	staticDirty bool
-	pubIP       string // 最近一次探测到的公网地址（空=未配置或尚未成功）
+	pubIP       string // 最近一次探测到的公网 IPv4（空=未配置或尚未成功）
+	pubIP6      string // 最近一次探测到的公网 IPv6（同上；单栈节点恒为空）
 }
 
 // New 创建守护进程。
@@ -171,7 +172,7 @@ func (d *Daemon) tick(ctx context.Context) (time.Duration, error) {
 		Latency: d.takeLatency(),
 	}
 
-	req := model.ReportRequest{AgentVersion: d.version, PublicIP: d.observedPublicIP()}
+	req := model.ReportRequest{AgentVersion: d.version, PublicIP: d.observedPublicIP(), PublicIP6: d.observedPublicIP6()}
 	d.mu.Lock()
 	req.Samples = append(req.Samples, d.buffer...)
 	d.buffer = nil
@@ -325,7 +326,10 @@ func (d *Daemon) Reload() error {
 	if cfg.PublicIPURL != d.cfg.PublicIPURL {
 		// 换了探测服务，旧值不再可信。清掉而不是留着：留着的话，改配置之后
 		// 地址栏还会继续显示上一个服务给的地址，而日志里没有任何线索。
+		// 两个族都清：换服务等于两个答案都换了出处。
+		// （外层已持有 d.mu，这里不能再加锁。）
 		d.pubIP = ""
+		d.pubIP6 = ""
 	}
 	d.cfg = cfg
 	d.probe = prober.New(cfg.AllowPrivateTargets)

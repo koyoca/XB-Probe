@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/koyoca/xb-probe/internal/netutil"
@@ -33,12 +35,40 @@ const (
 
 var publicIPClient = &http.Client{Timeout: publicIPTimeout}
 
+// publicIPClient4 / publicIPClient6：同一句话分别强制从 IPv4 / IPv6 出去问。
+// 节点经常是双栈的，但"我是谁"在两个协议族里是**两个答案**（v4 出口地址与
+// v6 出口地址互不相关），而 Master 侧的地址栏也是两列。只探一次只能填一列，
+// 另一列就永远"自动探测中"——这是真机上"IPv6 一直获取不到"的直接原因。
+// 强制的办法是换 Dialer 的 network 参数：URL 本身不变（服务要双栈可解析，
+// 单栈服务在对应那一族直接失败，拿不到就保持原值）。
+func familyTransport(network string) *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	d := &net.Dialer{Timeout: publicIPTimeout}
+	t.DialContext = func(ctx context.Context, _, addr string) (net.Conn, error) {
+		return d.DialContext(ctx, network, addr)
+	}
+	return t
+}
+
+var publicIPClient4 = &http.Client{Timeout: publicIPTimeout, Transport: familyTransport("tcp4")}
+var publicIPClient6 = &http.Client{Timeout: publicIPTimeout, Transport: familyTransport("tcp6")}
+
 // httpGetPublicIP 是本包唯一一处对 **Master 之外的主机**发起请求的地方。
 //
 // 抽成包级变量是为了让测试能替身它：不然这条链路只能靠"真的连一次公网服务"来验，
 // 那样的测试在离线环境里要么永远红、要么被跳过 —— 而"被跳过的护栏等于没有"。
 // 替身必须能证明自己生效（见 publicip_test.go 的哨兵断言）。
-var httpGetPublicIP = func(ctx context.Context, url string) (string, error) {
+//
+// network 是强制走的协议族："tcp4" / "tcp6"（familyTransport 里覆盖 DialContext
+// 的 network 参数）。替身按它区分两个族。
+var httpGetPublicIP = func(ctx context.Context, url string, network string) (string, error) {
+	client := publicIPClient
+	switch network {
+	case "tcp4":
+		client = publicIPClient4
+	case "tcp6":
+		client = publicIPClient6
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", err
@@ -46,7 +76,7 @@ var httpGetPublicIP = func(ctx context.Context, url string) (string, error) {
 	// 有些服务按 UA 拦非浏览器请求（默认的 Go-http-client 常被挡），
 	// 401/403 的错误页里没有地址，看起来就像"探测永远失败"。
 	req.Header.Set("User-Agent", "xb-probe-agent")
-	resp, err := publicIPClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -87,7 +117,6 @@ func (d *Daemon) publicIPLoop(ctx context.Context) {
 			// （否则刚装好的节点要等 15 分钟地址栏才变，用户以为没生效）。
 			d.refreshPublicIP(ctx, url)
 		}
-
 		select {
 		case <-ctx.Done():
 			return
@@ -96,35 +125,58 @@ func (d *Daemon) publicIPLoop(ctx context.Context) {
 	}
 }
 
-// refreshPublicIP 做一次探测并写入运行态，返回探测到的地址（未取到返回空串）。
+// refreshPublicIP 对配置的 URL 各探一次 v4 与 v6，把结果写进运行态。
 //
 // 失败**不清空**上一次的值：探测服务偶尔抽风不该让地址栏变空；
 // 地址真的变了，下一次成功探测自然会覆盖。
-func (d *Daemon) refreshPublicIP(ctx context.Context, url string) string {
-	ip, err := httpGetPublicIP(ctx, url)
+//
+// 两个族各自独立：单栈节点/单栈解析的服务在对应那一族直接失败，
+// 那一列保持原值，不影响另一列。拿到结果还要**按族核对**——tcp6 那次
+// 返回了点分 IPv4（服务按 Host 头回答之类）就不算 v6 的答案，写进去
+// 会被 Master 按含不含冒号分错列。
+func (d *Daemon) refreshPublicIP(ctx context.Context, url string) {
+	v4 := d.probeFamily(ctx, url, "tcp4")
+	v6 := d.probeFamily(ctx, url, "tcp6")
+
+	d.mu.Lock()
+	if v4 != "" && !strings.Contains(v4, ":") && v4 != d.pubIP {
+		d.pubIP = v4
+		d.log.Info("已探测到本机公网地址", "family", "ipv4", "ip", v4)
+	}
+	if v6 != "" && strings.Contains(v6, ":") && v6 != d.pubIP6 {
+		d.pubIP6 = v6
+		d.log.Info("已探测到本机公网地址", "family", "ipv6", "ip", v6)
+	}
+	d.mu.Unlock()
+}
+
+// probeFamily 做一次指定协议族的探测并解析结果（取不到/失败返回空串）。
+func (d *Daemon) probeFamily(ctx context.Context, url, network string) string {
+	ip, err := httpGetPublicIP(ctx, url, network)
 	if err != nil {
-		d.log.Warn("公网地址探测失败", "url", url, "err", err.Error())
+		// 单栈节点在"缺的那一族"失败是常态，不值得一条警告；这里保持安静，
+		// 避免每 15 分钟刷一行"探测失败"把真正的网络问题淹掉。
 		return ""
 	}
 	if ip == "" {
 		// 拿到了响应但里面没有公网地址。这不是网络故障：要么那个服务从我们的
 		// 角度看过来就是个私网/回环地址（说明它自己没在公网上），要么返回了错误页。
-		d.log.Warn("公网地址探测没拿到公网地址（响应里没有可用的公网地址）", "url", url)
+		d.log.Warn("公网地址探测没拿到公网地址（响应里没有可用的公网地址）", "url", url, "network", network)
 		return ""
-	}
-	d.mu.Lock()
-	changed := d.pubIP != ip
-	d.pubIP = ip
-	d.mu.Unlock()
-	if changed {
-		d.log.Info("已探测到本机公网地址", "ip", ip)
 	}
 	return ip
 }
 
-// observedPublicIP 读取最近一次探测到的公网地址（未配置或尚未成功时为空串）。
+// observedPublicIP 读取最近一次探测到的公网 IPv4（未配置或尚未成功时为空串）。
 func (d *Daemon) observedPublicIP() string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.pubIP
+}
+
+// observedPublicIP6 读取最近一次探测到的公网 IPv6（未配置或尚未成功时为空串）。
+func (d *Daemon) observedPublicIP6() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.pubIP6
 }
