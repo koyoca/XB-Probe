@@ -3400,14 +3400,25 @@ if [ "$TLS_TERMINATOR" = "caddy" ]; then
 	# 脚本说"反代已配好"，实际 Caddy 只开了 80、没有 443 站点（Caddyfile 是别人
 	# 留下的），用户得自己 netstat 才发现没监听 443。
 	#
-	# 判据要挑**真正的那个事实**：443 在听 + Caddy 能为这个域名拿到证书。
+	# 判据要挑**真正的那个事实**：Caddy 能为这个域名终结 TLS 并把请求交给 Master。
 	# 只查 "caddy 进程活着"是不够的（它当然活着，还开着 80）。
-	echo "    正在等待 Caddy 为 $_cd_dom 申请证书（最多 60 秒）…"
+	#
+	# ⚠ 探测必须**在本机内闭环**：用 --resolve 把域名指到 127.0.0.1，但 SNI 与
+	# Host 仍然是域名。一次问清三件事：证书对这个域名有效、路由指到反代目标、
+	# 目标活着。而**不能**用"本机访问自己的公网域名"来判——
+	#
+	# v0.1.3 首次部署真机撞到的就是它：Caddy 起来了、证书早就在
+	# /root/.local/share/caddy 里（日志里连一行 tls.obtain 都没有）、站外打开正常，
+	# 但这台主机的公网 IP 由机房做映射、本机只有私网地址，**回不到自己的公网 IP**，
+	# curl 60 秒不通。脚本于是判定"反代未生效"，把一次本来成功的部署整份回滚，
+	# 站点反而被脚本自己弄下线了——判据问错了对象：外面能不能进来，是网络拓扑的
+	# 事情（机房/安全组放不放行），不是这次安装装坏了什么。
+	echo "    正在等待 Caddy 为 $_cd_dom 就绪（最多 60 秒，本机回环探测）…"
 	_cd_ok=""
 	i=0
 	while [ $i -lt 30 ]; do
-		# 443 端口在听？用 ss/netstat 判，缺工具就跳过后面的请求探测。
-		if curl -fsS --max-time 5 "https://$_cd_dom/api/public/v1/site" >/dev/null 2>&1; then
+		if curl -fsS --max-time 5 --resolve "$_cd_dom:443:127.0.0.1" \
+			"https://$_cd_dom/api/public/v1/site" >/dev/null 2>&1; then
 			_cd_ok="1"
 			break
 		fi
@@ -3415,19 +3426,36 @@ if [ "$TLS_TERMINATOR" = "caddy" ]; then
 		sleep 2
 	done
 	if [ -n "$_cd_ok" ]; then
-		echo "    https://$_cd_dom 已可用（证书由 Caddy 签发）"
+		echo "    https://$_cd_dom 已就绪（Caddy 终结 TLS，证书与反代本机自证通过）"
+		# 站外可达性是**另一个问题**，所以单独判，而且只警告、不回滚：
+		# 本机够不着自己的公网地址只说明网络拓扑，用它当回滚依据会误杀（见上）。
+		if curl -fsS --max-time 8 -o /dev/null "https://$_cd_dom/api/public/v1/site" 2>/dev/null; then
+			echo "    https://$_cd_dom 公网回路可达"
+		else
+			echo "" >&2
+			echo "    ⚠ 本机走公网回路访问 https://$_cd_dom 不通，但上面的本机自证是好的。" >&2
+			echo "      这不代表站点打不开：公网 IP 由机房映射的机器回不到自己的公网地址。" >&2
+			echo "      **请用手机或另一台机器打开 https://$_cd_dom 确认**；" >&2
+			echo "      若外面也打不开，再查这两处（都是「外面进不来」，与 Caddy 无关）：" >&2
+			echo "        · 域名是否指向本机：getent hosts $_cd_dom${_cd_ip:+（本机解析到 $_cd_ip）}" >&2
+			echo "        · 机房/安全组是否放行 443 与 80（80 供证书续期）" >&2
+			echo "" >&2
+		fi
 	else
 		# 失败要给出**能直接照做**的诊断，而不是"稍后再看看"。
 		echo "" >&2
-		echo "错误：Caddy 起来了，但 https://$_cd_dom 在 60 秒内仍不可用。" >&2
-		echo "  可能的原因与查法（按常见程度排序）：" >&2
-		echo "  1) Caddyfile 里没有这个域名的站点块 → 看：grep -n '$_cd_dom' $CADDYFILE" >&2
-		echo "  2) 80/443 被别的服务占用（x-ui、nginx、其他 caddy）→ 看：ss -lntp | grep -E ':(80|443)\\b'" >&2
-		echo "  3) 域名没解析到本机 → 看：getent hosts $_cd_dom" >&2
-		echo "  4) 证书申请被 CA 拒绝（配额/限流/端口不通）→ 看：journalctl -u caddy -n 50" >&2
+		echo "错误：Caddy 起来了，但 https://$_cd_dom 在本机（回环）60 秒内仍不可用。" >&2
+		echo "  这个判据连的是 127.0.0.1:443、SNI 与 Host 都是域名——它不通就说明" >&2
+		echo "  问题在 Caddy 这一侧（公网通不通、外面能不能进来都不参与这条判据）：" >&2
+		echo "  1) 证书没拿到（域名没解析到本机 / 80 端口不通 / CA 拒绝/限流）" >&2
+		echo "     → 看：journalctl -u caddy --no-pager | grep -iE 'acme|tls\\.obtain' | tail -n 30" >&2
+		echo "     → 确认域名指向本机：getent hosts $_cd_dom" >&2
+		echo "  2) Caddyfile 里没有这个域名的站点块 → 看：grep -n '$_cd_dom' $CADDYFILE" >&2
+		echo "  3) 80/443 被别的服务占用（x-ui、nginx、其他 caddy）→ 看：ss -lntp | grep -E ':(80|443)\\b'" >&2
+		echo "  4) Caddy 活着但反代目标不通（Master 没在听 $PUBLIC_LISTEN）→ 看：ss -lntp | grep 8080" >&2
 		echo "" >&2
 		journalctl -u caddy --no-pager -n 20 2>/dev/null | sed 's/^/    /' >&2 || true
-		rollback "Caddy 反代未生效（https://$_cd_dom 打不开，原因见上）"
+		rollback "Caddy 反代未生效（本机回环探测 https://$_cd_dom 打不开，原因见上）"
 	fi
 elif [ "$TLS_MODE" = "none" ]; then
 	echo "    跳过（tls.mode=none）：证书由前置反代负责"
