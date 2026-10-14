@@ -2095,3 +2095,73 @@ func envWithout(env []string, prefixes ...string) []string {
 	}
 	return out
 }
+
+// ---------------------------------------------------------------------------
+// ⑪ TLS 端口的健康检查不许依赖"证书链可信 / 主机名匹配"
+// ---------------------------------------------------------------------------
+
+// 真机（v0.2.0，用户第二次装机）：选 4=files，服务 active(running)、443 在听，
+// 脚本却报"20 秒内连不上 127.0.0.1:443"并把整份安装回滚了。
+//
+// 根因：探测目标是**回环 IP**（HEALTH_ADDR = 127.0.0.1:<port>），而证书是给域名签的。
+// files 是三种 TLS 模式里唯一不带 -k 的（当时的想法是"文件证书是可信的，验一下更保险"），
+// 于是 curl 因"主机名不匹配"退出 60、%{http_code} 得到 000（= 脚本眼里的"连接层不通"）
+// → 白等 20 秒 → rollback。本地用真 TLS 服务复现过：同一个健康服务，不带 -k 退出 60、
+// 拿到 000；带 -k 返回 200。（链可信、只是名字不匹配时同样是 60——所以"证书是可信的"
+// 这个理由根本不成立，必须靠 -k 或"用域名 + --resolve"才能探出真话。）
+//
+// 钉三件事，缺一条这次误报就还会以别的形态回来：
+//
+//	① 任何 https 探测都必须跳过证书校验——files 不许再回到 `CURL_EXTRA=""` 的形态；
+//	② 判"连不上"时要把 curl 的原话与退出码打出来，并按住退出码分类：
+//	   7=没进程在听、35/60=TLS 层、28=进程在听但不答复。沉默正是这次误报的放大器：
+//	   真正发生的是"证书校验没过"，报出来的却是"服务没起来"；
+//	③ Windows 侧同一件事（files 也要在跳过校验的名单里）。
+func TestTLSLoopbackProbeIgnoresCertTrust(t *testing.T) {
+	body := readRepoFile(t, "../../scripts/deploy-master.sh")
+
+	// ① https 探测一律带 -k；不带 -k 的形态只允许留给 http（无证书可言）。
+	if !strings.Contains(body, `files | selfsigned | acme) SCHEME="https"; CURL_EXTRA="-k" ;;`) {
+		t.Error("TLS 模式的健康检查不是一律跳过证书校验：\n" +
+			"  探的是回环 IP，而证书是给域名签的——不 -k 就必然" +
+			"因主机名不匹配失败（curl 退出 60、http_code 000），\n" +
+			"  这会被上层当成「连接层不通」→ 白等 20 秒 → 把一次健康的安装整份回滚（v0.2.0 真机）。")
+	}
+	if strings.Contains(body, `SCHEME="https"; CURL_EXTRA=""`) {
+		t.Error("有 https 探测回到了不带 -k 的形态：\n" +
+			"  files 模式当初就是这么写的，唯一后果是每次部署都被自己的健康检查判死。")
+	}
+	if !strings.Contains(body, `none) SCHEME="http"; CURL_EXTRA="" ;;`) {
+		t.Error("http（tls.mode=none）那条不该带 -k 的分支不在了——判据与代码形态脱节。")
+	}
+
+	// ② 失败时 curl 的原话 + 退出码 + 按码分类，三者都要在。
+	for _, want := range []string{
+		`_hc_err="$(curl`,
+		"（退出码 $_hc_rc2）",
+		"退出码 7 = 连不上这个端口",
+		"退出码 35/60 = TLS 握手/证书校验没过",
+		"ss -ltnp | grep ':${HEALTH_ADDR##*:}'",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("健康检查的失败诊断里缺 %q：\n"+
+				"  只印一句「连不上」等于把原因（连接被拒 / TLS 层 / 不答复）一起丢掉——\n"+
+				"  这次误报正是这样被放大的：真正发生的是证书校验没过，报出来的是服务没起来。", want)
+		}
+	}
+
+	// ③ Windows 孪生：跳过校验的条件不许再按模式枚举（漏一个模式就是一个假失败）。
+	ps := readRepoFile(t, "../../scripts/deploy-master.ps1")
+	if strings.Contains(ps, `-eq "selfsigned" -or $TlsMode -eq "acme"`) {
+		t.Error("ps1 还在按模式枚举「跳过证书校验」：\n" +
+			"  files 漏在名单外 → 探回环 IP 时证书名不匹配 → 报「20 秒内没探到公开 API」。\n" +
+			"  条件应当与「走不走 https」同一个（走 https 就跳过）。")
+	}
+	if n := strings.Count(ps, `$TlsMode -ne "none"`); n < 2 {
+		t.Errorf("ps1 里 `$TlsMode -ne \"none\"` 只出现 %d 次（至少要 2 次：决定 scheme、决定跳过校验）。\n"+
+			"  两处各判各的下场就是这次：scheme 走了 https，跳过校验却没跟上。", n)
+	}
+	if !strings.Contains(ps, "$bypassCert = $true") {
+		t.Error("ps1 里没有了强制通过证书校验的回调——https 探测会因证书问题假失败。")
+	}
+}

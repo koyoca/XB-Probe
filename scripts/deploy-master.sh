@@ -3508,6 +3508,60 @@ else
 	echo "    ⚠ 未创建 probe 用户：若服务不以 root 运行，请自行修正 $DIR 与 $DATA 的归属" >&2
 fi
 
+# files 模式的两项**前置体检**——只警告、不改任何东西，但都是"等到健康检查才暴露"
+# 会把人带偏的那类问题：
+#   ① 证书文件对服务用户不可读：Master 以 probe 运行（见下面的单元），读不到证书
+#      会在 tlsconf 初始化时直接失败 → 进程退出 → Restart=always 反复重启，443 永远
+#      不在听。现象与"端口被占""配置写错"一模一样，而真正的原因只是文件权限。
+#      注意**不能**用 root 的 `test -r`：root 读什么都返回真，那种检查只会给出
+#      虚假的安心（这个文件里已经因为同样的理由改过一次写法）。这里以 probe 的身份试读。
+#   ② 证书 SAN 里没有对外域名：`-k` 的健康检查是刻意不校验证书名字的（探的是回环 IP），
+#      于是"证书给 a.com 签、对外却发布 b.com"就没人再看得见——浏览器会拦，脚本不会。
+#      能解析就用 openssl 说一句，解析不了（老 openssl / 无 openssl）就安静跳过。
+if [ "$TLS_MODE" = "files" ]; then
+	for _fc in "$TLS_CERT" "$TLS_KEY"; do
+		_fr=""
+		if command -v runuser >/dev/null 2>&1; then
+			runuser -u probe -- test -r "$_fc" || _fr="1"
+		elif command -v su >/dev/null 2>&1; then
+			su -s /bin/sh -c "test -r '$_fc'" probe || _fr="1"
+		fi
+		if [ "$_fr" = "1" ]; then
+			caut "    ⚠ 服务用户 probe 读不到 $_fc —— 服务会在启动时因证书初始化失败而反复重启（443 不会在听）。"
+			echo "      修法：chown probe $_fc    # 或 chmod o+r $_fc（仅在你不介意同机他人可读时）" >&2
+		fi
+	done
+	_fc_host=""
+	case "$PUBLIC_ORIGIN" in
+	https://* | http://*)
+		_fc_host="${PUBLIC_ORIGIN#*://}"
+		_fc_host="${_fc_host%%/*}"
+		_fc_host="${_fc_host%%:*}"
+		;;
+	esac
+	if [ -n "$_fc_host" ] && command -v openssl >/dev/null 2>&1; then
+		# 取 SAN；老 openssl 不支持 -ext 时留空 → 下面的判据整体跳过（不猜）。
+		_fc_san="$(openssl x509 -in "$TLS_CERT" -noout -ext subjectAltName 2>/dev/null | tr -d ' \n')" || _fc_san=""
+		if [ -z "$_fc_san" ]; then
+			_fc_san="$(openssl x509 -in "$TLS_CERT" -noout -text 2>/dev/null |
+				awk '/Subject Alternative Name/{f=1;next} f{print;exit}' | tr -d ' \n')" || _fc_san=""
+		fi
+		if [ -n "$_fc_san" ]; then
+			# 通配符：a.b.example.com 也可能被 *.b.example.com 覆盖。
+			# 只剥一层（与 RFC 6125 的"通配符只匹配一个标签"一致）。
+			_fc_wild="*.${_fc_host#*.}"
+			case "$_fc_san" in
+			*"DNS:$_fc_host"*) : ;;
+			*"DNS:$_fc_wild"*) : ;;
+			*)
+				caut "    ⚠ $TLS_CERT 的 SAN 里没有 $_fc_host —— 浏览器会因\"证书名不匹配\"拦下 https://$_fc_host。"
+				echo "      证书覆盖的是：$(printf '%s' "$_fc_san" | sed 's/^X509v3SubjectAlternativeName://')" >&2
+				;;
+			esac
+		fi
+	fi
+fi
+
 if [ -n "$NO_SERVICE" ]; then
 	say "5~7 跳过（--no-service）"
 	case "$TLS_MODE" in
@@ -3930,9 +3984,20 @@ say "6/7 健康检查"
 #
 # 配了 TLS 就必须用 https 探：明文探一个 TLS 端口永远失败，会白等 20 秒再打印
 # 一段让人以为服务没起来的状态。
-# selfsigned 用 -k 是**有意**的：这里问的是"进程在不在听"，不是"证书链可不可信"，
-# 两者混在一起会让自签部署次次看起来像失败。acme 同理——首张证书由服务前台申请，
-# 此刻要么已经拿到、要么服务没起来，证书链验证失败并不代表服务没起来。
+#
+# 三种 TLS 模式**一律 -k**（不校验证书链、也不校验主机名），理由是同一条：
+# 这里探的是**回环 IP**（HEALTH_ADDR 是 127.0.0.1:<port>），而证书是给域名签的
+# ——"证书里没有 127.0.0.1 这个主机名"是必然结论，与"服务在不在听"毫无关系。
+# 这里问的是"进程在不在听"，不是"证书链可不可信"（selfsigned 本就不可信、
+# acme 的首张证书此刻可能刚拿到、files 的证书是给域名签的）。
+#
+# files 曾是唯一不带 -k 的那个（当时的想法是"文件证书是可信的，验一下更保险"），
+# 而它每次都为这个**必然的主机名不匹配**失败：curl 退出码 60、%{http_code} 是 000，
+# 下面按"连接层不通"处理 → 白等 20 秒 → 把一次**健康的**安装整份回滚。
+# 真机（v0.2.0）：选 4=files、5/7 已启动、服务 active(running)、443 在听，
+# 脚本却报"20 秒内连不上 127.0.0.1:443"并回滚——证书给 test.319082.xyz 签的，
+# 探的却是 127.0.0.1。本地用真 TLS 服务复现过：不带 -k 退出码 60 / 000，
+# 带 -k 同一个服务返回 200。
 #
 # 反代在前的部署还必须**带上对外域名当 Host**：站点形态是按域名门控的，
 # 拿 127.0.0.1 当 Host 会被判 421。以前这里正是这样——于是这个"健康检查"
@@ -3940,8 +4005,7 @@ say "6/7 健康检查"
 # 它就把一次配置错配完整地掩盖了过去）。
 case "$TLS_MODE" in
 none) SCHEME="http"; CURL_EXTRA="" ;;
-files) SCHEME="https"; CURL_EXTRA="" ;;
-selfsigned | acme) SCHEME="https"; CURL_EXTRA="-k" ;;
+files | selfsigned | acme) SCHEME="https"; CURL_EXTRA="-k" ;;
 esac
 HC_HOST=""
 if [ "$TLS_TERMINATOR" = "caddy" ] && [ -n "${_cd_dom:-}" ]; then
@@ -4036,6 +4100,29 @@ case "$_hc_code" in
 		echo "      $TLS_MODE 模式下不存在\"证书还没好\"这回事，连不上就是服务没起来：" >&2
 		echo "        systemctl status xb-probe-master" >&2
 		echo "        journalctl -u xb-probe-master --no-pager -n 50" >&2
+		# curl 的原话与退出码（与上面 Caddy 那段同一做法）。不打印它，屏幕上就只剩
+		# "连不上"三个字，而原因——连接被拒 / TLS 握手失败 / 证书被拒 / 超时——
+		# 全在 curl 的那句报错里。files 模式那次的误报正是被这一层的沉默放大的：
+		# 真正发生的是"证书校验没过"（退出码 60），报出来的却是"服务没起来"。
+		_hc_rc2=0
+		_hc_err="$(curl -sS -o /dev/null --max-time 5 --noproxy '*' $CURL_EXTRA \
+			"${SCHEME}://${HEALTH_ADDR}/api/public/v1/site" 2>&1 >/dev/null)" || _hc_rc2=$?
+		if [ -n "$_hc_err" ]; then
+			echo "      curl 的原话：$_hc_err（退出码 $_hc_rc2）" >&2
+		fi
+		case "${_hc_rc2:-0}" in
+		7)
+			echo "      退出码 7 = 连不上这个端口：没有进程在听（或它刚崩了正在重启）。" >&2
+			echo "      看谁在听这个端口：ss -ltnp | grep ':${HEALTH_ADDR##*:}'" >&2
+			;;
+		35 | 60)
+			echo "      退出码 35/60 = TLS 握手/证书校验没过。本次探测已经带 $CURL_EXTRA 并连的是" >&2
+			echo "      回环 IP，正常不该出现：先看服务日志，再核对证书文件本身（openssl x509）。" >&2
+			;;
+		28)
+			echo "      退出码 28 = 5 秒内没答复：进程在听但卡住了（查日志里的慢查询/锁等待）。" >&2
+			;;
+		esac
 		echo "" >&2
 		rollback "Master 未在 $HEALTH_ADDR 上提供服务（20 秒连接层不通）"
 	fi

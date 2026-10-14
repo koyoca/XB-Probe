@@ -1369,13 +1369,16 @@ elseif ($healthAddr -like "[::]:*") { $healthAddr = "127.0.0.1:" + $healthAddr.S
 elseif ($healthAddr -eq ":::") { $healthAddr = "127.0.0.1" }
 
 # 配了 TLS 就必须用 https 探：明文探一个 TLS 端口永远失败，会白等 20 秒。
-# selfsigned / acme 还要跳过证书链校验——这里问的是"进程在不在听"，
-# 不是"证书链可不可信"（自签本就不可信；acme 的首张证书是后台按需申请的）。
+# 只要走 https 就跳过证书校验——这里问的是"进程在不在听"，不是"证书链可不可信"。
+# 三种模式各有各的"证书必然验不过"：selfsigned 自签本就不可信；acme 的首张证书
+# 是后台按需申请的；files 的证书是给**域名**签的，而这里探的是回环 IP——
+# "证书里没有 127.0.0.1 这个主机名"是必然结论。files 曾经漏在名单外，于是每次
+# 都被判"没探到公开 API"（与 sh 侧那次误报同源，见 deploy-master.sh 的对应注释）。
 # 注意：-SkipCertificateCheck 是 PS 6+，这里要兼容 5.1，所以用回调。
 $scheme = "http"
 if ($TlsMode -ne "none") { $scheme = "https" }
 $bypassCert = $false
-if ($TlsMode -eq "selfsigned" -or $TlsMode -eq "acme") {
+if ($TlsMode -ne "none") {
     $bypassCert = $true
     $oldCallback = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
     [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
