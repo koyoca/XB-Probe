@@ -1243,6 +1243,13 @@ if ($TlsMode -eq "selfsigned" -or $TlsMode -eq "acme") {
     [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
 }
 $ok = $false
+# "服务端已经答复了"（4xx/5xx）与"还没起来"是两回事，必须分开记：
+# 以前这里对所有异常一视同仁地继续等，最后只说一句"没探到公开 API"——于是
+# 确定性的拒绝（看板被关掉的 404、域名不在白名单的 421）全被报成同一个含糊现象，
+# 用户只能去猜证书/端口/日志。判据要问服务端本人：把状态码与它的原话留下来
+# （同 deploy-master.sh 里那条真机教训）。
+$probeCode = 0
+$probeBody = ""
 for ($i = 0; $i -lt 20; $i++) {
     Start-Sleep -Seconds 1
     try {
@@ -1252,7 +1259,13 @@ for ($i = 0; $i -lt 20; $i++) {
             break
         }
     } catch {
-        # 还没起来，继续等
+        # 还没起来就继续等；已经有答复的，把答复本身记下来。
+        try {
+            if ($_.Exception.Response) { $probeCode = [int]$_.Exception.Response.StatusCode }
+            if ($_.ErrorDetails.Message) { $probeBody = ([string]$_.ErrorDetails.Message).Trim() }
+        } catch { }
+        # 4xx 是确定性拒绝：再等 20 秒也是同一个答案。
+        if ($probeCode -ge 400 -and $probeCode -lt 500) { break }
     }
 }
 if ($bypassCert) {
@@ -1261,7 +1274,19 @@ if ($bypassCert) {
 if ($ok) {
     Write-Host "    公开 API 已就绪" -ForegroundColor Green
 } else {
-    Write-Warn2 "20 秒内没探到公开 API，请查看 $Data 下的日志"
+    if ($probeCode -ge 400) {
+        Write-Warn2 "公开 API 回了 HTTP $probeCode —— 请求已经进了服务端，是它明确拒绝的（不是还没起来）"
+        if ($probeBody) { Write-Host "      服务端原话：$probeBody" }
+        if ($probeBody -like "*公开接口已关闭*") {
+            Write-Host "      这是「公开看板」这个开关被关掉了（设置项 public.enabled），不是装坏了："
+            Write-Host "      进后台「系统设置 → 公开看板」设为「开放」，或把 public.enabled 设回 1。"
+        } elseif ($probeCode -eq 421) {
+            Write-Host "      421 = 这个域名不在站点形态的域名清单里（master.yaml 的 public_hosts /"
+            Write-Host "      后台「系统设置 → 站点形态」）；重写配置可加 --ForceConfig。"
+        }
+    } else {
+        Write-Warn2 "20 秒内没探到公开 API，请查看 $Data 下的日志"
+    }
 }
 
 # ---- 证书状态：把"到底成没成"变成一个有结果的报告 ----

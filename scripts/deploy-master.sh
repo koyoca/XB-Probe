@@ -530,7 +530,12 @@ config_mismatch_report() {
     1) 只删掉这一行，然后重跑本脚本：
 EOF
 	if [ -n "$_CM_BAD_KEY" ]; then
-		printf '         sed -i "/^[[:space:]]*%s:/d" %s\n' "$_CM_BAD_KEY" "$CFG" >&2
+		# 这里**故意不**给 `sed -i`：它换 inode、按 umask 重建权限位，而这份配置里有
+		# 证书私钥路径与 ACME Token（0640 root:probe），改完可能变成 0644（凭证泄露）
+		# 或 0600 root:root（服务读不到配置，站点起不来）。改成"先写临时文件、
+		# 再覆盖回原 inode"：任何一步失败，原文都还完整躺在那里。
+		echo "         sed \"/^[[:space:]]*$_CM_BAD_KEY:/d\" $CFG > $CFG.tmp \\" >&2
+		echo "           && cat $CFG.tmp > $CFG && rm -f $CFG.tmp" >&2
 	else
 		printf '         rm -f %s\n' "$CFG" >&2
 	fi
@@ -3381,11 +3386,22 @@ fi
 # 重试一分钟也不会变——所以每个撞上它的地方都当场停手，不做无谓等待。
 # 真机（v0.1.3）就是在这里空等了 60 秒，最后只拿到四条猜测；而事实是
 # 站点形态按**域名**门控，配置里生效的公开域名不是用户正在用的那个。
+#
+# 三个参数：<HTTP 码> <域名> <响应体>。响应体那一项是本轮真机逼出来的——
+# 同一个 404 至少有三种完全不同的来源（看板被关掉的 JSON、Go 原生没注册路由的
+# 纯文本、本机代理自己答的 HTML），不看原话就只能猜，而这三条的修法毫不相干。
+#
+# 出口：环境变量 `_DGA_FATAL`
+#   "1"（默认）—— 这次安装没达成目的，调用方应当回滚；
+#   "0"         —— 能归因为**运行期状态**（看板开关、代理、端口被占），
+#                  调用方只警告、**不要撤销**这次本来成功的安装。
 site_gate_advice() {
 	_dga_code="${1:-}"
 	_dga_dom="${2:-}"
+	_dga_body="${3:-}"
+	_DGA_FATAL="1"
 	echo "  请求已经走完网络、进了服务端，只是被**拒**了——所以这不是证书或端口问题，" >&2
-	echo "  再等下去也不会变，原因在配置里：" >&2
+	echo "  再等下去也不会变，原因在下面这几类里（按响应体的原话对号入座）：" >&2
 	case "$_dga_code" in
 	421)
 		echo "  · HTTP 421 = 域名不在白名单。站点形态是按域名门控的，$_dga_dom 不在" >&2
@@ -3400,15 +3416,92 @@ site_gate_advice() {
 		echo "      ② 进后台「系统设置 → 站点形态」把公开域名改成 $_dga_dom ——" >&2
 		echo "         但域名被拒时后台同样打不开，这条路通常走不通。" >&2
 		;;
-	404)
-		echo "  · HTTP 404 = 这个路径在服务端不存在，通常是**脚本与二进制版本错配**" >&2
-		echo "    （脚本取 main，二进制取 Release 标签）。换成配套的版本重跑。" >&2
+	403 | 404)
+		# 404 有三种来源，修法毫不相干，所以必须按**响应体的原话**分：
+		#   · Master 自己的 JSON（"公开接口已关闭"）—— 安装是好的，是开关的事；
+		#   · Go 原生的 "404 page not found"      —— 这条路根本没注册，属装错了；
+		#   · 两者都不是（HTML、代理的错误页）    —— 这个 404 不是 Master 回的。
+		case "$_dga_body" in
+		*"公开接口已关闭"*)
+			_DGA_FATAL="0"
+			echo "  · 响应体是 Master 自己的话「公开接口已关闭」——**安装是对的**，" >&2
+			echo "    是「公开看板」这个开关被关掉了（数据库设置项 public.enabled 不是 1）。" >&2
+			echo "    打开它：浏览器进后台（反代会把 /admin/ 与 /api/admin/ 转给管理端，" >&2
+			echo "    公开站关着也不影响后台），在「系统设置 → 公开看板」里设为「开放」。" >&2
+			echo "    注意：它不是 master.yaml 里的字段，重写配置（--force-config）改不了它。" >&2
+			;;
+		*"page not found"*)
+			echo "  · 响应体是 Go 原生的「404 page not found」= 这条路**根本没注册**。" >&2
+			echo "    正常部署不会出现（脚本与 v0.1.3 二进制都有 /api/public/v1/site），" >&2
+			echo "    查这两处：① 到底是谁在听 $HEALTH_ADDR（见下面「现场证据」）；" >&2
+			echo "    ② 装上去的二进制是不是这个版本的：$BIN_DIR/xb-probe-master version" >&2
+			;;
+		*)
+			echo "  · 响应体既不是 Master 的 JSON、也不是 Go 原生的 404 —— 那这个 $_dga_code" >&2
+			echo "    大概率**不是 Master 回的**（中间还站着别的进程：本机代理、旧版布局的" >&2
+			echo "    probe-master 服务，或别的程序占着这个端口）。证据见下面「现场证据」。" >&2
+			;;
+		esac
 		;;
 	*)
 		echo "  · HTTP $_dga_code：去服务端日志找原因——" >&2
 		echo "      journalctl -u xb-probe-master --no-pager -n 50" >&2
 		;;
 	esac
+	return 0
+}
+
+# probe_scene_evidence：把"这个 4xx 到底是谁回的"一次问清。
+#
+# 三条证据合起来能把最常见的三种误判分开：
+#   · 谁在听这个端口 —— 旧版布局的 probe-master 与别的程序会占同一个端口，
+#     于是"Master 拒绝服务"其实是"另一个进程在答"；
+#   · 环境里有没有代理 —— 有代理时 curl 会把连回环的请求交给它，
+#     状态码与响应体都变成代理的（脚本已用 --noproxy '*' 绕开，这里只做回显）；
+#   · 系统里还有哪些 probe 单元 —— 遗留服务的名字与状态一眼可见。
+# 最后附上 Master 自己的启动日志：它会打印**最终生效**的站点形态与域名清单，
+# 后台设置项顶替配置文件这件事只有这行日志能证明。
+probe_scene_evidence() {
+	_hpe_addr="${1:-$HEALTH_ADDR}"
+	_hpe_port="${_hpe_addr##*:}"
+	echo "  现场证据（把「其实是别人回的」与「服务里没这个路由」分开）：" >&2
+	echo "    · 谁在听 $_hpe_addr：" >&2
+	_hpe_l=""
+	if command -v ss >/dev/null 2>&1; then
+		_hpe_l="$(ss -lntp 2>/dev/null)" || true
+	elif command -v netstat >/dev/null 2>&1; then
+		_hpe_l="$(netstat -ntpl 2>/dev/null)" || true
+	fi
+	if [ -z "$_hpe_l" ]; then
+		echo "        （本机没有 ss / netstat，查不了）" >&2
+	else
+		_hpe_row="$(printf '%s\n' "$_hpe_l" | grep -E "[:.]$_hpe_port([^0-9]|$)" || true)"
+		if [ -n "$_hpe_row" ]; then
+			printf '%s\n' "$_hpe_row" | sed 's/^/        /' >&2
+		else
+			echo "        （没有进程在听 $_hpe_port）" >&2
+		fi
+	fi
+	echo "    · 环境里的代理变量（脚本的探测已用 --noproxy '*' 绕开）：" >&2
+	_hpe_px="$(env | grep -iE '^(http|https|all|ftp)_proxy=' || true)"
+	if [ -n "$_hpe_px" ]; then
+		printf '%s\n' "$_hpe_px" | sed 's/^/        /' >&2
+	else
+		echo "        （无）" >&2
+	fi
+	echo "    · 系统里与本项目有关的单元：" >&2
+	_hpe_u="$(ls /etc/systemd/system/ 2>/dev/null | grep -i probe || true)"
+	if [ -n "$_hpe_u" ]; then
+		printf '%s\n' "$_hpe_u" | sed 's/^/        /' >&2
+		_hpe_u2="$(systemctl list-units --all --no-legend --no-pager 2>/dev/null | grep -i probe || true)"
+		if [ -n "$_hpe_u2" ]; then
+			printf '%s\n' "$_hpe_u2" | sed 's/^/        /' >&2
+		fi
+	else
+		echo "        （无）" >&2
+	fi
+	echo "    · Master 启动日志（含最终生效的站点形态与域名清单）：" >&2
+	journalctl -u xb-probe-master --no-pager -n 15 2>/dev/null | sed 's/^/        /' >&2 || true
 	return 0
 }
 
@@ -3434,18 +3527,36 @@ HC_HOST=""
 if [ "$TLS_TERMINATOR" = "caddy" ] && [ -n "${_cd_dom:-}" ]; then
 	HC_HOST="$_cd_dom"
 fi
+# 探测一律 **--noproxy '*'**：设了 http_proxy / https_proxy 的机器上，curl 会把
+# 连回环的请求交给代理，于是"服务端回了什么"变成"代理回了什么"——状态码与响应体
+# 全是代理的。这条探的是**服务端本人**，必须直连回环。
 i=0
 _hc_code=""
+_hc_body=""
 while [ $i -lt 20 ]; do
 	if command -v curl >/dev/null 2>&1; then
+		_hc_rc=0
 		if [ -n "$HC_HOST" ]; then
-			_hc_code="$(curl -sS -o /dev/null -w '%{http_code}' $CURL_EXTRA -H "Host: $HC_HOST" "${SCHEME}://${HEALTH_ADDR}/api/public/v1/site" 2>/dev/null)" || _hc_code="000"
+			_hc_raw="$(curl -sS --max-time 5 --noproxy '*' $CURL_EXTRA -H "Host: $HC_HOST" \
+				-o - -w '\n%{http_code}' "${SCHEME}://${HEALTH_ADDR}/api/public/v1/site" 2>/dev/null)" || _hc_rc=$?
 		else
-			_hc_code="$(curl -sS -o /dev/null -w '%{http_code}' $CURL_EXTRA "${SCHEME}://${HEALTH_ADDR}/api/public/v1/site" 2>/dev/null)" || _hc_code="000"
+			_hc_raw="$(curl -sS --max-time 5 --noproxy '*' $CURL_EXTRA \
+				-o - -w '\n%{http_code}' "${SCHEME}://${HEALTH_ADDR}/api/public/v1/site" 2>/dev/null)" || _hc_rc=$?
+		fi
+		if [ "$_hc_rc" != "0" ]; then
+			_hc_code="" # 连接层没通：服务可能还在起（下面的 case 按空串处理）
+			_hc_body=""
+		else
+			# 末行是 -w 打出来的状态码，其余是**服务端的原话**。
+			# 以前这里 -o /dev/null 把原话整个丢掉，只剩一个状态码，于是
+			# 同一个 404 的三种来源（看板被关掉 / 路由没注册 / 代理自己答的）
+			# 完全分不开，只能靠猜——真机就是这么被挡住三轮的。
+			_hc_code="$(printf '%s\n' "$_hc_raw" | tail -n 1)"
+			_hc_body="$(printf '%s\n' "$_hc_raw" | sed '$d' | tr -d '\r\n' | cut -c1-300)"
 		fi
 		case "$_hc_code" in
 		2*) break ;;
-		0*) : ;; # 连接层没通：服务可能还在起，继续等
+		"") : ;; # 连接层没通：服务可能还在起，继续等
 		*) break ;; # 已经答复了但状态不对：等也没用，交给下面判
 		esac
 	elif command -v wget >/dev/null 2>&1; then
@@ -3462,19 +3573,35 @@ systemctl --no-pager status xb-probe-master | sed -n '1,8p' || true
 # 非 2xx 是**确定性的拒绝**，不是"还没起来"：当场停手，并把断点说清楚。
 # 以前这里只是白等 20 秒，然后交给后面那步 60 秒超时去猜——两次都猜错了方向。
 #
-# 但只有"探的 Host 就是我们要对外发布的那个域名"时才敢据此判失败（HC_HOST 非空）。
-# 其余情形（自签/ACME 由 Master 自己终结 TLS，探的是 127.0.0.1）里，
-# 拿回环 Host 去问一个按域名门控的服务，本来就会被判"域名不对"——
-# 那是探测方式的偏差，不是部署坏了，所以只提示、不回滚。
+# 两条原则：
+#   ① 只有"探的 Host 就是我们要对外发布的那个域名"时才敢据此判失败（HC_HOST 非空）。
+#      其余情形（自签/ACME 由 Master 自己终结 TLS，探的是回环地址）里，拿回环 Host
+#      去问一个按域名门控的服务，本来就会被判"域名不对"——那是探测方式的偏差，
+#      不是部署坏了，所以只提示、不回滚。
+#   ② 判据问的是「这次安装装出来的东西对不对」，不是「你的机器上还有没有别的东西
+#      挡着」。能归因为运行期状态的（看板开关被关了、端口被别的进程占着、请求走了
+#      代理）只警告；拿它回滚会把一次本来成功的安装整份撤掉（连 caddy 一起停掉），
+#      站点反而被脚本自己弄下线。
 case "$_hc_code" in
-2* | 0* | "") : ;;
+2* | "" | 0*) : ;;
 *)
 	if [ -n "$HC_HOST" ]; then
 		echo "" >&2
 		echo "错误：Master 用域名 $HC_HOST 访问 /api/public/v1/site 回了 HTTP $_hc_code。" >&2
-		site_gate_advice "$_hc_code" "$HC_HOST"
+		if [ -n "$_hc_body" ]; then
+			echo "  服务端的原话（先看这行——它通常直接说明了原因）：" >&2
+			echo "    $_hc_body" >&2
+		fi
+		site_gate_advice "$_hc_code" "$HC_HOST" "$_hc_body"
+		probe_scene_evidence
 		echo "" >&2
-		rollback "Master 拒绝服务这个域名（HTTP $_hc_code）"
+		if [ "$_DGA_FATAL" = "1" ]; then
+			rollback "Master 拒绝服务这个域名（HTTP $_hc_code）"
+		fi
+		echo "    ⚠ 上面这条是运行期状态，不是这次安装装坏了什么——" >&2
+		echo "      **不撤销本次安装**（二进制、配置、服务与反代都已就位）。" >&2
+		echo "      按上面的提示处理完，重跑本脚本即可（幂等）。" >&2
+		echo "" >&2
 	else
 		echo "    注：Master 对 $HEALTH_ADDR 回了 HTTP $_hc_code（本次探测用的是监听地址当 Host）。" >&2
 		echo "      站点形态按域名门控的部署里这属正常现象，继续走后面的证书步骤。" >&2
@@ -3591,7 +3718,9 @@ if [ "$TLS_TERMINATOR" = "caddy" ]; then
 		fi
 	elif [ -n "$_cd_hf" ]; then
 		# 已经答复了：请求走完了 Caddy、进了 Master，是**它**拒的。
-		# 这是配置问题（域名不认），不是证书问题，重试再久也不会变。
+		# 这不是证书问题，重试再久也不会变——但"它拒了"仍要按响应体的原话分类：
+		# 若是看板开关关掉这种运行期状态，证书与反代其实**已经证明是通的**
+		# （能读到 Master 自己的话就是证明），那就只警告、不撤销。
 		echo "" >&2
 		echo "错误：Caddy 与 TLS 都已就绪，但 https://$_cd_dom 对本机（回环）请求回了" >&2
 		echo "      HTTP $_cd_hf —— 请求已经穿过 Caddy 到达 Master，是它拒绝了这次访问。" >&2
@@ -3601,9 +3730,15 @@ if [ "$TLS_TERMINATOR" = "caddy" ]; then
 		if [ -n "$_cd_body" ]; then
 			echo "      服务端原话：$_cd_body" >&2
 		fi
-		site_gate_advice "$_cd_hf" "$_cd_dom"
+		site_gate_advice "$_cd_hf" "$_cd_dom" "$_cd_body"
 		echo "" >&2
-		rollback "站点对该域名回了 HTTP $_cd_hf（配置不认这个域名，重试无用）"
+		if [ "$_DGA_FATAL" = "1" ]; then
+			rollback "站点对该域名回了 HTTP $_cd_hf（配置不认这个域名，重试无用）"
+		fi
+		echo "    ⚠ 上面这条是运行期状态，不是这次安装装坏了什么——本机自证" >&2
+		echo "      （证书 + 反代）其实已经通过：能读到 Master 自己的话，就说明请求" >&2
+		echo "      穿过了 Caddy。**不撤销本次安装**，继续走完最后的收尾。" >&2
+		echo "" >&2
 	else
 		# 失败要给出**能直接照做**的诊断，而不是"稍后再看看"。
 		echo "" >&2
@@ -3711,8 +3846,20 @@ else
 		# 申请成功。把 sync_obtain 关掉：它存在的意义只是"这一次拿到确定结果"，
 		# 留着的话以后每次重启都会被 CA 卡住（CA 不可达时一次正常的重启会失败）。
 		if [ "$TLS_MODE" = "acme" ] && grep -q '^    sync_obtain: true' "$CFG" 2>/dev/null; then
-			sed -i 's/^    sync_obtain: true.*/    sync_obtain: false         # 首次已成功，日常重启不再被证书阻塞/' "$CFG" 2>/dev/null || true
-			echo "    已把 sync_obtain 改为 false（日常重启不再等待 CA）"
+			# 改这份文件**不能**用 `sed -i`：它换 inode、按 umask 重建权限位，而这个
+			# 文件里有 ACME Token（0640 root:probe），改完可能变成 0644（凭证泄露）
+			# 或 0600 root:root（下次重启服务读不到配置，站点起不来）。
+			# 要「临时文件 + `>` 覆盖写」：写的是原 inode，属主与权限位一个不动。
+			_sy_tmp="$(mktemp "${CFG}.syncXXXXXX" 2>/dev/null)" || _sy_tmp=""
+			if [ -n "$_sy_tmp" ]; then
+				if sed 's/^    sync_obtain: true.*/    sync_obtain: false         # 首次已成功，日常重启不再被证书阻塞/' \
+					"$CFG" >"$_sy_tmp" 2>/dev/null; then
+					if cat "$_sy_tmp" >"$CFG" 2>/dev/null; then
+						echo "    已把 sync_obtain 改为 false（日常重启不再等待 CA）"
+					fi
+				fi
+				rm -f "$_sy_tmp"
+			fi
 		fi
 		;;
 	2)

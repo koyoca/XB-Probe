@@ -397,6 +397,122 @@ func TestSiteGateRejectionIsDiagnosedInsteadOfGuessed(t *testing.T) {
 	}
 }
 
+// ⑨ 同一个 4xx 的三种来源，必须按「服务端的原话」分开（v0.1.3 真机第三轮）。
+//
+// 上一版把 404 解释成"脚本与二进制版本错配"——那是猜测（真机里版本是配套的）。
+// 同一个 404 至少三种来源，修法毫不相干：
+//
+//	· Master 自己的 JSON「公开接口已关闭」——安装是对的，是"公开看板"开关的事；
+//	· Go 原生的 "404 page not found"      —— 这条路根本没注册；
+//	· 两者都不是（HTML/代理的错误页）      —— 这个 404 压根不是 Master 回的。
+//
+// 所以判据只能是"把原话读出来"，并且**按归因决定要不要回滚**：能归因为运行期
+// 状态的只警告——拿它回滚会把一次本来成功的安装整份撤掉（连 caddy 一起停），
+// 站点反而被脚本自己弄下线。
+func TestRejectionIsClassifiedByServerOwnWords(t *testing.T) {
+	body := readRepoFile(t, "../../scripts/deploy-master.sh")
+
+	// ① 健康检查必须取回响应体；-o /dev/null 那种写法不许回潮。
+	if !strings.Contains(body, `_hc_body="$(printf`) {
+		t.Error("健康检查只留状态码、把响应体丢进 /dev/null：\n" +
+			"  同一个 404 的三种来源只能靠原话分开，丢掉它就只能猜。")
+	}
+	if strings.Contains(body, `-o /dev/null -w '%{http_code}' $CURL_EXTRA`) {
+		t.Error("健康检查又回到 -o /dev/null 了：服务端的原话必须露面。")
+	}
+	if !strings.Contains(body, "服务端的原话（先看这行——它通常直接说明了原因）") {
+		t.Error("健康检查失败时没有把服务端的原话打给用户看。")
+	}
+
+	// ② 三个分类分支都在。
+	for _, want := range []string{
+		"公开接口已关闭",
+		"page not found",
+		"大概率**不是 Master 回的**",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("4xx 的分类里缺 %q —— 三种来源的修法毫不相干，必须逐条说清。", want)
+		}
+	}
+
+	// ③ 按归因决定回滚：出口是 _DGA_FATAL，两处调用点各判一次。
+	if !strings.Contains(body, `_DGA_FATAL="0"`) {
+		t.Error("没有「运行期状态 → 不回滚」的分支（_DGA_FATAL=\"0\"）：\n" +
+			"  看板被关掉这种原因，回滚也治不好它，只会把装好的东西撤掉。")
+	}
+	if n := strings.Count(body, `if [ "$_DGA_FATAL" = "1" ]; then`); n < 2 {
+		t.Errorf("只有 %d 处按 _DGA_FATAL 决定是否回滚（健康检查与 Caddy 就绪探测各需一处）：\n"+
+			"  少一处就是「有的地方警告、有的地方照旧撤安装」。", n)
+	}
+
+	// ④ 现场证据：4xx 是不是我们自己回的，必须给证据而不是给猜测。
+	if !strings.Contains(body, "probe_scene_evidence()") {
+		t.Fatal("没有 probe_scene_evidence：\n" +
+			"  真机上「Master 拒绝服务」很可能压根不是 Master 回的（旧进程占着端口/代理代答），" +
+			"不给证据就只能靠猜。")
+	}
+	for _, want := range []string{
+		"谁在听 ",
+		"环境里的代理变量",
+		"系统里与本项目有关的单元",
+		"Master 启动日志（含最终生效的站点形态与域名清单）",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("现场证据里缺 %q：\n"+
+				"  这四条分别对应「端口被占」「代理代答」「遗留服务」「后台设置顶替配置文件」。", want)
+		}
+	}
+
+	// ⑤ 回环探测一概不许经过代理——健康检查这两条探测路径以前漏了 --noproxy。
+	if n := strings.Count(body, `--noproxy '*'`); n < 6 {
+		t.Errorf("--noproxy '*' 只有 %d 处：健康检查的探测也必须带上——\n"+
+			"  代理会把「服务端回了什么」替换成「代理回了什么」（状态码与响应体一起变）。", n)
+	}
+
+	// 反向：把 404 归因到"版本错配"的旧文案不许回潮。
+	if strings.Contains(body, "通常是**脚本与二进制版本错配**") {
+		t.Error("404 又回到「版本错配」这条猜测上：真机里脚本与 v0.1.3 都有这个路由。")
+	}
+
+	// ⑥ Windows 侧是同一件事：健康检查必须记住"服务端答复了什么"，
+	//    并把 4xx 与"还没起来"分开（以前两种都报成"没探到公开 API"）。
+	ps := readRepoFile(t, "../../scripts/deploy-master.ps1")
+	for _, want := range []string{"$probeCode", "$probeBody", "公开接口已关闭", "if ($probeCode -ge 400 -and $probeCode -lt 500) { break }"} {
+		if !strings.Contains(ps, want) {
+			t.Errorf("deploy-master.ps1 的健康检查缺 %q：\n"+
+				"  两个平台对同一个现象必须给同一类判据，否则一边能看出原因、一边只能猜。", want)
+		}
+	}
+}
+
+// ⑩ 改 master.yaml 不许用 `sed -i`（脚本自己改与教用户改都不行）。
+//
+// 这份文件里有 ACME Token，权限是 0640 root:probe。原位替换（-i）会换 inode、
+// 按 umask 重建权限位：轻则变成 0644（凭证泄露），重则 0600 root:root
+// （服务读不到配置，下次重启直接起不来）。两个改动点都必须是
+// "先写临时文件、再覆盖回原 inode"——覆盖写动的是原 inode，属主与权限位一个不动。
+func TestMasterConfigIsNeverEditedInPlace(t *testing.T) {
+	body := readRepoFile(t, "../../scripts/deploy-master.sh")
+
+	// 真正的调用才拦：注释里为了说明这个坑会提到它，那种提及是好的。
+	for _, bad := range []string{`sed -i '`, `sed -i "`} {
+		if strings.Contains(body, bad) {
+			t.Errorf("部署脚本里出现了 %s：\n"+
+				"  master.yaml 含 ACME Token（0640 root:probe），原位替换会重建权限位。", bad)
+		}
+	}
+	// ① 脚本自己改 sync_obtain：临时文件 + cat 覆盖。
+	if n := strings.Count(body, `cat "$_sy_tmp" >"$CFG"`); n != 1 {
+		t.Errorf("sync_obtain 的回写方式不对（找到 %d 处「覆盖回原 inode」）：\n"+
+			"  要 mktemp 出临时文件、sed 写进去，再 cat 覆盖回来。", n)
+	}
+	// ② 教用户的「删掉某个键」也必须给这一套，不能给 sed -i。
+	if !strings.Contains(body, "> $CFG.tmp") || !strings.Contains(body, "cat $CFG.tmp > $CFG") {
+		t.Error("给用户的「只删掉这一行」修法还是原位替换：\n" +
+			"  脚本自己避开的坑不该让用户踩，而且用户那条命令是 root 跑的。")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // ⑥ 脚本写出的配置键，二进制必须认识（否则严格解析让服务起不来）
 // ---------------------------------------------------------------------------
