@@ -11,7 +11,8 @@
     写入二进制的版本号（-X main.version），默认 1.0.0。
 
 .PARAMETER Dist
-    交叉编译全部发布平台（仅 Agent）到 dist\<Version>\，并生成 SHA256SUMS。
+    交叉编译全部发布平台（Agent 13 个 + Master 2 个）到 dist\<Version>\，
+    并生成 SHA256SUMS 与 SHA256SUMS.master 两份校验和（等价于 make release-assets）。
 
 .PARAMETER Test
     先跑 go vet 与 go test。
@@ -64,7 +65,9 @@ $ldflags = "-s -w -X main.version=$Version"
 # 而发布矩阵里只有 ..._armv7/_armv6，于是自升级永远报"该平台未发布此版本"。
 function Get-PlatformTag {
     param([string] $os, [string] $arch, [string] $goarm)
-    if ($arch -eq 'arm') { return "${os}_armv$goarm" }
+    # 只有 linux 的 armv7/armv6 走 armv 前缀；freebsd/arm 这类不带 GOARM 的目标
+    # 必须原样输出 freebsd_arm——写成 armv0 会与发布矩阵（Makefile PLATFORMS）不符。
+    if ($arch -eq 'arm' -and $goarm -ne '0') { return "${os}_armv$goarm" }
     return "${os}_${arch}"
 }
 function Get-Ldflags {
@@ -113,7 +116,10 @@ if (-not $Dist) {
 }
 
 # ---------------------------------------------------------------------------
-# 交叉编译发布产物（仅 Agent；Master 只在宿主平台构建，见文档 12.6）
+# 交叉编译发布产物：Agent 全平台 + Master 两个 Linux 平台（与 Makefile 的
+# release-assets 目标等价：dist + master-dist + 两份校验和）。
+# 平台清单必须与 Makefile 的 PLATFORMS 逐项一致——CI 的 release.yml 断言 13 个，
+# 漂一个就会"本地编的与流水线发的不是同一套"。
 # ---------------------------------------------------------------------------
 Write-Step "交叉编译 Agent -> dist\$Version\"
 
@@ -121,27 +127,31 @@ $distDir = Join-Path $projRoot "dist\$Version"
 New-Item -ItemType Directory -Force -Path $distDir | Out-Null
 $env:CGO_ENABLED = '0'
 
-# os/arch 后接 GOARM（非 arm 目标写 0 表示不设置）
+# os/arch 后接 GOARM（非 arm 目标写 0 表示不设置）。
+# 与 Makefile PLATFORMS 对齐（13 个）：darwin 已明确移除——采集器只有
+# linux/windows/freebsd 三份实现，macOS 会落到 stub（在线但无数据），
+# 见 Makefile 顶部注释与 docs/01、docs/02。
 $platforms = @(
-    @('linux',   'amd64',   '7'),
+    @('linux',   'amd64',   '0'),
     @('linux',   'arm64',   '0'),
     @('linux',   'arm',     '7'),   # 文件名记为 armv7
     @('linux',   'arm',     '6'),   # 文件名记为 armv6
     @('linux',   '386',     '0'),
     @('linux',   'riscv64', '0'),
-    @('darwin',  'amd64',   '0'),
-    @('darwin',  'arm64',   '0'),
+    @('windows', 'amd64',   '0'),
+    @('windows', '386',     '0'),
+    @('windows', 'arm64',   '0'),
     @('freebsd', 'amd64',   '0'),
     @('freebsd', 'arm64',   '0'),
-    @('windows', 'amd64',   '0'),
-    @('windows', 'arm64',   '0')
+    @('freebsd', '386',     '0'),
+    @('freebsd', 'arm',     '0')    # 不带 GOARM，产物名 freebsd_arm
 )
 
 $failed = @()
 foreach ($p in $platforms) {
     $os = $p[0]; $arch = $p[1]; $goarm = $p[2]
     $tag = $arch
-    if ($arch -eq 'arm') { $tag = "armv$goarm" }
+    if ($arch -eq 'arm' -and $goarm -ne '0') { $tag = "armv$goarm" }
     $ext = ''
     if ($os -eq 'windows') { $ext = '.exe' }
 
@@ -163,9 +173,42 @@ Remove-Item Env:GOARM -ErrorAction SilentlyContinue
 $env:CGO_ENABLED = '0'
 
 if ($failed.Count -gt 0) {
-    Write-Warn2 ("以下平台编译失败：" + ($failed -join ', '))
-    Write-Warn2 "常见原因：该 GOOS/GOARCH 不在 Go 官方支持矩阵内（用 go tool dist list 确认）"
+    # 与 Makefile 的 dist 目标一致：任何一个平台失败就整体失败。
+    # 早先这里只告警不退出，结果发布出少平台的产物集而构建"成功"——
+    # 用户那一端表现为下载 404，仓库里却看不出问题。
+    Write-Err2 ("以下平台编译失败：" + ($failed -join ', '))
+    Write-Err2 "常见原因：该 GOOS/GOARCH 不在 Go 官方支持矩阵内（用 go tool dist list 确认）"
+    exit 1
 }
+
+# Master 的交叉编译产物（Makefile 的 master-dist）：给"无需编译"的一键部署用
+# （install-master-bin.sh 直接从发布源取这两份）。
+# 只发 Linux 两种架构——Master 是常驻服务端，没有人在 Windows/FreeBSD 上拿它当入口。
+Write-Step "交叉编译 Master -> dist\$Version"
+
+$masterPlatforms = @(
+    @('linux', 'amd64'),
+    @('linux', 'arm64')
+)
+
+foreach ($p in $masterPlatforms) {
+    $os = $p[0]; $arch = $p[1]
+    $out = Join-Path $distDir "xb-probe-master_${os}_${arch}"
+    Write-Host "    -> $os/$arch" -ForegroundColor Gray
+
+    $env:GOOS = $os
+    $env:GOARCH = $arch
+    Remove-Item Env:GOARM -ErrorAction SilentlyContinue
+
+    & go build -trimpath -ldflags (Get-Ldflags "${os}_${arch}") -o $out ./cmd/xb-probe-master
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err2 "xb-probe-master $os/$arch 编译失败"
+        exit 1
+    }
+}
+Remove-Item Env:GOOS, Env:GOARCH -ErrorAction SilentlyContinue
+Remove-Item Env:GOARM -ErrorAction SilentlyContinue
+$env:CGO_ENABLED = '0'
 
 # ---------------------------------------------------------------------------
 # SHA256SUMS（与 sha256sum 输出格式一致：<hash>  <文件名>）
@@ -187,6 +230,35 @@ if ($lines.Count -eq 0) {
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 [System.IO.File]::WriteAllText($sumsPath, (($lines -join "`n") + "`n"), $utf8NoBom)
 Write-Ok "$sumsPath（$($lines.Count) 个文件）"
+
+# Master 单独一份校验和（Makefile 的 checksums-master）：合并进 SHA256SUMS 会让
+# Agent 侧 sha256sum -c 在自己的目录里找不到 Master 文件而报 FAILED，
+# 失败原因看起来完全像"下载被篡改"。
+$masterSumsPath = Join-Path $distDir 'SHA256SUMS.master'
+$mLines = @()
+Get-ChildItem -Path $distDir -Filter 'xb-probe-master_*' -File |
+    Sort-Object Name |
+    ForEach-Object {
+        $h = (Get-FileHash -Path $_.FullName -Algorithm SHA256).Hash.ToLower()
+        $mLines += "$h  $($_.Name)"
+    }
+if ($mLines.Count -eq 0) {
+    Write-Err2 "dist 目录下没有 Master 产物"
+    exit 1
+}
+[System.IO.File]::WriteAllText($masterSumsPath, (($mLines -join "`n") + "`n"), $utf8NoBom)
+Write-Ok "$masterSumsPath（$($mLines.Count) 个文件）"
+
+# 数量自检（与 .github/workflows/release.yml 同一口径）：少一个平台就必须失败，
+# 否则"少发一份产物"只会在用户下载时以 404 的形式暴露。
+if ($lines.Count -ne 13) {
+    Write-Err2 "期望 13 个 Agent 产物，实际 $($lines.Count) 个"
+    exit 1
+}
+if ($mLines.Count -ne 2) {
+    Write-Err2 "期望 2 个 Master 产物，实际 $($mLines.Count) 个"
+    exit 1
+}
 
 Write-Step "完成"
 Write-Host @"
