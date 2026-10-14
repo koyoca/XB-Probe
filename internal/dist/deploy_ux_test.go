@@ -1696,7 +1696,7 @@ func TestReleaseOnlyModeUpdatesAgentReleaseWithoutTouchingMaster(t *testing.T) {
 //	另有一处纯 bug：收尾提示的 heredoc 里 `/install.sh | sh` 的反引号被 shell
 //	当成命令替换，每次部署完都报一行 "line NNNN: /install.sh: No such file"。
 func TestStep3ConvergesConfigToAnswers(t *testing.T) {
-	body := readRepoFile(t, "scripts/deploy-master.sh")
+	body := readRepoFile(t, "../../scripts/deploy-master.sh")
 
 	if !strings.Contains(body, "_cfg_scalar() {") {
 		t.Error("第 3 步没有 _cfg_scalar 提取函数：没有它就无法逐项比对「本次回答 vs 现有配置」。")
@@ -1713,15 +1713,25 @@ func TestStep3ConvergesConfigToAnswers(t *testing.T) {
 		t.Error("第 3 步又回到了「已存在，保留」：问答改了 TLS 模式/域名也不会生效。")
 	}
 	// 比对必须覆盖 TLS 模式——这正是真机栽的那一项。
+	//
+	// 判据落在**调用行**上：同一行里既有 `_cfg_scalar "$CFG"` 又有那个键名。
+	// 不能只对整段 body 做 `strings.Contains(body, key)`——`mode`、`challenge`
+	// 这种短词在脚本里遍地都是（注释、别的变量名），那样等于没判。
+	if !strings.Contains(body, "_cfg_scalar() {") {
+		t.Fatal("找不到 _cfg_scalar 的定义：后面的判据无意义。")
+	}
 	for _, key := range []string{"public_listen", "admin_listen", "public_origin", "admin_origin", "mode", "challenge"} {
-		if !strings.Contains(body, `_cfg_scalar "$CFG" `) || !strings.Contains(body, `"`+key+`"`) && !strings.Contains(body, "'"+key+"'") {
-			t.Errorf("第 3 步的比对没有覆盖 %s。", key)
+		pat := regexp.MustCompile(`(?m)_cfg_scalar "\$CFG"[^\n]*` + key)
+		if !pat.MatchString(body) {
+			t.Errorf("第 3 步的比对没有覆盖 %s：\n"+
+				"  判据是「同一行里既有 _cfg_scalar \"$CFG\" 又有该键名」。\n"+
+				"  漏掉哪一项，那一项就被旧配置吞掉——用户改了域名/模式却按旧配置跑。", key)
 		}
 	}
 }
 
 func TestHealthCheckNeverToleratesDeadListener(t *testing.T) {
-	body := readRepoFile(t, "scripts/deploy-master.sh")
+	body := readRepoFile(t, "../../scripts/deploy-master.sh")
 
 	// 连接层不通（空码/000）必须分模式处理，不能再与 2xx 混在一个 case 里静默放过。
 	if regexp.MustCompile(`(?m)^case "\$_hc_code" in\n2\* \| "" \| 0\*\) : ;;`).MatchString(body) {
@@ -1745,7 +1755,7 @@ func TestHealthCheckNeverToleratesDeadListener(t *testing.T) {
 }
 
 func TestFinishTipsNeverExecuteBackticks(t *testing.T) {
-	body := readRepoFile(t, "scripts/deploy-master.sh")
+	body := readRepoFile(t, "../../scripts/deploy-master.sh")
 
 	// 收尾提示是未加引号的 heredoc（cat <<EOF），里面出现裸反引号就是命令替换：
 	// "/install.sh | sh" 前后那一对反引号会真的去执行 /install.sh，
@@ -1775,7 +1785,7 @@ func TestFinishTipsNeverExecuteBackticks(t *testing.T) {
 //   - 有条件：TLS 交给前置反代（mode=none）时不绑任何低位端口，多给能力没有理由；
 //   - 有上限：申请失败会让进程退出，Restart=always 每 3 秒就再申请一次。
 func TestMasterUnitGrantsLowPortBinding(t *testing.T) {
-	body := readRepoFile(t, "scripts/deploy-master.sh")
+	body := readRepoFile(t, "../../scripts/deploy-master.sh")
 
 	const ambient = "AmbientCapabilities=CAP_NET_BIND_SERVICE"
 	if n := strings.Count(body, ambient); n != 1 {
