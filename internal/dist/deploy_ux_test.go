@@ -2,6 +2,7 @@ package dist
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -1904,5 +1905,116 @@ func TestMasterUnitGrantsLowPortBinding(t *testing.T) {
 	if !strings.Contains(body, "需要 Master 自己监听 $_pv_port 端口，但它已被占用") {
 		t.Error("缺少 http-01/tls-alpn-01 的端口占用前置检查：" +
 			"端口被占时 Master 起不来、证书申请失败，而报出来的现象离原因很远")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 输出着色助手必须**真的能跑**（用户实测：真实终端上满屏 `[: missing ]`）
+// ---------------------------------------------------------------------------
+
+// TestColorHelpersAreBalancedAndRunClean 钉住 say/ok/warn/err/caut/_color_ok
+// 这一套着色助手的**可执行性**。
+//
+// 缺陷回放（用户装机时抓到）：`_color_ok` 曾把三个条件串成一个
+// `a && b && c` 长表达式，最后一个 `[` 漏了 `]`。这个错误有两层掩护，所以本地
+// 一路绿灯、直到用户在真实终端上跑一键部署才炸：
+//
+//	· `sh -n` 查不出来——漏个 `]` 只是让 `[` 多收一个参数，语法依旧完好；
+//	· 管道里永远短路——`[ -t 1 ]` 先失败，后两个 `[` 根本不会执行。
+//
+// 于是在真实终端上，每次 say/warn/err 都往 stderr 吐一句 `[: missing ]`，
+// 而 `[` 报错返回 2，整句判假——**颜色一个都没出来**，只剩一堆像乱码的报错。
+//
+// 判据分两层，缺一层都能被再次骗过：
+//
+//	① 静态：每个助手函数体里，每一行的 `[` 与 `]` 个数必须相等；
+//	② 运行时：把 `_color_ok` 抠出来挂到**真终端**上跑（`script -qec` 开 pty），
+//	   stderr 必须一字不差地空，返回值必须按 NO_COLOR / TERM=dumb 正确退让。
+//	   没有 `script` 的机器（Windows 开发机）跳过第 ② 层——CI 是 ubuntu，一定有。
+func TestColorHelpersAreBalancedAndRunClean(t *testing.T) {
+	// 只列**存在**的助手：编译入口与免编译入口没有 ok/caut/_clr。
+	helpers := []string{"_color_ok", "_clr", "say", "ok", "warn", "err", "caut"}
+
+	for _, rel := range []string{
+		"../../scripts/deploy-master.sh",
+		"../../install-master-bin.sh",
+		"../../install-master.sh",
+	} {
+		body := readRepoFile(t, rel)
+
+		// ① 静态：括号配平。
+		//
+		// 传给 shFuncBody 的签名必须**行首锚定**（带前导 \n）：`ok() {` 是
+		// `_color_ok() {` 的子串，不锚定的话找 ok 会先命中 _color_ok，
+		// ok 自己的身体反而没人查。
+		for _, name := range helpers {
+			if !strings.Contains(body, "\n"+name+"() {") {
+				continue
+			}
+			fnBody := shFuncBody(t, rel, body, "\n"+name)
+			for i, line := range strings.Split(fnBody, "\n") {
+				s := strings.TrimSpace(line)
+				if s == "" || strings.HasPrefix(s, "#") {
+					continue
+				}
+				if o, c := strings.Count(line, "["), strings.Count(line, "]"); o != c {
+					t.Errorf("%s 的 %s() 第 %d 行 `[`/`]` 不配平（%d 个 [、%d 个 ]）：%s\n"+
+						"  漏一个 `]` 不会让 sh -n 报错（语法完好），管道里又因 `[ -t 1 ]` 先失败而永远短路，"+
+						"于是只在真实终端上现形：每次调用吐一句 `[: missing ]`，且 `[` 返回 2 让整句判假、颜色全丢。",
+						rel, name, i+1, o, c, line)
+				}
+			}
+		}
+
+		// ② 运行时：真终端里跑 `_color_ok`。
+		if _, err := exec.LookPath("script"); err != nil {
+			continue
+		}
+		fnBody := shFuncBody(t, rel, body, "\n_color_ok")
+		for _, tc := range []struct {
+			env  []string
+			rc   int
+			desc string
+		}{
+			{[]string{"TERM=xterm"}, 0, "普通终端：应当判真"},
+			{[]string{"TERM=xterm", "NO_COLOR=1"}, 1, "NO_COLOR：应当退让"},
+			{[]string{"TERM=dumb"}, 1, "TERM=dumb：应当退让"},
+		} {
+			runColorPredicateOnTTY(t, rel, fnBody, tc.env, tc.rc, tc.desc)
+		}
+	}
+}
+
+// runColorPredicateOnTTY 把抠出来的 `_color_ok` 挂到真终端上执行，校验两件事：
+// 退出码是否符合预期、stderr 是否一字不差地空。
+func runColorPredicateOnTTY(t *testing.T, rel, fnBody string, env []string, wantRC int, desc string) {
+	t.Helper()
+	errFile := filepath.Join(t.TempDir(), "color_err.txt")
+	snip := filepath.Join(t.TempDir(), "predicate.sh")
+	// stderr 单独收文件：`script` 把子进程的 stdout/stderr 都接到 pty 上，
+	// 从外面分不开，只能在片段里自己重定向。
+	if err := os.WriteFile(snip, []byte(fnBody+"\n_color_ok 1 2>\""+errFile+"\"\n"), 0o600); err != nil {
+		t.Fatalf("写不了临时片段：%v", err)
+	}
+	cmd := exec.Command("script", "-qec", "sh '"+snip+"'", "/dev/null")
+	cmd.Env = append(append([]string{}, os.Environ()...), env...)
+	out, err := cmd.CombinedOutput()
+	rc := 0
+	if err != nil {
+		ee, ok := err.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("%s：script 跑不起来（%v）——这是判据失效，不是实现失效，先修环境", rel, err)
+		}
+		rc = ee.ExitCode()
+	}
+	if rc != wantRC {
+		t.Errorf("%s：_color_ok 在「%s」下返回 %d，期望 %d。输出：%s", rel, desc, rc, wantRC, out)
+	}
+	if noise, rerr := os.ReadFile(errFile); rerr != nil {
+		t.Fatalf("%s：读不到 stderr 收集文件：%v", rel, rerr)
+	} else if len(noise) > 0 {
+		t.Errorf("%s：_color_ok 在「%s」下往 stderr 写了东西（期望一字不差地空）：\n%s\n"+
+			"  这正是用户看到的 `[: missing ]`——`[` 报错也返回 2，颜色会一个都不出。",
+			rel, desc, noise)
 	}
 }

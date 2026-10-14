@@ -676,7 +676,7 @@ if ($ReleaseOnly) {
         Write-Host "      & `"$roBin`" dist pull -config `"$cfg`" -version $roVer -all -from `"$source`"" -ForegroundColor Red
         exit 1
     }
-    Write-Host "    已入库 $n 个 Agent 产物 + SHA256SUMS → $Data\dist\$roVer"
+    Write-Host "    已入库 $n 个 Agent 产物 + SHA256SUMS → $Data\dist\$roVer" -ForegroundColor Green
     Write-Host "==> 完成：新节点装到的 Agent 就是这一版。" -ForegroundColor Green
     Write-Host "    新节点：后台「节点 → 注册码」生成注册码，按页面给的命令装即可"
     Write-Host "    已装节点：xb-probe-agent upgrade --check 然后 xb-probe-agent upgrade"
@@ -781,7 +781,7 @@ if ($UpgradeOnly) {
     } catch {
         Invoke-UpgradeRollback "写入 $target 失败：$($_.Exception.Message)"
     }
-    Write-Host "    已写入 $target"
+    Write-Host "    已写入 $target" -ForegroundColor Green
 
     if (-not $hasTask) {
         Write-Warn2 "本机没有 $taskName 计划任务（没装过？或用了 -NoStartupTask），不会替你重启。"
@@ -1312,7 +1312,7 @@ if ((Test-Path $cfg) -and -not $ForceConfig) {
     # 统一写 LF：YAML 解析器对 CRLF 宽容，但配置文件里混着两种换行迟早出怪事。
     $utf8 = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText($cfg, (((Get-ConfigLines) -join "`n") + "`n"), $utf8)
-    Write-Host "    已写入"
+    Write-Host "    已写入" -ForegroundColor Green
 }
 
 # 4) 初始化管理员
@@ -1353,7 +1353,7 @@ if ($NoStartupTask) {
         Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
         Start-ScheduledTask -TaskName $taskName
         $st = (Get-ScheduledTask -TaskName $taskName).State
-        Write-Host "    已启动（状态：$st）"
+        Write-Host "    已启动（状态：$st）" -ForegroundColor Green
     } catch {
         Write-Warn2 "启动计划任务失败：$($_.Exception.Message)"
     }

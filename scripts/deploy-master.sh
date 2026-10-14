@@ -181,8 +181,16 @@ C_BLD="$(printf '\033[1m')"
 C_RST="$(printf '\033[0m')"
 
 # _color_ok <fd>：这个流当下是不是终端、且用户没关颜色。
+#
+# 三个条件**各占一行、各自收尾**，不要串成一个 `a && b && c` 长表达式：
+# 曾经最后一个 `[` 漏了 `]`，`sh -n` 查不出来（语法完好），管道里又因为
+# `[ -t 1 ]` 先失败而永远短路——于是真实终端上每次调用都往 stderr 吐一句
+# `[: missing ]`，颜色还一个都没出来（`[` 报错返回 2，整句判假）。用户实测抓到，
+# 拆成单行后漏一个 `]` 只会坏那一行，且静态检查能看出来。
 _color_ok() {
-	[ -t "$1" ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-}" != "dumb"
+	[ -t "$1" ] || return 1
+	[ -z "${NO_COLOR:-}" ] || return 1
+	[ "${TERM:-}" != "dumb" ] || return 1
 }
 
 # _clr <fd> <颜色码>：这个流是终端才返回颜色码，否则返回空串。
@@ -212,6 +220,16 @@ warn() {
 err() {
 	if _color_ok 2; then printf '%s错误：%s%s\n' "$C_ERR" "$*" "$C_RST" >&2
 	else printf '错误：%s\n' "$*" >&2; fi
+}
+# caut <内容>：整行黄色（stdout），**不加"警告："前缀**。
+#
+# 给行首本来就带 ⚠ 的行用：warn 会再加一层"警告："，那就成了"警告：⚠ …"。
+# 与 warn 的分工只看**流**：走 stderr 的告警仍用 warn（它按 fd 2 现判），
+# 走 stdout 的状态行用这个。多行内容直接写进一个字符串里——ANSI 颜色跨换行
+# 仍然有效，于是一次 caut 就能把整段提示染成黄色。
+caut() {
+	if _color_ok 1; then printf '%s%s%s\n' "$C_WARN" "$*" "$C_RST"
+	else printf '%s\n' "$*"; fi
 }
 
 BIN_SRC=""
@@ -1083,7 +1101,7 @@ pull_agent_release() {
 			chown -R probe "$DATA/dist" 2>/dev/null || true
 	fi
 	_pa_done="$DATA/dist/$_pa_ver"
-	printf '    已入库 %s 个 Agent 产物 + SHA256SUMS → %s\n' "$_pa_n" "$_pa_done"
+	ok "    已入库 $_pa_n 个 Agent 产物 + SHA256SUMS → $_pa_done"
 	return 0
 }
 
@@ -1519,7 +1537,7 @@ if [ -n "$UPGRADE_ONLY" ]; then
 		{ cp -f "$BIN_SRC" "$BIN_DIR/xb-probe-master" && chmod 0755 "$BIN_DIR/xb-probe-master"; } ||
 			upgrade_only_rollback "写入 $BIN_DIR/xb-probe-master 失败"
 	fi
-	echo "    已写入 $BIN_DIR/xb-probe-master"
+	ok "    已写入 $BIN_DIR/xb-probe-master"
 
 	systemctl start xb-probe-master || upgrade_only_rollback "新二进制启动失败（日志见上）"
 	# Type=simple 下 systemctl start 一返回就认为"成功"，而进程可能已经开始
@@ -3348,7 +3366,7 @@ if [ -f "$CFG" ] && [ -z "$FORCE_CONFIG" ]; then
 		cp -f "$CFG" "$CFG.bak" 2>/dev/null || true
 		render_config >"$CFG"
 		chmod 0640 "$CFG"
-		echo "    已写入"
+		ok "    已写入"
 	fi
 else
 	if [ -f "$CFG" ]; then
@@ -3359,7 +3377,7 @@ else
 	fi
 	render_config >"$CFG"
 	chmod 0640 "$CFG"
-	echo "    已写入"
+	ok "    已写入"
 fi
 
 # 落盘之后**立刻**用二进制自己验一遍。
@@ -3457,7 +3475,7 @@ fi
 # master.key 与备份必须分开存放：丢了它，已配置的告警渠道凭证就解不开了。
 if [ -f "$DIR/master.key" ]; then
 	chmod 0600 "$DIR/master.key"
-	echo "    ⚠ $DIR/master.key 必须**离线另存一份**（0600，不要放进备份目录）"
+	caut "    ⚠ $DIR/master.key 必须**离线另存一份**（0600，不要放进备份目录）"
 fi
 
 # ⚠ 归属修正是**必须**的，不是锦上添花。
@@ -3571,7 +3589,7 @@ EOF
 		journalctl -u xb-probe-master --no-pager -n 20 2>/dev/null | sed 's/^/    /' >&2 || true
 		rollback "xb-probe-master 服务启动失败（日志见上）"
 	fi
-	echo "    已启用并启动"
+	ok "    已启用并启动"
 	# Type=simple 下 systemctl restart 一返回就认为"成功"，而进程可能已经开始
 	# 申请证书、也可能**立刻**因为别的原因退出（端口被占、配置键写错）。
 	# 所以多给一秒再确认一次它还活着——把"服务根本没起来"这件事在回滚点上
@@ -3639,7 +3657,7 @@ if [ "$TLS_TERMINATOR" = "caddy" ]; then
 	if [ ! -f "$CADDYFILE" ]; then
 		render_caddyfile >"$CADDYFILE"
 		chmod 0644 "$CADDYFILE"
-		echo "    已写入 $CADDYFILE"
+		ok "    已写入 $CADDYFILE"
 	elif [ -n "$_caddy_ours" ]; then
 		# 我们自己写的（可能是**上一版**写的）：摘掉旧段、写入新段。
 		# 这是"升级后修复真的生效"的关键一步。
@@ -3691,7 +3709,7 @@ if [ "$TLS_TERMINATOR" = "caddy" ]; then
 		if [ -f "$CADDYFILE" ]; then cp -f "$CADDYFILE" "$CADDYFILE.bak" 2>/dev/null || true; fi
 		render_caddyfile >"$CADDYFILE"
 		chmod 0644 "$CADDYFILE"
-		echo "    已写入 $CADDYFILE（--force-config）"
+		ok "    已写入 $CADDYFILE（--force-config）"
 	elif Caddyfile_has_domain "$_caddy_dom"; then
 		echo "    $CADDYFILE 已有 $_caddy_dom 的站点块（**不是本脚本写的**），保留。"
 		echo "      若那个块不是你要的，加 --force-config 覆盖。"
@@ -3710,7 +3728,7 @@ if [ "$TLS_TERMINATOR" = "caddy" ]; then
 		if [ -f "$CADDYFILE" ]; then cp -f "$CADDYFILE" "$CADDYFILE.bak" 2>/dev/null || true; fi
 		render_caddyfile >"$CADDYFILE"
 		chmod 0644 "$CADDYFILE"
-		echo "    $CADDYFILE 原内容无有效站点 → 已写入（备份为 $CADDYFILE.bak）"
+		ok "    $CADDYFILE 原内容无有效站点 → 已写入（备份为 $CADDYFILE.bak）"
 	fi
 	# 反代域名必须解析到本机，否则 Caddy 申请证书会失败（而失败信息出现在
 	# caddy 的日志里，不在本脚本的输出里，用户基本找不到）。
@@ -3772,7 +3790,7 @@ EOF
 		journalctl -u caddy --no-pager -n 20 2>/dev/null | sed 's/^/    /' >&2 || true
 		rollback "caddy 服务启动失败（日志见上）"
 	fi
-	echo "    已启用并启动 caddy"
+	ok "    已启用并启动 caddy"
 fi
 
 # site_gate_advice <HTTP 码> <域名>：把"服务端**已经答复**了、只是状态不对"讲清楚。
@@ -4034,8 +4052,14 @@ case "$_hc_code" in
 		echo "      按上面的提示处理完，重跑本脚本即可（幂等）。" >&2
 		echo "" >&2
 	else
-		echo "    注：Master 对 $HEALTH_ADDR 回了 HTTP $_hc_code（本次探测用的是监听地址当 Host）。" >&2
-		echo "      站点形态按域名门控的部署里这属正常现象，继续走后面的证书步骤。" >&2
+		# 这一条是**信息**不是警告，所以用暗色而不是黄色：正常路径上每次部署
+		# 都会看到它，染成警告色只会训练用户忽视真正的 ⚠。
+		_dn="$(_clr 2 "$C_DIM")"
+		_dr="$(_clr 2 "$C_RST")"
+		printf '%s    注：Master 对 %s 回了 HTTP %s（本次探测用的是监听地址当 Host）。%s\n' \
+			"$_dn" "$HEALTH_ADDR" "$_hc_code" "$_dr" >&2
+		printf '%s      站点形态按域名门控的部署里这属正常现象，继续走后面的证书步骤。%s\n' \
+			"$_dn" "$_dr" >&2
 	fi
 	;;
 esac
@@ -4366,13 +4390,13 @@ esac
 
 if [ -n "$NO_DIST_PULL" ] || [ "$DIST_PULL" = "skip" ]; then
 	echo "    已跳过（--no-dist-pull / --dist-pull skip）。"
-	echo "    ⚠ 没有发布文件时，一键安装脚本会在下载 xb-probe-agent 那一步 404。"
+	caut "    ⚠ 没有发布文件时，一键安装脚本会在下载 xb-probe-agent 那一步 404。"
 	# 版本留空 → 提示里用 <版本> 占位。这一支里本来就没有"将要拉取的版本"。
 	dist_pull_hint
 	_mp_done=""
 elif [ -z "$_mp_releasable" ]; then
 	echo "    当前二进制版本是「${_mp_ver:-未知}」，不是发布版本号，跳过自动拉取。"
-	echo "    ⚠ 没有发布文件时，一键安装脚本会在下载 xb-probe-agent 那一步 404。"
+	caut "    ⚠ 没有发布文件时，一键安装脚本会在下载 xb-probe-agent 那一步 404。"
 	# 同理：这一支里 $_mp_ver 是 dev 之类，把它填进命令示例只会误导。
 	dist_pull_hint
 	_mp_done=""
@@ -4393,7 +4417,7 @@ EOF
 	fi
 
 	if [ "$DIST_PULL" = "skip" ]; then
-		echo "    已跳过。⚠ 没有发布文件时，一键安装脚本会在下载 xb-probe-agent 那一步 404。"
+		caut "    已跳过。⚠ 没有发布文件时，一键安装脚本会在下载 xb-probe-agent 那一步 404。"
 		dist_pull_hint "$_mp_ver"
 		_mp_done=""
 	elif [ "$DIST_PULL" = "local" ] && [ -z "$_mp_plat" ]; then
@@ -4447,14 +4471,14 @@ EOF
 				echo "          服务跑起来后可以用浏览器/curl 直接试 $_mp_url"
 				;;
 			*)
-				echo "    ⚠ 自检：$_mp_url 返回的内容不像校验和。"
-				echo "      常见原因：install.mode 被设成 off；或 install.dist_base 被指向了别处"
-				echo "      （指向别处时，节点其实是从那个镜像下载，本机的 /dist/ 不参与）。"
+			caut "    ⚠ 自检：$_mp_url 返回的内容不像校验和。
+      常见原因：install.mode 被设成 off；或 install.dist_base 被指向了别处
+      （指向别处时，节点其实是从那个镜像下载，本机的 /dist/ 不参与）。"
 				;;
 			esac
 		else
-			echo "    ⚠ 发布文件拉取失败。Master 本身不受影响，"
-			echo "      但新节点装机时会在下载 xb-probe-agent 那一步 404。"
+			caut "    ⚠ 发布文件拉取失败。Master 本身不受影响，
+      但新节点装机时会在下载 xb-probe-agent 那一步 404。"
 			dist_pull_hint "$_mp_ver"
 		fi
 	fi

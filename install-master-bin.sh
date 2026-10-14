@@ -156,7 +156,12 @@ C_ERR="$(printf '\033[1;31m')"
 C_RST="$(printf '\033[0m')"
 
 _color_ok() {
-	[ -t "$1" ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-}" != "dumb"
+	# 三个条件各占一行、各自收尾（详见 scripts/deploy-master.sh 里的同一段注释）：
+	# 串成一个 `a && b && c` 时漏掉最后一个 `]`，`sh -n` 查不出、管道里又永远
+	# 短路，只在真实终端上现形——每次调用吐一句 `[: missing ]`，颜色全没了。
+	[ -t "$1" ] || return 1
+	[ -z "${NO_COLOR:-}" ] || return 1
+	[ "${TERM:-}" != "dumb" ] || return 1
 }
 
 # say <内容>：步骤头（青）。与原先的 `printf '==> %s\n'` 同文同流（stdout）。
