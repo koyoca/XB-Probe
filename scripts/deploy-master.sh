@@ -862,8 +862,11 @@ if [ -z "$FRESH_ANSWERS" ]; then
 	if [ -z "$ACME_CHALLENGE_GIVEN" ] && known_nonempty "$_v"; then ACME_CHALLENGE="$_v"; fi
 	_v="$(ans_get ADMIN_USER)"
 	if [ -z "$ADMIN_USER_GIVEN" ] && known_nonempty "$_v"; then ADMIN_USER="$_v"; fi
-	_v="$(ans_get TLS_TERMINATOR)"
-	if [ -z "$TLS_TERMINATOR_GIVEN" ] && known_nonempty "$_v"; then TLS_TERMINATOR="$_v"; fi
+	# TLS_TERMINATOR **不在这里恢复**：它不是用户答的题，而是由"对外访问方式"
+	# 推导出来的结论（见下面那一问的 case）。把它也记下来、下次再读回来，就等于
+	# 让上上次的结论去顶掉这一次刚答的选择——真机现象（用户报的）：
+	#   记忆里留着 caddy → 这次选 4（files）→ 推导被跳过 → 一路走成 Caddy，
+	#   只丢下一句"你选的 files 的证书参数不再使用"，证书参数一个都没问。
 fi
 
 # "与公开站相同"（同站）是**用户看得懂的说法**，但配置里必须落成空串。
@@ -2178,14 +2181,18 @@ fi
 #   · 其余（acme/selfsigned/files）   → master：证书本来就是给 Master 自己用的。
 # `--tls-terminator` 仍然可以显式给出（命令行或环境变量），那时以它为准——
 # 只有这一处给默认值。
-if [ -z "$TLS_TERMINATOR" ]; then
+#
+# 闸门判的是 `TLS_TERMINATOR_GIVEN`（"命令行/环境变量有没有显式给过"），
+# **不是** `[ -z "$TLS_TERMINATOR" ]`（"变量是不是空"）。差别就是上面那个真机
+# 事故：用后者时，任何从别处（曾经是 .answers）进来的旧值都会让推导整段跳过，
+# 于是"这一问的答案"不再决定终结者。推导值必须是**每次现算**的结论。
+if [ -z "$TLS_TERMINATOR_GIVEN" ]; then
 	case "$TLS_MODE" in
 	none) TLS_TERMINATOR="caddy" ;;
 	plain) TLS_TERMINATOR="" ;;
 	*) TLS_TERMINATOR="master" ;;
 	esac
 fi
-ans_put TLS_TERMINATOR "$TLS_TERMINATOR"
 
 case "$TLS_TERMINATOR" in
 master | caddy) : ;;

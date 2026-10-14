@@ -90,6 +90,10 @@ ACME_CHALLENGE=""
 # 谁终结 TLS：master（Master 自己）/ caddy（部署脚本装 Caddy 反代）。
 # 留空 = 由 deploy-master.sh 按 TLS 方式给出建议值并提问（默认值只有一处来源）。
 TLS_TERMINATOR=""
+# "命令行有没有显式给过"要与"变量是不是空"分开记：推导的闸门判的是前者。
+# 用后者时，任何从别处进来的旧值都会让推导整段跳过——deploy-master.sh 那边
+# 就被这个坑咬过（答案记忆里留着 caddy，选 4=files 却静默走成 Caddy）。
+TLS_TERMINATOR_GIVEN=""
 PROXY_DOMAINS=""
 NO_SERVICE=""
 FORCE_CONFIG=""
@@ -217,7 +221,7 @@ while [ $# -gt 0 ]; do
 	--acme-email) ACME_EMAIL="${2:-}"; shift 2 ;;
 	--acme-ca) ACME_CA="${2:-}"; shift 2 ;;
 	--acme-challenge) ACME_CHALLENGE="${2:-}"; shift 2 ;;
-	--tls-terminator) TLS_TERMINATOR="${2:-}"; shift 2 ;;
+	--tls-terminator) TLS_TERMINATOR="${2:-}"; TLS_TERMINATOR_GIVEN="1"; shift 2 ;;
 	--proxy-domain) PROXY_DOMAINS="${2:-}"; shift 2 ;;
 	--no-service) NO_SERVICE="1"; shift ;;
 	--force-config) FORCE_CONFIG="1"; shift ;;
@@ -705,8 +709,9 @@ fi
 # 用户的原话：**"选择 1 直接是 caddy 反代，选择 2 直接是 Master 反代"**。
 #
 # `--tls-terminator` 仍然可以显式给出，那时以它为准；只有这一处给默认值
-# （scripts/deploy-master.sh 里是同一个规则的镜像，两处必须一致）。
-if [ -z "$TLS_TERMINATOR" ]; then
+# （scripts/deploy-master.sh 里是同一个规则的镜像，两处必须一致：
+#   闸门判 `TLS_TERMINATOR_GIVEN`，不是 `-z "$TLS_TERMINATOR"`）。
+if [ -z "$TLS_TERMINATOR_GIVEN" ]; then
 	case "$TLS_MODE" in
 	none) TLS_TERMINATOR="caddy" ;;
 	plain) TLS_TERMINATOR="" ;;

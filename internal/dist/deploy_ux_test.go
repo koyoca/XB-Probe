@@ -1163,6 +1163,38 @@ func TestAccessModeQuestionDecidesTerminator(t *testing.T) {
 	if !strings.Contains(inst, `none) TLS_TERMINATOR="caddy" ;;`) {
 		t.Error("install-master.sh 没有把终结者改成推导式。")
 	}
+
+	// ⑤ 记忆/别处的旧值不许顶掉这一次刚答的选择（用户报的真机故障）。
+	//
+	// 终结者是**推导出来的结论**，不是用户答的题。它曾经被 ans_put 记下来、
+	// 下次再 ans_get 恢复，而推导的闸门当时写的是 `[ -z "$TLS_TERMINATOR" ]`
+	// （"变量是不是空"）——旧值一进来，推导整段跳过，这一问的答案就不再决定
+	// 终结者。真机现象：记忆里留着 caddy，这次选 4（files），脚本只丢一句
+	// "你选的 files 的证书参数不再使用"，证书路径一个都没问，直接装成 Caddy。
+	//
+	// 闸门必须是 `TLS_TERMINATOR_GIVEN`（命令行/环境变量有没有**显式给过**），
+	// 且推导值不进答案记忆。两个入口都要满足。
+	for _, src := range []struct{ rel, body string }{
+		{"scripts/deploy-master.sh", body},
+		{"install-master.sh", inst},
+	} {
+		if strings.Contains(src.body, `ans_get TLS_TERMINATOR`) {
+			t.Errorf("%s 又从答案记忆里恢复 TLS_TERMINATOR：\n"+
+				"  它是推导结论，不是用户答的题。恢复它 = 让上一次的结论顶掉这一次的选择\n"+
+				"  （记忆里是 caddy 时，选 4=files 会静默走成 Caddy）。", src.rel)
+		}
+		if strings.Contains(src.body, `ans_put TLS_TERMINATOR`) {
+			t.Errorf("%s 又把 TLS_TERMINATOR 写进答案记忆：推导值不该被记忆（见上一条）。", src.rel)
+		}
+		if strings.Contains(src.body, `if [ -z "$TLS_TERMINATOR" ]; then`) {
+			t.Errorf("%s 的终结者推导闸门写成了「变量是不是空」：\n"+
+				"  必须判 `-z \"$TLS_TERMINATOR_GIVEN\"`，否则任何从别处进来的旧值都会让推导\n"+
+				"  整段跳过，这一问的答案就不再决定终结者。", src.rel)
+		}
+		if !strings.Contains(src.body, `if [ -z "$TLS_TERMINATOR_GIVEN" ]; then`) {
+			t.Errorf("%s 缺少 `[ -z \"$TLS_TERMINATOR_GIVEN\" ]` 这道闸门（推导值必须每次现算）。", src.rel)
+		}
+	}
 }
 
 // 用户原话："xb-probe-master 启动，由于公开和后台是同一个域名，caddy 好像只反代了
