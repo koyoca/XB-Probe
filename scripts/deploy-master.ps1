@@ -198,31 +198,6 @@ if ($oneShot.Count -gt 1) {
 }
 
 # ---------------------------------------------------------------------------
-# 0.1c-2) 老布局检测：改名之前（probe-master 时代）装过的机器
-# ---------------------------------------------------------------------------
-#
-# 与 shell 侧的 0-1 段同一件事，但 Windows 侧**不做自动搬迁**（用得少、牵涉
-# master.key 的搬迁风险高）：检测到老布局就拦下来，给出能照着做的手工步骤。
-# 判据：老计划任务或老目录存在，而新计划任务不存在（新布局已装就不再拦，
-# 残留的老文件顶多算垃圾，不影响任何模式的工作对象）。
-if (-not $AskMode) {
-    $legacyTask = Get-ScheduledTask -TaskName "probe-master" -ErrorAction SilentlyContinue
-    $legacyDirLive = Test-Path "C:\ProgramData\probe-master"
-    $newTask = Get-ScheduledTask -TaskName "xb-probe-master" -ErrorAction SilentlyContinue
-    if (($null -ne $legacyTask -or $legacyDirLive) -and $null -eq $newTask) {
-        Write-Err2 "这台机器装的是改名之前的老布局（计划任务 probe-master 时代）。"
-        Write-Host "  改名后：C:\ProgramData\probe-master → C:\ProgramData\xb-probe-master，" -ForegroundColor Red
-        Write-Host "  数据不会自动搬家——直接装新布局会得到一套空库。手工搬迁步骤：" -ForegroundColor Red
-        Write-Host "    1) Stop-ScheduledTask -TaskName probe-master（库是 SQLite，运行中拷贝会撕坏）" -ForegroundColor Red
-        Write-Host "    2) Move-Item C:\ProgramData\probe-master C:\ProgramData\xb-probe-master" -ForegroundColor Red
-        Write-Host "       （目标已存在就改为拷贝其中内容，别覆盖）" -ForegroundColor Red
-        Write-Host "    3) Unregister-ScheduledTask -TaskName probe-master -Confirm:\$false" -ForegroundColor Red
-        Write-Host "    4) 重跑本次命令。master.yaml 里的路径若是老目录，装机会重写收敛。" -ForegroundColor Red
-        exit 2
-    }
-}
-
-# ---------------------------------------------------------------------------
 # 0.1d) 管理员权限检查
 # ---------------------------------------------------------------------------
 $id = [Security.Principal.WindowsIdentity]::GetCurrent()

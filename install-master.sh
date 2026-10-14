@@ -101,9 +101,6 @@ RELEASE_ONLY=""
 UPGRADE_ONLY=""
 # 只重置管理员密码：不需要源码、不需要 Go，所以和卸载一样走"编译之前"的早退通路。
 RESET_PASSWORD=""
-# 改名前老布局（probe-master 时代）的迁移开关：原样转给部署脚本，由它停旧服务、
-# 搬数据与配置（目标已有内容绝不覆盖）。不加速改装出来的是一套空库。
-MIGRATE_LEGACY=""
 KEEP_DATA=""
 
 # go.mod 声明的最低 Go 版本。低于它构建会直接失败，所以先在依赖检查时拦下，
@@ -133,11 +130,6 @@ install-master.sh —— XB-Probe Master 整机一键部署
   --reset-password     只重置管理员密码（不需要源码与 Go，不卸载、不清数据）。
                        口令按 PROBE_ADMIN_PASSWORD / --admin-password / 交互的
                        顺序取；用户名默认 ops，可用 --admin-user 指定。
-  --migrate-legacy     改名之前（probe-master 时代）装过的机器用它搬家：搬
-                       /var/lib/probe-master 与 /etc/probe-master 到新路径、
-                       改写配置里写死的老路径、停用旧单元，然后照常安装。
-                       **指定它即等于选了「安装 / 升级」，不会再问模式**。
-                       目标已有内容绝不覆盖，可反复重跑。
   -h, --help           显示本帮助
 
   其余参数透传给 scripts/deploy-master.sh：
@@ -201,7 +193,6 @@ while [ $# -gt 0 ]; do
 	--release-only) RELEASE_ONLY="1"; shift ;;
 	--upgrade-only) UPGRADE_ONLY="1"; shift ;;
 	--reset-password) RESET_PASSWORD="1"; shift ;;
-	--migrate-legacy) MIGRATE_LEGACY="1"; shift ;;
 	--keep-data) KEEP_DATA="1"; shift ;;
 	-h | --help) usage; exit 0 ;;
 	*) err "未知参数：$1"; usage; exit 2 ;;
@@ -446,16 +437,7 @@ if [ -z "$UNINSTALL" ] && [ -z "$RELEASE_ONLY" ] &&
 		if download "$_base/scripts/deploy-master.sh" >"$_tmpq/deploy-master.sh" 2>/dev/null &&
 			[ -s "$_tmpq/deploy-master.sh" ]; then
 			# 菜单与提示走它的 stderr（直接显示给用户），答案只可能是 1/2/3/4/5。
-			#
-			# --migrate-legacy 要一起带过去：它把答案说死了（只与"安装 / 升级"
-			# 搭配），部署脚本见到它就不再问这一问。不带的话用户会在这里被问
-			# 一次，选错就白跑——菜单第 4 项"只升级本体"看着最像"升级"，而它
-			# 恰恰是老布局机器上最该避开的那个（见 deploy-master.sh 的 0-1 段）。
-			if [ -n "$MIGRATE_LEGACY" ]; then
-				_ask_out="$(sh "$_tmpq/deploy-master.sh" --ask-mode --migrate-legacy 2>/dev/null || true)"
-			else
-				_ask_out="$(sh "$_tmpq/deploy-master.sh" --ask-mode 2>/dev/null || true)"
-			fi
+			_ask_out="$(sh "$_tmpq/deploy-master.sh" --ask-mode 2>/dev/null || true)"
 			case "$_ask_out" in
 			1) __ASKED_MODE="1" ;;
 			2) UNINSTALL="1" ;;
@@ -924,11 +906,9 @@ if [ -n "$UPGRADE_ONLY" ]; then
 	[ -n "$DIR" ] && set -- "$@" --dir "$DIR"
 	[ -n "$DATA" ] && set -- "$@" --data "$DATA"
 	[ -n "$BIN_DIR" ] && set -- "$@" --bin-dir "$BIN_DIR"
-	[ -n "$MIGRATE_LEGACY" ] && set -- "$@" --migrate-legacy
 else
 set -- --bin "$SRC/bin/xb-probe-master"
 [ -n "$__ASKED_MODE" ] && set -- "$@" --mode "$__ASKED_MODE"
-[ -n "$MIGRATE_LEGACY" ] && set -- "$@" --migrate-legacy
 [ -n "$PUBLIC_ORIGIN" ] && set -- "$@" --public-origin "$PUBLIC_ORIGIN"
 [ -n "$ADMIN_ORIGIN" ] && set -- "$@" --admin-origin "$ADMIN_ORIGIN"
 [ -n "$ADMIN_USER" ] && set -- "$@" --admin-user "$ADMIN_USER"

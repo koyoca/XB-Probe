@@ -196,10 +196,6 @@ RELEASE_ONLY=""
 UPGRADE_ONLY=""
 # 只重置管理员密码（不动二进制与配置）——问答题里的第 5 项。
 RESET_PASSWORD=""
-# 老布局迁移开关：检测到改名之前（probe-master 时代）的安装时，全量安装必须
-# 显式给这个开关才肯动手。不给的话装出来的是一套**空库**的新 Master——
-# 数据不会自动搬家，看起来就像"数据全丢了"。
-MIGRATE_LEGACY=""
 # 上面这几个"只做一件事"的开关与 UNINSTALL / RELEASE_ONLY 是同一类：**必须**在这里
 # 给出默认值。`set -eu` 下少一个就会在"判断它有没有被设置"的那一行直接 unbound
 # variable 退出——而那行恰好在问答题派发处，等于整个交互入口全废（本轮真实踩过）。
@@ -358,14 +354,6 @@ TLS：
                             都没给就交互输入两次。
                             与其它三种"只做一件事"的模式互斥；配 --dry-run 只回显计划。
 
-改名之前（probe-master 时代）装过的机器：
-  --migrate-legacy          只与"安装 / 升级 Master"搭配，**指定它即等于选了那一条**，
-                            不会再问"做什么"。检测到老布局时，脚本会停掉旧服务、把
-                            /var/lib/probe-master 与 /etc/probe-master 搬到新路径
-                            （目标已有内容**绝不覆盖**，可反复重跑），然后照常安装。
-                            不加它而检测到老布局时：安装与四个"只做一件事"的模式都会
-                            拒绝执行并打印手工迁移办法。
-
 给入口脚本用的两个（一般不需要手工敲）：
   --ask-mode                只问"做什么"（1 安装/升级、2 卸载、3 只更新发布文件、
                             4 只升级本体、5 重置管理员密码），把答案写到 stdout
@@ -412,7 +400,6 @@ while [ $# -gt 0 ]; do
 	--release-only) RELEASE_ONLY="1"; shift ;;
 	--upgrade-only) UPGRADE_ONLY="1"; shift ;;
 	--reset-password) RESET_PASSWORD="1"; shift ;;
-	--migrate-legacy) MIGRATE_LEGACY="1"; shift ;;
 	--ask-mode) ASK_MODE="1"; shift ;;
 	--mode) MODE_IN="${2:-}"; shift 2 ;;
 	--keep-data) KEEP_DATA="1"; shift ;;
@@ -643,163 +630,6 @@ if [ "$_oneshot_count" -gt 1 ]; then
 	echo "错误：这几项都只做一件事，不能同时使用：$_oneshot_names" >&2
 	echo "  「卸载」「只更新发布文件」「只升级本体」「重置密码」一次只能选一个。" >&2
 	exit 2
-fi
-
-# --migrate-legacy 是**修饰开关**（只与"安装 / 升级 Master"搭配），与那四个单次
-# 模式天然冲突：它们承诺"别的都不动"，而它要搬数据库与 master.key。复用上面那个
-# 计数来判，而不是再枚举 A×B 的组合——四个模式加上它就是四对，写全会漏。
-if [ -n "$MIGRATE_LEGACY" ] && [ "$_oneshot_count" -gt 0 ]; then
-	echo "错误：--migrate-legacy 与「只做一件事」的模式不能同时使用：$_oneshot_names" >&2
-	echo "  它要把数据库与 master.key 搬到新路径，而那些模式承诺「别的都不动」。" >&2
-	echo "  改用：先让它搬完（--migrate-legacy，按「安装 / 升级」走），再跑那个模式。" >&2
-	exit 2
-fi
-
-# ---------------------------------------------------------------------------
-# 0-0b) 老布局（改名前的 probe-master 时代）：检测工具 + 搬迁
-# ---------------------------------------------------------------------------
-#
-# 改名那一轮把服务单元、二进制、配置目录、数据目录全部从 probe-master 换成了
-# xb-probe-master。Agent 侧有 service.MigrateLegacy 兜底，Master 侧**刻意**没有
-# 静默迁移：搬迁牵涉数据库与 master.key（丢了它加密凭证就解不开），顺手做违反
-# "只做一件事"的承诺。但完全不认老布局的下场是用户实测撞到的那种：新单元不存在
-# → "Unit not found" → 回滚也失败 → 留下一个看不懂的现场。所以：显式开关 +
-# 说清后果 + 可反复重跑。
-#
-# **位置是关键，两件事必须分开**：
-#   · 搬迁（下面这段）要赶在"从 .answers 取默认值"**之前**——答案文件
-#     <配置目录>/.answers 就躺在 /etc/probe-master 里，搬完才读得到，用户才不会
-#     被从头问一遍（那是"搬"的一半价值）；
-#   · 拦截（0-1 段，在交互菜单**之后**）才能判断模式——菜单才把 2/3/4/5 真正
-#     置进标志位，放早了"菜单选 4"这条会绕过检测。
-# 两处用同一个 MIGRATE_LEGACY（以及下面这份函数定义）串起来，各在其位。
-LEGACY_UNIT=/etc/systemd/system/probe-master.service
-LEGACY_BIN=/usr/local/bin/probe-master
-NEW_MASTER_UNIT=/etc/systemd/system/xb-probe-master.service
-# 老布局还在不在：单元文件或二进制任一存在。
-legacy_master_present() {
-	[ -e "$LEGACY_UNIT" ] || [ -x "$LEGACY_BIN" ]
-}
-# 在运行或仍自启＝搬迁没做过。我们自己的迁移会 stop+disable 旧单元，所以
-# "既不运行也不自启"就视为已经搬过（或用户手工处理过），不再拦。
-legacy_master_live() {
-	systemctl is-active --quiet probe-master.service 2>/dev/null ||
-		systemctl is-enabled --quiet probe-master.service 2>/dev/null
-}
-# 判"新布局装过没有"用**单元文件**，不用二进制——二进制可能只是失败升级留下的
-# 孤儿，那时 systemctl 一样起不来，报错只会更晚。
-new_master_installed() {
-	[ -e "$NEW_MASTER_UNIT" ]
-}
-legacy_master_recipe() {
-	echo "  这台机器装的是改名之前的老布局（probe-master 时代）。改名后" >&2
-	echo "  /etc/probe-master → /etc/xb-probe-master、/var/lib/probe-master →" >&2
-	echo "  /var/lib/xb-probe-master，数据**不会**自动搬家——直接装新布局会得到" >&2
-	echo "  一套空库，看起来就像数据全丢了。两条路任选其一：" >&2
-	echo "  A) 让脚本搬：重跑本次命令并加 --migrate-legacy。**不需要再选模式**——" >&2
-	echo "     它只与「安装 / 升级」搭配，会直接按那条路走：停旧服务、搬数据与" >&2
-	echo "     配置（目标已有内容绝不覆盖，可反复重跑），搬完自动继续安装。" >&2
-	echo "  B) 自己搬：先 systemctl stop probe-master（库是 SQLite，运行中拷贝" >&2
-	echo "     会撕坏），然后" >&2
-	echo "       mkdir -p /var/lib/xb-probe-master /etc/xb-probe-master" >&2
-	echo "       cp -a /var/lib/probe-master/. /var/lib/xb-probe-master/" >&2
-	echo "       cp -a /etc/probe-master/. /etc/xb-probe-master/" >&2
-	echo "     （master.key 与 .answers 都在 /etc/probe-master 里：前者丢了加密" >&2
-	echo "     凭证就解不开；后者带来全部问答答案，安装时不会再问一遍）。" >&2
-	echo "     然后把新配置里指向老目录的路径改成新路径——master.yaml 里写死了" >&2
-	echo "     data_dir / themes_dir / master_key_file，不改的话新单元（只对" >&2
-	echo "     $DATA 可写）会以\"库在只读文件系统上\"起不来：" >&2
-	echo "       sed -i 's|/var/lib/probe-master|$DATA|g' $DIR/master.yaml" >&2
-	echo "       sed -i 's|/etc/probe-master|$DIR|g'      $DIR/master.yaml" >&2
-	echo "     最后 systemctl disable probe-master，重跑本次命令并选 1。" >&2
-	if [ -x "$BIN_DIR/xb-probe-master" ]; then
-		echo "  另：$BIN_DIR/xb-probe-master 是此前失败的升级留下的孤儿文件，" >&2
-		echo "  连同 $BIN_DIR/xb-probe-master.bak 一起删掉即可，不影响迁移。" >&2
-	fi
-}
-# 真的搬。只在显式给了 --migrate-legacy 时走到这里——本机没老布局时只提一句
-# 就继续（那条命令在"已经搬过的机器"上重跑是安全的，用户不该为此读文档）。
-#
-# 排除 --ask-mode 是必须的：入口脚本是在"什么都还没做"的时候调它取答案的，那里
-# 承诺"不碰系统、不需要 root、不读配置"。搬迁是停服务 + 拷数据库，放在这里就等于
-# 一个查询动作会改机器，而且是非 root 时以一堆 mkdir/cp 的失败收场。答案取回来
-# 之后的那次调用才是真正动手的地方。
-if [ -n "$MIGRATE_LEGACY" ] && [ -z "$ASK_MODE" ]; then
-	if [ -n "$DRY_RUN" ]; then
-		# dry-run 承诺"一个字节都不写"，而搬迁每一步都是写：只回显计划。
-		if legacy_master_present; then
-			echo "==> [dry-run] 检测到老布局（probe-master 时代），将执行搬迁（未改动系统）"
-			echo "    [dry-run] systemctl stop probe-master"
-			echo "    [dry-run] cp -a /var/lib/probe-master/. $DATA/（仅当 $DATA 为空）"
-			echo "    [dry-run] cp -a /etc/probe-master/. $DIR/（仅当 $DIR 为空）"
-			echo "    [dry-run] systemctl disable probe-master"
-		fi
-	elif ! legacy_master_present; then
-		echo "==> --migrate-legacy：本机没有老布局（probe-master 时代）的痕迹，按普通安装继续"
-	else
-		echo "==> 检测到老布局（probe-master 时代），按 --migrate-legacy 搬迁"
-		# 库是 SQLite：运行中拷贝会撕坏。先停再搬。
-		systemctl stop probe-master.service 2>/dev/null || true
-		# 目标"已有内容"就绝不动：搬迁必须能反复重跑（幂等）。第二次跑时数据已经
-		# 搬进去了，再 cp 一遍等于用旧库盖掉新库——这类"顺手覆盖"是数据事故的
-		# 标准开头。
-		if [ -d /var/lib/probe-master ] && [ -z "$(ls -A "$DATA" 2>/dev/null)" ]; then
-			mkdir -p "$DATA"
-			cp -a /var/lib/probe-master/. "$DATA"/ || {
-				echo "错误：数据搬迁失败（磁盘空间？权限？）。旧服务已停、数据仍在原地。" >&2
-				echo "  修好原因后重跑即可。" >&2
-				exit 2
-			}
-			echo "    已搬数据：/var/lib/probe-master → $DATA"
-		fi
-		if [ -d /etc/probe-master ] && [ -z "$(ls -A "$DIR" 2>/dev/null)" ]; then
-			mkdir -p "$DIR"
-			cp -a /etc/probe-master/. "$DIR"/ || {
-				echo "错误：配置搬迁失败（磁盘空间？权限？）。" >&2
-				echo "  数据已搬（若走到那一步），配置与 master.key 仍在 /etc/probe-master。" >&2
-				echo "  修好原因后重跑即可（已搬过的内容不会重复搬）。" >&2
-				exit 2
-			}
-			echo "    已搬配置：/etc/probe-master → $DIR（含 master.key 与 .answers）"
-			# 老 master.yaml 里**写死了老路径**，光搬文件不够：
-			#   data_dir / themes_dir / master_key_file 三行都是绝对路径，
-			#   而新单元是 ProtectSystem=strict + ReadWritePaths=$DATA——配置还指着
-			#   /var/lib/probe-master 时，服务会因为"库在只读文件系统上"起不来，
-			#   而回滚不会改配置，于是"升级失败"看起来毫无原因（这正是我们要消灭的
-			#   那种现场）。改名改的是**我们自己的目录名**，所以这两个前缀跟着搬；
-			#   只认这两串，用户的域名、其它路径一律不碰——`public_origin` 里出现
-			#   probe-master 字样也不会被匹配到（它不含 /etc/ 或 /var/lib/ 前缀）。
-			_mig_cfg="$DIR/master.yaml"
-			if [ -f "$_mig_cfg" ] && grep -q "/var/lib/probe-master\|/etc/probe-master" "$_mig_cfg"; then
-				echo "    配置里有指向老目录的路径，跟着改写："
-				grep -n "/var/lib/probe-master\|/etc/probe-master" "$_mig_cfg" |
-					sed 's/^/      旧：/'
-				# 先写临时文件、再 cat 回原文件：**原地覆盖保留 inode**，
-				# 于是属主与权限（0640 root:probe）原样留着。直接 sed -i 会换一个
-				# 新 inode，权限按 umask 走——那份文件里有 ACME Token。
-				_mig_tmp="$DIR/.master.yaml.migrate.$$"
-				if sed "s|/var/lib/probe-master|$DATA|g; s|/etc/probe-master|$DIR|g" \
-					"$_mig_cfg" >"$_mig_tmp" 2>/dev/null; then
-					cat "$_mig_tmp" >"$_mig_cfg"
-					rm -f "$_mig_tmp"
-					echo "      已改写为 $DATA 与 $DIR"
-				else
-					rm -f "$_mig_tmp"
-					echo "错误：配置里的老路径改写出错。" >&2
-					echo "  请手工改 $CFG 里 data_dir / themes_dir / master_key_file 三行，" >&2
-					echo "  然后重跑本次命令。" >&2
-					exit 2
-				fi
-				if grep -q "/var/lib/probe-master\|/etc/probe-master" "$_mig_cfg"; then
-					echo "    ⚠ 配置里仍有指向老目录的路径（形状不常见），请手工看一眼："
-					grep -n "/var/lib/probe-master\|/etc/probe-master" "$_mig_cfg" |
-						sed 's/^/      /'
-				fi
-			fi
-		fi
-		systemctl disable probe-master.service 2>/dev/null || true
-		echo "    旧单元已停用（unit 文件保留，供回滚参考；确认无误后可删除）"
-	fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -1259,15 +1089,6 @@ resolve_latest_agent_version() {
 #   · 答案（`1` ~ `5`）走 **stdout** —— 那是"给脚本用的"，调用方要能
 #     `$(...)` 拿到一个干净的数字，不会被菜单文本污染。
 ask_mode_menu() {
-	# --migrate-legacy 已经把答案说死了（它只与"安装 / 升级 Master"搭配），
-	# 再问一遍就是给用户挖坑——而这个坑实测踩到过：用户照提示加了
-	# --migrate-legacy，菜单里顺手选了 4（"只升级本体"，看着最像"升级"），
-	# 于是撞上老布局拦截，一条命令能做完的迁移变成了一次报错。
-	if [ -n "$MIGRATE_LEGACY" ]; then
-		echo '  --migrate-legacy 已指定：按「安装 / 升级 Master」进行，不需要再选模式。' >&2
-		echo 1
-		return 0
-	fi
 	cat >&2 <<'EOF'
 
 这个脚本可以做五件事：
@@ -1358,58 +1179,6 @@ if [ -z "$UNINSTALL" ] && [ -z "$RELEASE_ONLY" ] && [ -z "$UPGRADE_ONLY" ] &&
 		printf '已选择卸载。默认**连数据一起删**（数据目录里有数据库与 master.key）。\n' >&2
 		printf '想保留数据请在下一个问题里回答 n，或改用 --keep-data。\n' >&2
 	fi
-fi
-
-# ---------------------------------------------------------------------------
-# 0-1) 老布局检测：改名之前（probe-master 时代）装过的机器
-# ---------------------------------------------------------------------------
-#
-# 改名那一轮把服务单元、二进制、配置目录、数据目录全部从 probe-master 换成了
-# xb-probe-master。Agent 侧有 service.MigrateLegacy 兜底，Master 侧没有——
-# 而且不该有静默迁移：搬迁牵涉数据库与 master.key（丢了它加密凭证就解不开），
-# 塞进"只做一件事"的模式里顺手做，违反模式本身的承诺。
-# 但完全不认老布局的下场是用户实测撞到的那种：新单元不存在 → "Unit not found"
-# → 回滚也失败 → 留下一个看不懂的现场。所以这里只做两件事：
-#   · 四个"只做一件事"的模式：新布局没装时拒绝执行并给出迁移办法；
-#   · 全量安装：老单元仍在运行/自启时，要么显式给 --migrate-legacy（脚本停旧、
-#     搬数据、目标已有内容绝不覆盖），要么拒绝。
-# 位置在交互菜单**之后**：菜单才把 2/3/4/5 真正置进标志位，放早了
-# "菜单选 4"这条会绕过检测（显式 --upgrade-only 与 --mode 4 反而拦得住）。
-#
-# 检测用的四个函数与"怎么办"的说明都定义在**文件靠前的 0-0b 段**，一份定义服务
-# 两处（那边做搬迁、这边做拦截）——函数定义必须先于调用点，而搬迁的调用点在前面。
-#
-# 四个单次模式：新布局没装就没有可操作的对象。判据用**单元文件**而不是二进制——
-# 二进制可能只是失败升级留下的孤儿（那时 systemctl 一样起不来，报错只会更晚）。
-if [ -n "$UNINSTALL" ] || [ -n "$RELEASE_ONLY" ] || [ -n "$UPGRADE_ONLY" ] ||
-	[ -n "$RESET_PASSWORD" ]; then
-	if ! new_master_installed; then
-		echo "错误：这台机器上没有新布局（xb-probe-master.service）的安装，" >&2
-		echo "  \"只做一件事\"的模式没有可操作的对象。" >&2
-		if legacy_master_present; then
-			legacy_master_recipe
-		else
-			echo "  先跑一遍\"安装 / 升级 Master\"（菜单 1）装出这套布局。" >&2
-		fi
-		exit 2
-	fi
-fi
-# 全量安装：老单元还活着就装新布局＝两套服务抢端口，而新库是空的。
-# 放在单次模式检测之后：四个单次模式与迁移无关，先按各自的道理由去拒绝。
-if [ -z "$UNINSTALL" ] && [ -z "$RELEASE_ONLY" ] && [ -z "$UPGRADE_ONLY" ] &&
-	[ -z "$RESET_PASSWORD" ] && legacy_master_present && legacy_master_live; then
-	if [ -n "$MIGRATE_LEGACY" ]; then
-		# 走到这里说明 0-0b 的搬迁没能把旧单元停下来（停用失败、权限不足……）。
-		# 这时**绝不能**继续装：两套服务抢同一个端口，新的必然起不来。
-		echo "错误：按 --migrate-legacy 搬过之后，旧单元 probe-master 仍在运行或仍自启。" >&2
-		echo "  不先停掉它就装新布局，两套服务会抢同一个端口。请手工执行：" >&2
-		echo "    systemctl disable --now probe-master" >&2
-		echo "  然后重跑本次命令（搬迁是幂等的，已搬过的内容不会再搬）。" >&2
-		exit 2
-	fi
-	echo "错误：检测到改名之前的老布局（probe-master.service 仍在运行或自启）。" >&2
-	legacy_master_recipe
-	exit 2
 fi
 
 # ---------------------------------------------------------------------------
