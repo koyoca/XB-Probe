@@ -143,6 +143,28 @@ var settingDefaults = map[string]string{
 	"backup.enabled": "1",
 	"backup.hour":    "4",
 	"backup.keep":    "7",
+	// audit.retention_days 是审计日志保留期（天）。它同时由**审计日志页**的
+	// 专用面板管理（那里带密码/动态码二次确认、改完立即清理一次）。
+	//
+	// 为什么也要放进设置页白名单：这个键只要被改过一次就落进 settings 表，
+	// 而设置页的兜底逻辑（"后端返回了但分组里没有的键也显示出来"）会把它当
+	// 未知键渲染 —— 表现是页面上冒出一个标题为 `audit.retention_days` 的英文
+	// 输入框（用户反馈"改为中文"），且真去改它还会被白名单拒掉（"不允许的设置项"）。
+	// 现在给它中文标签与校验规则，两处入口共用同一个键、不会各存一份值。
+	"audit.retention_days": "30",
+	// 多币种换算（月费合计）。
+	//
+	//   billing.base_currency 是**主币种**：月费合计一律以它计价（ISO 4217，如 CNY）。
+	//     留空 = 沿用旧行为（取第一个有月支出的节点的币种、不做任何换算）。
+	//   billing.rates 是"相对主币种的汇率表"，逗号分隔的 `币种:数值`，
+	//     数值含义是 **1 单位该币种 = 多少主币种**。例：主币种 CNY 时
+	//     `USD:7` 表示 1 USD = 7 CNY。
+	//
+	// 为什么存"相对主币种"而不是两两汇率：N 种货币的两两汇率需要 N² 个数字，
+	// 而且改一个就得连带改一圈；相对主币种只要 N-1 个，且与"合计以主币种计价"
+	// 的语义天然对齐。主币种自身的汇率恒为 1，不需要也不能配置。
+	"billing.base_currency": "",
+	"billing.rates":         "",
 }
 
 var settingSpecs = map[string]func(string) error{
@@ -189,6 +211,12 @@ var settingSpecs = map[string]func(string) error{
 	// 下限 1：配成 0 会让 PruneBackups 保留 0 份（尽管它自身有兜底，
 	// 也不该让管理员有机会配出一个"永远不保留备份"的状态）。
 	"backup.keep": intRange(1, 90),
+	// 审计日志保留期（天）：与 handleSetAuditRetention 的 1~3650 同一口径，
+	// 两处入口（审计页面板 / 设置页字段）不能有各自的范围。
+	"audit.retention_days": intRange(1, 3650),
+	// 多币种（见 settingDefaults 的说明）。
+	"billing.base_currency": validateCurrencyCode,
+	"billing.rates":         validateCurrencyRates,
 }
 
 // allowedSettingKey 判断设置键是否在白名单内。
@@ -478,6 +506,65 @@ func validatePublicCards(v string) error {
 		}
 		if !known[name] {
 			return fmt.Errorf("未知的公开卡片 %q", name)
+		}
+	}
+	return nil
+}
+
+// validateCurrencyCode 校验主币种：允许空（=不换算），否则必须是三位大写字母。
+func validateCurrencyCode(v string) error {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return nil
+	}
+	if len(v) != 3 {
+		return fmt.Errorf("币种代码必须是三位字母（如 CNY / USD）")
+	}
+	for _, r := range strings.ToUpper(v) {
+		if r < 'A' || r > 'Z' {
+			return fmt.Errorf("币种代码只能是字母")
+		}
+	}
+	return nil
+}
+
+// validateCurrencyRates 校验汇率表：逗号/空白分隔的 `币种:数值`。
+//
+// 与解析层（model.ParseRates 的"坏条目丢弃"）是两层：这里在保存时就拒绝非法格式，
+// 避免管理员存进一份看着像生效、实际大半被丢弃的表；解析层仍保留容错，
+// 兜住历史脏值。数值必须 > 0——汇率写成 0 会让对应币种金额全部变 0。
+func validateCurrencyRates(v string) error {
+	if v == "" {
+		return nil
+	}
+	if len(v) > 2048 {
+		return fmt.Errorf("汇率表过长")
+	}
+	for _, item := range strings.FieldsFunc(v, func(c rune) bool {
+		return c == ',' || c == ';' || c == ' ' || c == '\t' || c == '\n' || c == '\r'
+	}) {
+		code, val, ok := strings.Cut(item, ":")
+		if !ok {
+			code, val, ok = strings.Cut(item, "=")
+		}
+		if !ok {
+			return fmt.Errorf("汇率条目应形如 USD:7（币种:数值）：%s", item)
+		}
+		code = strings.ToUpper(strings.TrimSpace(code))
+		if len(code) != 3 {
+			return fmt.Errorf("币种代码必须是三位字母：%s", code)
+		}
+		for _, r := range code {
+			if r < 'A' || r > 'Z' {
+				return fmt.Errorf("币种代码只能是字母：%s", code)
+			}
+		}
+		rate, err := strconv.ParseFloat(strings.TrimSpace(val), 64)
+		if err != nil {
+			return fmt.Errorf("汇率必须是数字：%s", val)
+		}
+		if rate <= 0 {
+			return fmt.Errorf("汇率必须大于 0（写成 0 会让该币种金额全部变成 0）：%s", item)
 		}
 	}
 	return nil

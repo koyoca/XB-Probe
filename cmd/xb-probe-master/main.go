@@ -28,6 +28,7 @@ import (
 	"github.com/koyoca/xb-probe/internal/auth"
 	"github.com/koyoca/xb-probe/internal/config"
 	"github.com/koyoca/xb-probe/internal/db"
+	"github.com/koyoca/xb-probe/internal/model"
 	"github.com/koyoca/xb-probe/internal/pipeline"
 	"github.com/koyoca/xb-probe/internal/state"
 	"github.com/koyoca/xb-probe/internal/store"
@@ -252,6 +253,13 @@ func run(cfgPath string) error {
 	// 字段映射使用 state 内的唯一实现（state.BuildPublicNode / BuildPublicOverview），
 	// 无需注入，避免漏接线导致快照静默变空。
 	snap := state.NewSnapshotter(registry)
+	// 多币种汇率：每次生成快照时现读设置，管理员改完立即生效（无需重启）。
+	snap.SetRatesProvider(func() model.Rates {
+		return model.ParseRates(
+			repo.GetSettingDefault("billing.base_currency", ""),
+			repo.GetSettingDefault("billing.rates", ""),
+		)
+	})
 
 	// 10) 调度器
 	//

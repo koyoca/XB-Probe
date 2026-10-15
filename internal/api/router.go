@@ -109,7 +109,8 @@ func (h *Handler) securityPolicy() SecurityPolicy {
 //     任何节点秘密（令牌要现场注册才拿到），放行的风险为零。
 func (h *Handler) publicGate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if h.publicEnabled() || isInstallPath(r.URL.Path) || isACMEChallengePath(r.URL.Path) || h.validAdminSession(r) {
+		if h.publicEnabled() || isInstallPath(r.URL.Path) || isACMEChallengePath(r.URL.Path) ||
+			isThemeStylePath(r.URL.Path) || h.validAdminSession(r) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -143,6 +144,16 @@ func isInstallPath(p string) bool {
 	return p == "/install.sh" || p == "/install.ps1" || strings.HasPrefix(p, "/dist/")
 }
 
+// isThemeStylePath 判断是否为公开主题的样式表。
+//
+// 关闭公开看板后仍要放行它：未开放提示页要按站点风格渲染（用户反馈"仅仅
+// 提示该站点未开放，页面 UI 要符合现有风格"），而 CSP 是 style-src 'self'——
+// 提示页既不能写内联 <style>、也不能用 style="" 属性，只能 <link> 引同源样式表。
+// 样式表本身不含任何节点数据（就是配色与卡片规则），放行的风险为零。
+func isThemeStylePath(p string) bool {
+	return p == "/style.css"
+}
+
 // isACMEChallengePath 判断是否为 ACME http-01 挑战路径。
 //
 // 它必须与"公开看板是否开放"解耦：管理员常常在看板维护期关掉公开站，
@@ -154,19 +165,30 @@ func isACMEChallengePath(p string) bool {
 
 // writePublicClosed 返回"公开看板未开放"提示页。
 //
-// 注意：这段 HTML 会经过 SecurityHeaders，CSP 是 style-src 'self'，
-// 因此不能带 <style> 块或 style 属性，只用最朴素的语义标签。
+// 样式复用当前主题的样式表（同源 /style.css，由 isThemeStylePath 放行），
+// 这样提示页与看板本身同一套配色、字体与深浅模式——之前它是一张裸 HTML
+// （浏览器默认字体 + 纯黑文字），在深色页面之间跳出来像另一个站点
+// （用户反馈"页面 UI 要符合现有风格"）。
+//
+// 硬约束：CSP 是 style-src 'self'，所以**不能**写 <style> 块或 style="" 属性；
+// 只能 <link rel="stylesheet"> 引同源文件，并复用样式表里已有的类名
+// （.wrap 限宽居中，.muted 是次级文字色）。不新增主题类名——主题 CSS 有
+// 灰阶风格护栏（mono_test.go），加一个只被这张 404 页用到的类不值得。
 func writePublicClosed(w http.ResponseWriter) {
 	const page = `<!doctype html>
 <html lang="zh-CN">
 <head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>未开放</title></head>
+<title>公开看板未开放</title>
+<link rel="stylesheet" href="/style.css">
+</head>
 <body>
-<h1>公开看板未开放</h1>
-<p>管理员已暂时关闭公开节点页面。</p>
-<p>如果你是管理员：登录管理后台后刷新本页即可查看（登录状态下不受此开关影响）；
-也可以在「系统设置 → 公开看板」中把 <code>公开看板</code> 设为「开放」。</p>
+<main class="wrap">
+  <h2>公开看板未开放</h2>
+  <p class="muted">管理员已暂时关闭公开节点页面。</p>
+  <p class="muted">如果你是管理员：登录管理后台后刷新本页即可查看（登录状态下不受此开关影响）；
+  也可以在「系统设置 → 公开看板」中把「公开看板」设为「开放」。</p>
+</main>
 </body></html>
 `
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

@@ -2,6 +2,7 @@ package state
 
 import (
 	"testing"
+	"time"
 
 	"github.com/koyoca/xb-probe/internal/model"
 )
@@ -266,5 +267,46 @@ func TestBuildLatencyBarsHonoursWindow(t *testing.T) {
 		if v != nil && *v == 123456 {
 			t.Errorf("段 %d 收下了越过窗口末尾的样本：下标上界没有跟着 segments 走", i)
 		}
+	}
+}
+
+// TestBuildPublicOverviewConvertsCurrency 验证月费合计按主币种换算。
+//
+// 三种"不该换算"的情形与一种"该换算"的情形都要钉住：
+// 未配主币种（升级前行为）、币种相同、表里没有该币种 —— 这三种必须原样累加；
+// 配了汇率才乘。错乘的后果是升级后合计数字凭空变化，而"数字变了"极难被察觉。
+func TestBuildPublicOverviewConvertsCurrency(t *testing.T) {
+	mk := func(price int64, cur string) *NodeRuntime {
+		return &NodeRuntime{PriceMinor: price, Currency: cur, Cycle: model.CycleMonthly}
+	}
+
+	// 1) 未配主币种：原样累加，币种取第一个有支出的节点。
+	nodes := []*NodeRuntime{mk(1000, "USD"), mk(2000, "CNY")}
+	o := BuildPublicOverview(nodes, time.Unix(0, 0), model.Rates{})
+	if o.MonthlyFee != 3000 || o.MonthlyFeeCurrency != "USD" {
+		t.Errorf("未配主币种时应原样累加：fee=%d cur=%q", o.MonthlyFee, o.MonthlyFeeCurrency)
+	}
+
+	// 2) 配了主币种 + 汇率：USD 按 7 折算，合计以主币种计价。
+	rates := model.ParseRates("CNY", "USD:7")
+	o2 := BuildPublicOverview(nodes, time.Unix(0, 0), rates)
+	if want := int64(1000*7 + 2000); o2.MonthlyFee != want {
+		t.Errorf("折算后合计应为 %d，得到 %d", want, o2.MonthlyFee)
+	}
+	if o2.MonthlyFeeCurrency != "CNY" {
+		t.Errorf("配了主币种时合计币种必须是它，得到 %q", o2.MonthlyFeeCurrency)
+	}
+
+	// 3) 没有汇率的币种按原值计入（不编造倍率）。
+	o3 := BuildPublicOverview([]*NodeRuntime{mk(1000, "AUD")}, time.Unix(0, 0), rates)
+	if o3.MonthlyFee != 1000 {
+		t.Errorf("未知币种应按原值计入，得到 %d", o3.MonthlyFee)
+	}
+
+	// 4) lifetime/once 折算成 0 之后再换算仍是 0（不能因为"乘了 7"就冒出金额）。
+	life := &NodeRuntime{PriceMinor: 9999, Currency: "USD", Cycle: model.CycleLifetime}
+	o4 := BuildPublicOverview([]*NodeRuntime{life}, time.Unix(0, 0), rates)
+	if o4.MonthlyFee != 0 {
+		t.Errorf("终身节点不该有月支出，得到 %d", o4.MonthlyFee)
 	}
 }

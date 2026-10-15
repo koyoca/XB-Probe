@@ -53,6 +53,17 @@ type AdminNodeItem struct {
 	FeeCycle string `json:"fee_cycle,omitempty"`
 }
 
+// currencyRates 读取当前的多币种换算表（主币种 + 汇率）。
+//
+// 每次调用现读设置：管理员改完主币种/汇率，下一次请求就按新值渲染，
+// 不需要重启（与 InstallMode / MasterURL 这类运行时钩子同一口径）。
+func (h *Handler) currencyRates() model.Rates {
+	return model.ParseRates(
+		h.Repo.GetSettingDefault("billing.base_currency", ""),
+		h.Repo.GetSettingDefault("billing.rates", ""),
+	)
+}
+
 // buildAdminNodeList 把库中的节点元数据与内存运行态合并成列表。
 //
 // 一次遍历 Registry，不做 N+1 查询；节点数再多也只是内存里的 map 查找。
@@ -72,7 +83,14 @@ func (h *Handler) buildAdminNodeList(nodes []*model.Node, now time.Time) []Admin
 		}
 		if b, ok := billings[n.ID]; ok {
 			item.FeeMonthly = model.MonthlyEquivalent(b.PriceMinor, b.Cycle)
+			// 多币种：与公开看板同一口径——配了主币种就折算了再汇总，
+			// 否则后台的合计与公开页的合计会对不上（同一份数据两处各算各的
+			// 正是这个项目反复出现的那类不一致）。
+			item.FeeMonthly = h.currencyRates().Convert(item.FeeMonthly, b.Currency)
 			item.FeeCurrency = b.Currency
+			if base := h.currencyRates().Base; base != "" {
+				item.FeeCurrency = base
+			}
 			// 只有真配了价格才带周期：没配价格时 MonthlyEquivalent 也是 0，
 			// 把 cycle 一起下发会让卡片把"没配价格"显示成"终身"。
 			if b.PriceMinor > 0 {

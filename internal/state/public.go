@@ -266,7 +266,10 @@ func BuildLatencyBars(buckets []model.LatencyBucket, now int64, windowS int64, s
 
 // BuildPublicOverview 汇总公开概览。
 // nodes 应由调用方按稳定顺序传入（见 Snapshotter.Refresh）。
-func BuildPublicOverview(nodes []*NodeRuntime, at time.Time) model.PublicOverview {
+//
+// rates 是管理员配置的多币种换算表（见 model.Rates）：配置了主币种之后，
+// 各节点的月均费用先换算到主币种再累加，合计币种恒为主币种。
+func BuildPublicOverview(nodes []*NodeRuntime, at time.Time, rates model.Rates) model.PublicOverview {
 	o := model.PublicOverview{GeneratedAt: at.Unix()}
 	for _, n := range nodes {
 		o.NodesTotal++
@@ -284,10 +287,16 @@ func BuildPublicOverview(nodes []*NodeRuntime, at time.Time) model.PublicOvervie
 		// 后者是"该周期一次性金额"，年付节点会被算成 12 倍月支出，
 		// 而 lifetime/once 根本没有月支出却被计入（详见 model.MonthlyEquivalent）。
 		fee := model.MonthlyEquivalent(n.PriceMinor, n.Cycle)
+		// 多币种：配置了主币种时先折算再累加（未配置时 Convert 原样返回，
+		// 与升级前行为完全一致）。
+		fee = rates.Convert(fee, n.Currency)
 		o.MonthlyFee += fee
 		// 币种取**第一个真正有月支出的节点**的币种：拿一台 lifetime 节点的
 		// 币种去标注一堆 CNY 金额，会让总额看起来像美元。
-		if fee > 0 && o.MonthlyFeeCurrency == "" && n.Currency != "" {
+		// 配了主币种时合计一律以主币种计价，不再猜。
+		if rates.Base != "" {
+			o.MonthlyFeeCurrency = rates.Base
+		} else if fee > 0 && o.MonthlyFeeCurrency == "" && n.Currency != "" {
 			o.MonthlyFeeCurrency = n.Currency
 		}
 	}

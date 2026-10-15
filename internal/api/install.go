@@ -38,7 +38,18 @@ import (
 //go:embed scripts/install.sh scripts/install.ps1
 var installScripts embed.FS
 
-var releaseNameRe = regexp.MustCompile(`^xb-probe-agent_[a-z0-9]+_(amd64|arm64|armv7|armv6|386|riscv64|mips|mipsle|ppc64le|s390x)(\.exe)?$`)
+// releaseNameRe 匹配可执行产物文件名，用来决定"哪些文件算发布文件、要算 SHA-256"。
+//
+// 三条必须同时满足的约束：
+//  1. 架构清单必须与 Makefile 的 PLATFORMS **对齐**（含裸 `arm`——freebsd/arm 在
+//     矩阵里）。曾经漏了 `arm`，于是 `xb-probe-agent_freebsd_arm` 被当成普通文件，
+//     SHA-256 一栏永远是 `-`（用户实测）。
+//  2. `SHA256SUMS*` 也要算：它是安装脚本验签的凭据，管理者需要能核对内容。
+//  3. 用 `[a-z0-9]+` 匹配 GOOS，故 `SHA256SUMS` 不会误撞到产物分支。
+var releaseNameRe = regexp.MustCompile(`^xb-probe-agent_[a-z0-9]+_(amd64|arm64|armv7|armv6|arm|386|riscv64|mips|mipsle|ppc64le|s390x)(\.exe)?$`)
+
+// sumsNameRe 匹配校验和文件（SHA256SUMS / SHA256SUMS.master / SHA256SUMS.minisig）。
+var sumsNameRe = regexp.MustCompile(`^SHA256SUMS(\.[a-z]+)*$`)
 
 // installAvailable 判断当前是否可以对外提供安装脚本与下载（12.8）。
 //   - off        → 关闭
@@ -296,6 +307,12 @@ func (h *Handler) handleInstallCommand(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 命令中参数一律加引号（S8）。
+	//
+	// 关于 sudo：命令里保留 `sudo`（大多数系统有），但**不再假设它一定存在**——
+	// 分步命令里补了一条针对 Alpine / LXC 精简镜像（常常连 sudo 都没装）的
+	// 替代路径。脚本自身的 root 检查也改成了按系统探测提权工具并给出对应指引
+	// （sudo / doas / su / 直接以 root 跑），所以即便是被直接执行的情况，
+	// 用户拿到的也是一句可照做的提示，而不是"command not found: sudo"。
 	q := `'` + code + `'`
 	commands := map[string]string{
 		"shell": fmt.Sprintf("curl -fsSL %s/install.sh | sudo sh -s -- --code %s", masterURL, q),
@@ -306,6 +323,7 @@ func (h *Handler) handleInstallCommand(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("curl -fsSLo install.sh %s/install.sh", masterURL),
 			"less install.sh",
 			fmt.Sprintf("sudo sh install.sh --code %s", q),
+			"# 若系统没有 sudo（Alpine / LXC 精简镜像常见）：先 su - 切到 root，再执行 sh install.sh --code " + q,
 		}, "\n"),
 	}
 	if spki != "" {
@@ -388,17 +406,25 @@ func (h *Handler) handleAgentReleases(w http.ResponseWriter, r *http.Request) {
 			if releaseNameRe.MatchString(name) {
 				info.SHA256 = fileSHA256(filepath.Join(h.DistDir, e.Name(), name))
 				found[platformKey(name)] = true
+			} else if sumsNameRe.MatchString(name) {
+				// 校验和文件本身也要给出哈希：管理员核对"安装脚本拿到的那份
+				// SHA256SUMS 是不是这个"时，唯一的办法就是自己算一遍再比对。
+				info.SHA256 = fileSHA256(filepath.Join(h.DistDir, e.Name(), name))
 			}
 			rel.Files = append(rel.Files, info)
 		}
 		releases = append(releases, rel)
 	}
 
-	// 提示缺失的平台（12.6）
+	// 提示缺失的平台（12.6）。
+	// 这份清单必须与 Makefile 的 PLATFORMS 逐项对齐（13 Agent 平台，无 darwin——
+	// 采集器只有 linux/windows/freebsd，见 Makefile 注释）。曾经它多列了 darwin、
+	// 少了 windows/386、freebsd/386、freebsd/arm，于是页面常年误报"缺失 darwin"，
+	// 而真正没发布的 freebsd/arm 反而没人提醒。
 	expected := []string{
 		"linux_amd64", "linux_arm64", "linux_armv7", "linux_armv6", "linux_386", "linux_riscv64",
-		"darwin_amd64", "darwin_arm64", "freebsd_amd64", "freebsd_arm64",
-		"windows_amd64", "windows_arm64",
+		"windows_amd64", "windows_386", "windows_arm64",
+		"freebsd_amd64", "freebsd_arm64", "freebsd_386", "freebsd_arm",
 	}
 	var missing []string
 	for _, p := range expected {

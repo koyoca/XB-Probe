@@ -444,11 +444,17 @@ pre.code {
   border-bottom: 1px solid var(--line);
   padding-bottom: 6px;
 }
-.settings-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); align-items: start; }
+.settings-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); align-items: start; }
 .settings-grid label { margin: 0; min-width: 0; }
+/* .lbl 是设置项的标题行。
+   min-height 曾经是 36px（≈两行）——那会让**每一行**标签都占两行高，短标签
+   （如"站点标题"）下面留一片空白，而长标签（"后台入口地址（公开看板的
+   「管理后台」按钮指向这里）"）仍要折行，整块看着又松又乱（用户反馈
+   "有些字本来是一行的，却占用了两行"）。
+   现在改成按内容自适应：单行标签就是单行，长标签自然折行。 */
 .settings-grid .lbl {
-  display: block; min-height: 36px; line-height: 1.4;
-  overflow: hidden;
+  display: block; line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
 /* ---------- 站内模态框 ----------
@@ -910,3 +916,28 @@ canvas.chart { width: 100%; height: clamp(150px, 13vw, 230px); display: block; }
 .pager .page-pos { font-variant-numeric: tabular-nums; color: var(--muted); }
 /* 到底/到顶时按钮被禁用，光标要跟着变，否则会被当成"点了没反应"。 */
 .pager button:disabled { opacity: .45; cursor: not-allowed; }
+
+/* ---------- 安装命令与等待上线（节点详情） ----------
+   命令块可点击复制：用户此前要手动拖选 <pre> 里的长命令，引号/反斜杠很容易漏字符，
+   而漏一个字符的表现是"脚本报未知参数"。整块可点 + 独立按钮，把选中这一步省掉。 */
+.cmd-box { margin: 6px 0 0; }
+.cmd-box .cmd-text {
+  cursor: pointer; margin: 0;
+}
+.cmd-box .cmd-text:hover { border-color: var(--line-strong); }
+.cmd-actions { display: flex; gap: 8px; margin-top: 6px; }
+
+/* 等待节点上线的提示：数据在另一台机器上产生，本页不会自己变——
+   不给提示的话用户只能靠手动刷新确认（用户实测"屏幕往上滑点刷新才知道装好了"）。 */
+.wait-panel { border-style: dashed; }
+.wait-panel .wait-line { font-size: 13px; color: var(--fg); }
+/* 上线成功：用与恢复码面板同一套强调方式（描边 + 外圈光晕），
+   但语义色用 --ok，避免和"请注意保存"的警示混淆。 */
+.ok-panel { border-style: solid; }
+
+/* 遮蔽值（令牌/注册码的提示位）：默认 ***，点击才展开。
+   等宽字体让展开前后的字符宽度一致，不会让表格列跳动。 */
+.masked-val {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  letter-spacing: .08em; user-select: none;
+}

@@ -53,8 +53,27 @@ while [ $# -gt 0 ]; do
 done
 
 # 1) 检查 root
+#
+# 非 root 时**不直接拒绝**：先看有没有可用的提权工具（sudo / doas / su），
+# 有就说明怎么提权，没有（Alpine 容器、LXC 精简镜像里常常连 sudo 都没装）
+# 就明确告诉用户"以 root 身份重跑"。
+#
+# 为什么不在这里自动提权：脚本是从管道读进来的（curl | sh），无法可靠地
+# 重新读取自身来交给 sudo 执行；而且 stdin 已被管道占用，sudo 要口令时会直接失败。
+# 让用户自己决定用哪种方式提权，比脚本猜一个更可靠。
 if [ "$(id -u)" -ne 0 ]; then
-  echo "错误：请使用 root 或 sudo 执行。" >&2
+  echo "错误：需要 root 权限才能安装系统服务。" >&2
+  if command -v sudo >/dev/null 2>&1; then
+    echo "      请改用：sudo sh -c \"\$(curl -fsSL $MASTER_URL/install.sh)\" -- --code <注册码>" >&2
+    echo "      或先下载再执行：curl -fsSLo install.sh $MASTER_URL/install.sh && sudo sh install.sh --code <注册码>" >&2
+  elif command -v doas >/dev/null 2>&1; then
+    echo "      当前系统没有 sudo，但有 doas：doas sh install.sh --code <注册码>" >&2
+  elif command -v su >/dev/null 2>&1; then
+    echo "      当前系统没有 sudo（常见于 Alpine / LXC 精简镜像）。请先切到 root：" >&2
+    echo "      su - 然后重新执行本脚本；或直接以 root 登录后执行。" >&2
+  else
+    echo "      请以 root 身份重新执行本脚本。" >&2
+  fi
   exit 1
 fi
 

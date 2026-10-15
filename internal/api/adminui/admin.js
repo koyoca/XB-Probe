@@ -414,12 +414,25 @@
   var AUDIT_ACTION = {
     'node.create': '创建节点', 'node.update': '更新节点', 'node.delete': '删除节点',
     'node.archive': '归档节点',
+    'node.deregister': '节点注销（Agent 主动）',
+    // 后端早就在记这几个动作，但表里缺中文 → 审计日志里孤零零一行英文键，
+    // 管理员看不懂那是什么操作（用户反馈"有些字体是英文"）。
+    'admin.create': '创建管理员账户',
+    'admin.reset_password': '重置管理员密码',
+    'alert_channel.create': '创建告警渠道', 'alert_channel.update': '更新告警渠道',
+    'alert_rules.update': '更新告警规则',
+    'install_command.create': '生成安装命令',
+    'maintenance.audit_retention': '修改审计日志保留期',
     'target.create': '创建探测目标', 'target.update': '更新探测目标', 'target.delete': '删除探测目标',
     'channel.create': '创建告警渠道', 'channel.update': '更新告警渠道', 'channel.delete': '删除告警渠道',
     'rule.create': '创建告警规则', 'rule.update': '更新告警规则', 'rule.delete': '删除告警规则',
     'settings.update': '更新系统设置', 'billing.update': '更新计费信息',
     'billing.renew': '续费', 'traffic.override': '矫正本周期已用流量',
-    'auth.login': '登录', 'auth.logout': '登出', 'auth.password': '修改密码',
+    'auth.login': '登录', 'auth.logout': '登出',
+    // 后端记的是 auth.password_change（改密码）与 auth.reauth_fail（二次确认失败）。
+    // 这两个键曾经在表里写作 auth.password / 缺失，于是审计日志里显示英文原文。
+    'auth.password_change': '修改密码', 'auth.password': '修改密码',
+    'auth.reauth_fail': '二次确认失败（密码或动态码错误）',
     'auth.login_fail': '登录失败',
     'auth.totp_enable': '启用 TOTP',
     'auth.totp_disable': '关闭 TOTP',
@@ -444,10 +457,35 @@
   // 不必改动已落库的历史记录。
   var AUDIT_ENTITY = {
     node: '节点', target: '探测目标', channel: '告警渠道', rule: '告警规则',
+    alert_channel: '告警渠道', alert_rules: '告警规则',
     token: 'Agent 令牌', enroll_code: '注册码', release: '发布文件',
     settings: '系统设置', billing: '节点计费', theme: '主题',
-    auth: '账号', maintenance: '数据库'
+    auth: '账号', maintenance: '数据库', admin: '管理员账户',
+    install_command: '安装命令', traffic: '流量'
   };
+
+  // ALERT_LEVEL 把告警事件的 level 翻成中文。
+  // 之前表格直接打印 e.level，于是事件列表里满屏英文 warn / info（用户反馈）。
+  var ALERT_LEVEL = { info: '提示', warn: '警告', critical: '严重', error: '错误' };
+
+  // alertMessageText 把服务端拼的消息正文里的英文枚举换成中文。
+  //
+  // 服务端的格式是 `LEVEL | 节点名 | kind | 详情`（见 alert.BuildMessage，
+  // 它是给**渠道推送**用的——Telegram/邮件那些地方要的是紧凑单行文本，
+  // 不宜带中文标签）。后台表格里另有两个独立列分别显示类型与级别，
+  // 正文里再出现一遍英文枚举就成了同一行内的中英混排。
+  //
+  // 只替换开头那两个字段（级别、kind），详情部分原样保留：详情是
+  // 人类可读的中文句子（"已离线（超过 90 秒无上报）"），不该被改写。
+  // 认不出的形式（没有 ` | ` 分段）就原样返回，不猜。
+  function alertMessageText(e) {
+    var msg = e && e.message ? String(e.message) : '';
+    var parts = msg.split(' | ');
+    if (parts.length < 4) return msg;
+    var lv = ALERT_LEVEL[String(parts[0]).toLowerCase()] || parts[0];
+    var kind = (e && e.kind_label) ? e.kind_label : parts[2];
+    return lv + ' | ' + parts[1] + ' | ' + kind + ' | ' + parts.slice(3).join(' | ');
+  }
 
   function auditTargetText(action, target) {
     var raw = target == null ? '' : String(target).trim();
@@ -891,6 +929,9 @@
   var nodeTabSig = '';
   var nodeSearch = '';
   var nodePollTimer = null;
+  // 等待节点上线的短轮询（见 startEnrollWatch）：换节点/离开详情页时清掉，
+  // 否则会留着一条永不停歇的定时器对着旧 id 打请求。
+  var enrollWatchTimer = null;
   var spark = [];
 
   var FILTER_ALL = '\u0000all';
@@ -1419,6 +1460,8 @@
       // 换节点时清掉上一个节点的折线开关与缓存，避免串台。
       state.latToggles = {};
       adminLatItems = null;
+      // 上一个节点若还在"等待上线"，先停掉它的轮询（换到新节点后旧 id 不该再被探测）。
+      stopEnrollWatch();
       $('node-title').textContent = n.name + ' (#' + n.id + ')';
       clear(body);
       body.appendChild(renderNodeRuntimeCard(n));
@@ -1602,6 +1645,121 @@
     void holder;
   }
 
+  // copyText 把文本复制到剪贴板，失败时降级为选中文本。
+  //
+  // 剪贴板 API 只在安全上下文（https / localhost）可用——纯 HTTP 的内网部署
+  // 会走到降级分支。降级必须**真的把内容选中**并提示手动复制，
+  // 直接报"复制失败"会让用户以为这个按钮是坏的。
+  function copyText(text, elToSelect) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () { toast('已复制'); },
+        function () { selectTextOf(elToSelect); });
+      return;
+    }
+    selectTextOf(elToSelect);
+  }
+
+  function selectTextOf(node) {
+    if (!node) { toast('请手动选中后复制', true); return; }
+    try {
+      var range = document.createRange();
+      range.selectNodeContents(node);
+      var sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      toast('已选中，请按 Ctrl+C / ⌘C 复制');
+    } catch (e) {
+      toast('请手动选中后复制', true);
+    }
+  }
+
+  // copyableCommand 渲染一条可点击复制的安装命令。
+  //
+  // 之前命令只是 <pre> 文本，用户得手动拖选（命令里有引号/反斜杠时很容易漏字符，
+  // 而漏一个字符的表现是"脚本报未知参数"）。整块可点 + 明确的复制按钮，
+  // 把"选中"这一步也省掉。
+  function copyableCommand(cmd) {
+    var box = el('div', 'cmd-box');
+    var pre = el('pre', 'code cmd-text', cmd);
+    pre.title = '点击复制';
+    box.appendChild(pre);
+    var bar = el('div', 'cmd-actions');
+    bar.appendChild(btn('复制命令', 'ghost mini', function () {
+      copyText(cmd, pre);
+    }));
+    box.appendChild(bar);
+    pre.addEventListener('click', function () { copyText(cmd, pre); });
+    return box;
+  }
+
+  // startEnrollWatch 在生成安装命令之后开始"等节点上线"。
+  //
+  // 为什么需要它：命令是给用户在**另一台机器**上执行的，装完后的第一帧
+  // （节点首次上报）会落在服务端的运行态里——但详情页是一次性渲染的快照，
+  // 不刷新就永远显示"从未上报"。用户实测："复制命令安装完 agent 后并没有
+  // 任何提示，需要把屏幕往上滑点刷新才知道安装成功"。
+  //
+  // 做法：短轮询 /nodes/{id}/runtime，直到出现首次上报（或超时 10 分钟）。
+  // 只用轻量的 runtime 接口，不重绘整个详情页——重绘会把用户滚到的位置
+  // 和已展开的表单状态一起冲掉。
+  function startEnrollWatch(id) {
+    stopEnrollWatch();
+    var box = $('inst-wait');
+    if (!box) return;
+    clear(box);
+    var panel = el('div', 'inline-panel wait-panel');
+    panel.appendChild(el('div', 'wait-line',
+      '正在等待节点上线…装完后本页会自动提示，无需刷新。'));
+    var hint = el('p', 'muted note',
+      '节点首次上报通常需要十几秒。若长时间没有动静，可用下面的分步命令在节点上查看安装日志。');
+    panel.appendChild(hint);
+    box.appendChild(panel);
+
+    var started = Date.now();
+    var tick = 0;
+    enrollWatchTimer = setInterval(function () {
+      tick++;
+      // 10 分钟没等到就停：再等下去只会让页面留着一条永远不动的提示。
+      if (Date.now() - started > 10 * 60 * 1000) {
+        stopEnrollWatch();
+        var b = $('inst-wait');
+        if (b) {
+          clear(b);
+          b.appendChild(el('p', 'muted note',
+            '仍未检测到节点上报。请确认安装命令已在节点上执行完成（脚本结束时会打印结果）。'));
+        }
+        return;
+      }
+      // 只在节点详情视图可见时探测，切走了就别空转。
+      var view = $('view-node');
+      if (view && view.hidden) return;
+      api('/nodes/' + id + '/runtime').then(function (rt) {
+        if (!rt || !rt.last_seen) return;
+        stopEnrollWatch();
+        var b2 = $('inst-wait');
+        if (b2) {
+          clear(b2);
+          var okPanel = el('div', 'inline-panel ok-panel');
+          okPanel.appendChild(el('div', 'wait-line', '节点已上线，安装成功。'));
+          okPanel.appendChild(el('p', 'muted note',
+            '首次上报时间：' + fmtTime(rt.last_seen)));
+          b2.appendChild(okPanel);
+        }
+        toast('节点已上线，安装成功');
+        // 运行态卡片也顺手刷一次，让"实时状态"立刻有内容。
+        loadNodeDetail(id);
+      }).catch(function () { /* 忽略：下一轮再试 */ });
+    }, 3000);
+    void tick;
+  }
+
+  function stopEnrollWatch() {
+    if (enrollWatchTimer) {
+      clearInterval(enrollWatchTimer);
+      enrollWatchTimer = null;
+    }
+  }
+
   function renderNodeManage(n) {
     var wrap = el('div');
     wrap.appendChild(el('h2', null, '编辑与运维'));
@@ -1693,14 +1851,22 @@
     cLabel.appendChild(cSel);
     panel.appendChild(cLabel);
 
-    var vis = el('label', 'full');
+    // 「在公开看板显示」是单行勾选项，必须占满整行并让勾选框与文字水平对齐。
+    //
+    // 这里曾经只是 `el('label', 'full')`：全局 `label { display: block }` 让
+    // 复选框与文字各自成行、行高被撑成两行（用户反馈"勾选表单占一行、
+    // '在公开看板显示'占一行"）。改用已有的 label.check 样式
+    // （inline-flex + align-items: center），并把整块包进一个占整行的容器。
+    var visWrap = el('div', 'full');
+    var vis = el('label', 'check');
     var chk = el('input');
     chk.type = 'checkbox';
     chk.id = 'n-visible';
     chk.checked = !!n.public_visible;
     vis.appendChild(chk);
-    vis.appendChild(document.createTextNode(' 在公开看板显示'));
-    panel.appendChild(vis);
+    vis.appendChild(document.createTextNode('在公开看板显示'));
+    visWrap.appendChild(vis);
+    panel.appendChild(visWrap);
 
     // 探测失败重点监控：勾上的目标在本节点失败即告警（含 ICMP 无权限这类被全局
     // 「探测连续失败」规则刻意忽略的错误——容器/LXC 节点正是因此「报错却从不告警」）。
@@ -1771,6 +1937,9 @@
     var irow = el('div', 'row');
     var plat = el('select');
     plat.id = 'inst-platform';
+    // 选择哪个平台就只出哪条命令（曾经是"不管选什么都把四条全渲染出来"，
+    // 用户得自己在一堆输出里挑——既是噪声，也容易把 powershell 那条
+    // 复制到 Linux 上执行）。
     [['shell', 'Linux / macOS / FreeBSD'], ['wget', '无 curl 环境'], ['powershell', 'Windows PowerShell'], ['step_by_step', '分步命令（先审查再执行）']]
       .forEach(function (p) {
         var o = el('option', null, p[1]);
@@ -1785,31 +1954,40 @@
           var box = $('inst-out');
           clear(box);
           box.appendChild(el('div', 'muted', '注册码：' + r.code + '，过期时间 ' + fmtTime(r.expires_at)));
-          ['shell', 'wget', 'powershell', 'step_by_step'].forEach(function (k) {
-            if (!r.commands[k]) return;
-            box.appendChild(el('div', 'muted', k));
-            box.appendChild(el('pre', 'code', r.commands[k]));
-          });
+          // 只渲染所选平台那一条（服务端仍会返回全量，便于以后做"全部平台"视图）。
+          var want = plat.value;
+          var cmd = r.commands && r.commands[want];
+          if (cmd) {
+            box.appendChild(copyableCommand(cmd));
+          } else {
+            box.appendChild(el('div', 'muted', '未能生成该平台的命令'));
+          }
           // 生成命令即签发了一个新注册码，下方列表同步刷新，
           // 否则"刚签发的码"在面板里要等到下次打开详情才出现。
           loadEnrollCodes(n.id);
+          startEnrollWatch(n.id);
         });
     }));
     inst.appendChild(irow);
     var out = el('div');
     out.id = 'inst-out';
     inst.appendChild(out);
+    // 等待节点上线的提示区：命令生成后在这里显示"正在等待节点上报……"，
+    // 一旦该节点首次上报成功就翻成成功卡片（见 startEnrollWatch）。
+    var wait = el('div');
+    wait.id = 'inst-wait';
+    inst.appendChild(wait);
     wrap.appendChild(inst);
 
     // 令牌
     var tok = el('div', 'panel');
-    tok.appendChild(el('h3', null, '令牌（仅显示前 6 位）'));
+    tok.appendChild(el('h3', null, '令牌（默认打码，点击可查看提示位）'));
     var twrap = el('div', 'table-wrap');
     var t = el('table');
     t.id = 'tokens-table';
     var thead = el('thead');
     var htr = el('tr');
-    ['ID', '提示', '创建时间', '最后使用', '最后来源 IP', '状态', '操作'].forEach(function (x) { htr.appendChild(el('th', null, x)); });
+    ['ID', '令牌', '创建时间', '最后使用', '最后来源 IP', '状态', '操作'].forEach(function (x) { htr.appendChild(el('th', null, x)); });
     thead.appendChild(htr);
     t.appendChild(thead);
     var tb = el('tbody');
@@ -1820,13 +1998,13 @@
     // 注册码：一次性、短时有效。曾经"签发即失踪"——对话框一关就无处可查，
     // 管理员手里是否还有效码、401 是因为用过还是过期，全都无从判断。
     // 现在与令牌同面板展示（前 6 位提示 + 状态由服务端按时钟算好）。
-    tok.appendChild(el('h3', null, '注册码（一次性，仅显示前 6 位）'));
+    tok.appendChild(el('h3', null, '注册码（一次性；默认打码，点击可查看提示位）'));
     var cwrap = el('div', 'table-wrap');
     var ct = el('table');
     ct.id = 'codes-table';
     var cthead = el('thead');
     var chtr = el('tr');
-    ['提示', '签发时间', '有效期至', '状态'].forEach(function (x) { chtr.appendChild(el('th', null, x)); });
+    ['注册码', '签发时间', '有效期至', '状态'].forEach(function (x) { chtr.appendChild(el('th', null, x)); });
     cthead.appendChild(chtr);
     ct.appendChild(cthead);
     var ctb = el('tbody');
@@ -1879,6 +2057,28 @@
     });
   }
 
+  // maskedHint 渲染"默认打码、点击才显示"的敏感短值（令牌/注册码提示）。
+  //
+  // 为什么默认打码：节点详情常被共享屏幕/截图，令牌前 6 位加上签发时间足以
+  // 让旁观者认出"这是哪一把令牌"，而管理员自己并不需要它常驻可见。
+  //
+  // 只能揭示**提示位**（前 6 位）：服务端只存哈希，完整令牌在签发那一刻
+  // 显示过一次就再也取不回来了（与恢复码同一口径）。所以这里不能假装
+  // 能给出完整值——点击后用 title 把这件事说清楚。
+  function maskedHint(hint, label) {
+    var masked = '***';
+    var full = (hint || '') + '…';
+    var sp = el('span', 'masked-val', masked);
+    sp.title = '点击查看' + label + '提示（完整值在签发时只显示一次，服务端只存哈希，无法再次取回）';
+    sp.style.cursor = 'pointer';
+    var shown = false;
+    sp.addEventListener('click', function () {
+      shown = !shown;
+      sp.textContent = shown ? full : masked;
+    });
+    return sp;
+  }
+
   function loadTokens(id) {
     api('/nodes/' + id + '/tokens').then(function (list) {
       var tb = $('tokens-tbody');
@@ -1887,7 +2087,9 @@
       (list || []).forEach(function (t) {
         var tr = el('tr');
         tr.appendChild(td(t.id));
-        tr.appendChild(td(t.hint + '…'));
+        var hintTd = el('td');
+        hintTd.appendChild(maskedHint(t.hint, '令牌'));
+        tr.appendChild(hintTd);
         tr.appendChild(td(fmtTime(t.created_at)));
         tr.appendChild(td(t.last_used_at ? ago(t.last_used_at) : '未使用'));
         tr.appendChild(td(t.last_ip || '-'));
@@ -1922,7 +2124,13 @@
       clear(tb);
       (list || []).forEach(function (c) {
         var tr = el('tr');
-        tr.appendChild(td(c.hint ? c.hint + '…' : '—'));
+        var codeTd = el('td');
+        if (c.hint) {
+          codeTd.appendChild(maskedHint(c.hint, '注册码'));
+        } else {
+          codeTd.appendChild(el('span', 'muted', '—'));
+        }
+        tr.appendChild(codeTd);
         tr.appendChild(td(fmtTime(c.created_at)));
         tr.appendChild(td(fmtTime(c.expires_at)));
         tr.appendChild(td(c.status === 'used' ? '已使用'
@@ -3969,8 +4177,14 @@
         // kind_label 由服务端出（见 alert.KindLabel）：`expire:30` → "到期提醒（剩余 ≤ 30 天）"。
         // 没拿到就退回原始键——显示一个看不懂的键，也好过显示一格空白。
         tr.appendChild(td(e.kind_label || e.kind));
-        tr.appendChild(td(e.level));
-        tr.appendChild(td(e.message, 'wrap'));
+        // level 是英文枚举（info/warn/…），翻成中文；认不出就原样显示。
+        var lv = td(ALERT_LEVEL[e.level] || e.level);
+        lv.title = '原始级别：' + e.level;
+        tr.appendChild(lv);
+        // 消息正文由服务端 BuildMessage 拼成 `LEVEL | 节点 | kind | 详情`（英文枚举）。
+        // 表格已有独立的"类型/级别"两列，这里把原文里的英文枚举换成中文，
+        // 与那两列保持同一套词，避免同一行里中英文混排（用户反馈"告警事件中的信息有些是英文"）。
+        tr.appendChild(td(alertMessageText(e), 'wrap'));
         tr.appendChild(td(e.delivered ? '是' : '否'));
         tb.appendChild(tr);
       });
@@ -4089,12 +4303,28 @@
       '最多保留多少份备份，超出的自动删除最旧的一份。' +
       '手动「立即备份」同样受这个上限约束，否则连点几次就能把备份盘塞满。' +
       '下限为 1：不允许配成"一份都不保留"。'],
+    'billing.base_currency': ['主币种（月费合计以它计价，如 CNY）', 'text',
+      '留空 = 不换算：月费合计直接累加各节点的原值，币种取第一个有月支出的节点' +
+      '（升级前的行为）。填了主币种（三位字母，ISO 4217）之后：' +
+      '每个节点的月均费用先按下方汇率换算成主币种，再累加，合计币种恒为主币种。' +
+      '公开看板与后台的「月费合计」共用这一份口径，改完立即生效、无需重启。'],
+    'billing.rates': ['汇率表（每项：币种:数值；数值 = 1 单位该币种折合多少主币种）', 'text',
+      '逗号分隔，例如主币种是 CNY 时填 USD:7,JPY:0.05（1 USD = 7 CNY）。' +
+      '主币种自己不用填（恒为 1）。没有配汇率的币种按原值计入，不会被乘上一个编造的倍率。' +
+      '币种代码三位字母、数值必须大于 0。'],
+    // 审计日志保留期（天）。它同时由**审计日志页**的专用面板管理（那里带
+    // 密码/动态码二次确认、改完立即清理一次）；这里给出同一份可读标签，
+    // 免得该键被改过一次之后在设置页里以英文键名形式冒出来（用户反馈"改为中文"）。
+    'audit.retention_days': ['审计日志保留天数（1-3650）', 'number',
+      '审计日志超过这个天数的记录会被自动清理（每小时一次），也可在审计页点「立即清理」。' +
+      '修改本项与审计页的「保存保留期」是同一个值：审计页那条会额外要求密码（TOTP 开启时' +
+      '再加动态码）并立即清理一次。保留期越长，能追溯的历史操作越多，但库也越大。'],
     'inject.head': ['自定义 <head> 注入（支持 <meta>/<link>/<style>，不含脚本）', 'text'],
     'inject.body_end': ['页尾 </body> 前注入（0/1 开关开启后才会插入，可含 <script>）', 'text'],
     'inject.script_enabled': ['页尾脚本注入', 'select:0=关闭,1=开启',
       '开启后 /inject.body_end 里的 <script> 才会真正插入页面并执行，同时 CSP 会为该脚本下发 nonce。只在你完全信任脚本来源时开启。'],
     'theme.active': null,
-    'public.fields': null
+    'public.fields': null,
   };
 
   // 设置项分组：把原来一字排开的 20+ 个输入按语义拆成几组，
@@ -4109,7 +4339,8 @@
       'agent.ip_whitelist_enabled', 'agent.ip_whitelist']],
     ['安装与下载', ['install.mode', 'install.master_url', 'install.dist_base', 'install.agent_version', 'install.code_ttl_min', 'install.max_enroll_codes', 'install.spki_sha256', 'install.pubkey']],
     ['CDN 与来源 IP', ['cdn.enabled', 'cdn.ranges']],
-    ['备份', ['backup.enabled', 'backup.hour', 'backup.keep']],
+    ['备份', ['backup.enabled', 'backup.hour', 'backup.keep', 'audit.retention_days']],
+    ['多币种（月费合计）', ['billing.base_currency', 'billing.rates']],
     ['脚本注入', ['inject.script_enabled', 'inject.head', 'inject.body_end']],
     ['外部与高级', ['heartbeat_url', 'node.custom_countries']]
   ];
@@ -4776,27 +5007,45 @@
     box.appendChild(panel);
   }
 
+  // openTOTPDisable 关闭两步验证。
+  //
+  // 用站内 askDialog 而不是原生 window.prompt：原生弹窗不可样式化、深色主题下刺眼，
+  // 且一次只能问一个问题——"密码 + 动态码"要连弹两次，中途还看不到第二个框在等什么
+  // （用户实测报"弹出的是原始弹窗"）。askDialog 的 auth 形态一次收齐两项，
+  // 并复用统一的按钮/校验/焦点动作。
   function openTOTPDisable() {
-    var pw = window.prompt('关闭两步验证会降低账户安全性。\n请输入当前密码以确认：');
-    if (pw === null) return;
-    var code = window.prompt('请输入认证器 App 里的 6 位动态码，或一个未使用的恢复码：');
-    if (code === null) return;
-    api('/account/totp/disable', {
-      method: 'POST', body: { password: pw, code: code }
-    }).then(function () {
-      toast('已关闭两步验证');
-      loadTOTP();
-    }).catch(function (e) { toast(e.message, true); });
+    askDialog({
+      title: '关闭两步验证',
+      desc: '关闭会降低账户安全性：此后登录只需密码。请输入当前密码'
+        + (state.totpEnabled ? '与动态验证码（或一个未使用的恢复码）' : '') + '以确认。',
+      okText: '关闭两步验证',
+      auth: true
+    }).then(function (r) {
+      if (!r.ok) return;
+      api('/account/totp/disable', {
+        method: 'POST', body: { password: r.password, code: r.code || '' }
+      }).then(function () {
+        toast('已关闭两步验证');
+        loadTOTP();
+      }).catch(function (e) { toast(e.message, true); });
+    });
   }
 
+  // openRecoveryRegen 重新生成恢复码：同样走站内对话框（只需密码，故不传 auth 之外的东西）。
   function openRecoveryRegen() {
-    var pw = window.prompt('重新生成会立即作废全部现有恢复码。\n请输入当前密码以确认：');
-    if (pw === null) return;
-    api('/account/recovery-codes', {
-      method: 'POST', body: { password: pw }
-    }).then(function (res) {
-      showRecoveryCodes(res.recovery_code);
-    }).catch(function (e) { toast(e.message, true); });
+    askDialog({
+      title: '重新生成恢复码',
+      desc: '重新生成会立即作废全部现有恢复码，请确认后输入当前密码。',
+      okText: '重新生成',
+      auth: true
+    }).then(function (r) {
+      if (!r.ok) return;
+      api('/account/recovery-codes', {
+        method: 'POST', body: { password: r.password }
+      }).then(function (res) {
+        showRecoveryCodes(res.recovery_code);
+      }).catch(function (e) { toast(e.message, true); });
+    });
   }
 
   function loadStorage() {

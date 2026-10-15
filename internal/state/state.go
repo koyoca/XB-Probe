@@ -491,6 +491,14 @@ type Snapshot struct {
 type Snapshotter struct {
 	registry *Registry
 
+	// rates 返回当前生效的多币种汇率表。为 nil 时表示不换算
+	// （等价于零值 model.Rates{}，与升级前行为一致）。
+	//
+	// 做成"每次 Refresh 现取"而不是启动时拍快照：管理员在后台改完主币种/
+	// 汇率，看板的月费合计必须立刻跟着变——与 InstallMode 等运行时钩子同一口径。
+	// 拍快照的话要重启才生效，而"改完没反应"正是本项目反复踩过的那类故障。
+	rates func() model.Rates
+
 	mu   sync.RWMutex
 	last *Snapshot
 }
@@ -498,6 +506,19 @@ type Snapshotter struct {
 // NewSnapshotter 创建快照器。
 func NewSnapshotter(reg *Registry) *Snapshotter {
 	return &Snapshotter{registry: reg}
+}
+
+// SetRatesProvider 注入多币种汇率来源（见字段 rates 的说明）。
+func (s *Snapshotter) SetRatesProvider(f func() model.Rates) {
+	s.rates = f
+}
+
+// currentRates 取当前汇率表；未注入时返回零值（不换算）。
+func (s *Snapshotter) currentRates() model.Rates {
+	if s.rates == nil {
+		return model.Rates{}
+	}
+	return s.rates()
 }
 
 // lessNode 是节点展示顺序的唯一比较函数：先按管理员指定的 SortOrder，
@@ -535,7 +556,7 @@ func (s *Snapshotter) Refresh(at time.Time) {
 	// 注入点一旦漏设，快照会静默变成空的，线上表现为"看板一个节点都没有"，
 	// 且没有任何报错。少一个可忘记的接线就少一类这种故障。
 	snap := &Snapshot{GeneratedAt: at}
-	snap.Overview = BuildPublicOverview(visible, at)
+	snap.Overview = BuildPublicOverview(visible, at, s.currentRates())
 	snap.Nodes = make([]model.PublicNode, 0, len(visible))
 	for _, n := range visible {
 		snap.Nodes = append(snap.Nodes, BuildPublicNode(n, at, false))
