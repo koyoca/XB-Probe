@@ -16,13 +16,15 @@ import (
 // 只存在于 scheduler 的几行代码里。这里把它翻译成中文，**由服务端出**，
 // 前端只管显示 —— 两边各写一份映射必然在加档位时漏掉一处。
 var kindLabels = map[string]string{
-	KindOffline:   "离线",
-	KindCPU:       "CPU 越阈值",
-	KindMem:       "内存越阈值",
-	KindDisk:      "磁盘越阈值",
-	KindTraffic:   "流量梯级",
-	KindExpire:    "到期提醒",
-	KindProbeFail: "探测连续失败",
+	KindOffline:        "离线",
+	KindOnline:         "节点上线",
+	KindCPU:            "CPU 越阈值",
+	KindMem:            "内存越阈值",
+	KindDisk:           "磁盘越阈值",
+	KindTraffic:        "流量梯级",
+	KindExpire:         "到期提醒",
+	KindProbeFail:      "探测连续失败",
+	KindAuditRetention: "审计保留期变更",
 }
 
 // KindLabel 返回状态键的中文说明。

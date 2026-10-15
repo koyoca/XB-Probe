@@ -95,7 +95,7 @@ install 参数：
   --spki-sha256 <指纹>    固定 Master 公钥指纹（自签证书场景，可重复）
   --public-ip-url <URL>   公网地址探测服务（如 https://api.ipify.org）。默认关闭。
                           显式传空串（--public-ip-url ""）可关掉已配置的探测。
-  --force                已安装时重新注册并换取新令牌
+  --force                已安装时强制重新注册并换取新令牌（也可直接重跑时附带 --code 换令牌）
   --insecure-http        仅本机回环开发场景放行 http://
 
   关于 --public-ip-url：Master 与 Agent 同机部署时，Master 看到的来源地址是
@@ -236,11 +236,15 @@ func cmdInstall(args []string, version string) int {
 		fmt.Fprintln(os.Stderr, "错误：", err)
 		return 1
 	}
+	// 先尝试读取已安装配置——下面幂等分支与重注册分支都要用到它。
+	cur, curErr := agentconfig.Load(cfgPath)
 
-	// 幂等：已安装且未指定 --force 时只替换二进制并重启服务（12.3）。
+	// 幂等：已安装、未给 --force、也未给 --code 时，只重装服务、复用旧令牌（12.3）。
+	// 给了 --code 就必须用注册码换新令牌（哪怕没给 --force）：否则用户换了注册码重跑
+	// 安装命令，旧令牌若已被吊销就永远 token_revoked 注册不上（#249）。
 	// 只想重写服务定义、连 --master/--code 都不想给时，用 --service-only（等价且更明确）。
-	if cur, err := agentconfig.Load(cfgPath); err == nil && !*force {
-		fmt.Println("检测到已安装配置，仅重装系统服务（不换令牌；如需换令牌请加 --force）。")
+	if curErr == nil && !*force && *code == "" {
+		fmt.Println("检测到已安装配置，仅重装系统服务（不换令牌；如需换令牌请用 --force，或重跑时附带 --code）。")
 		// 显式给了 --public-ip-url 就落到本地配置里：这条路径是**唯一**能让
 		// 已经装好的节点打开公网地址探测的办法（否则只能手工改 agent.yaml）。
 		// 没给就一个字都不动 —— 这个开关的语义是"我明确要设置它"，
@@ -301,7 +305,14 @@ func cmdInstall(args []string, version string) int {
 		SPKISHA256:     spki,
 		InsecureHTTP:   *insecureHTTP,
 		ServiceManager: service.Detect().Name(),
-		PublicIPURL:    strings.TrimSpace(*publicIPURL),
+	}
+	// 保留已安装节点的本地设置（公网地址探测等）：显式给了 --public-ip-url 才覆盖，
+	// 没给就沿袭旧配置——否则重注册会把用户设过的 public_ip_url 清掉（#249）。
+	if publicIPGiven {
+		cfg.PublicIPURL = strings.TrimSpace(*publicIPURL)
+	} else if cur != nil {
+		cfg.PublicIPURL = cur.PublicIPURL
+		cfg.PublicIPIntervalS = cur.PublicIPIntervalS
 	}
 	cfg.ApplyServerConfig(resp.Config)
 

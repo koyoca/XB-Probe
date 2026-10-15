@@ -29,7 +29,10 @@
     // 延迟图例的折线开关（target_id -> 是否显示；缺省 true）。
     latToggles: {},
     // 节点详情页「历史曲线」当前标签：resources / latency
-    nodeHistoryTab: 'resources'
+    nodeHistoryTab: 'resources',
+    // 是否已启用 TOTP：决定二次确认对话框要不要显示"动态验证码/恢复码"输入框。
+    // 登录后由 GET /maintenance/totp 填充（见 refreshTotpStatus）。
+    totpEnabled: false
   };
 
   // -------------------------------------------------------------------------
@@ -429,7 +432,9 @@
     'theme.set': '切换主题', 'maintenance.backup': '手动备份数据库',
     'maintenance.backup_auto': '自动备份数据库',
     'maintenance.backup_prune': '清理过期备份',
-    'maintenance.backup_delete': '删除备份文件'
+    'maintenance.backup_delete': '删除备份文件',
+    'maintenance.backup_restore': '从备份恢复数据库',
+    'maintenance.data_purge': '清理历史时序数据'
   };
 
   // AUDIT_ENTITY 把动作前缀映射到被操作对象的中文类型名。
@@ -582,8 +587,34 @@
     // 结果展示型（只读）：没有可取消的东西，收起"取消"按钮免得两个按钮都像出口。
     $('ask-cancel').hidden = !!opts.hideCancel;
 
+    // 可选勾选项（如"删除节点时是否连历史一起删"）：默认隐藏，只有传了 checkbox 才显示。
+    var cw = $('ask-check-wrap');
+    if (opts.checkbox) {
+      cw.hidden = false;
+      $('ask-check').checked = !!opts.checkbox.checked;
+      setText($('ask-check-label'), opts.checkbox.label || '');
+    } else {
+      cw.hidden = true;
+    }
+
+    // 二次确认输入区（密码 + 动态码）：仅破坏性维护操作（删/恢复备份、清数据）才显示。
+    var aw = $('ask-auth-wrap');
+    if (opts.auth) {
+      aw.hidden = false;
+      var pw = $('ask-password');
+      pw.value = '';
+      pw.disabled = false;
+      // 仅当已启用 TOTP 时才要动态码；没启用就不必多要一个填不出来的框。
+      var codeWrap = $('ask-code-wrap');
+      codeWrap.hidden = !state.totpEnabled;
+      $('ask-code').value = '';
+    } else {
+      aw.hidden = true;
+    }
+
     $('ask-modal').hidden = false;
-    if ($('ask-ok').focus) $('ask-ok').focus();
+    if (opts.auth) { if ($('ask-password').focus) $('ask-password').focus(); }
+    else if ($('ask-ok').focus) $('ask-ok').focus();
 
     return new Promise(function (resolve) { askResolve = resolve; });
   }
@@ -591,9 +622,17 @@
   function closeAskDialog(result) {
     $('ask-modal').hidden = true;
     setText($('ask-value'), ''); // 凭据不留 DOM
+    // 密码/动态码是敏感输入，关对话时一并清空，绝不能留在 DOM 里等下一双眼睛。
+    if ($('ask-password')) $('ask-password').value = '';
+    if ($('ask-code')) $('ask-code').value = '';
     var r = askResolve;
     askResolve = null;
-    if (r) r(!!result);
+    // 有勾选项时把勾选状态一并带回；没有则退化为纯布尔，保持旧调用点不变。
+    var checked = !$('ask-check-wrap').hidden ? $('ask-check').checked : undefined;
+    // 需要二次确认时带回密码与动态码（没启用 TOTP 时 code 为空串）。
+    var password = !$('ask-auth-wrap').hidden ? $('ask-password').value : undefined;
+    var code = (!$('ask-auth-wrap').hidden && !$('ask-code-wrap').hidden) ? $('ask-code').value : undefined;
+    if (r) r({ ok: !!result, checked: checked, password: password, code: code });
   }
 
   $('ask-ok').addEventListener('click', function () { closeAskDialog(true); });
@@ -705,6 +744,8 @@
       showView('nodes');
       loadNodes();
       startNodePoll();
+      // 拉取 TOTP 启用状态：决定后续删除/恢复/清数据等二次确认要不要动态码输入框。
+      refreshTotpStatus();
       // 后台顶部标题随站点设置同步，登录后即拉取一次。
       api('/settings').then(applySiteTitle).catch(function () { });
       // 目标名映射：晚了最多显示成"目标 #N"，不阻塞首屏。
@@ -791,10 +832,10 @@
     // 管理员也可能直接用 #/targets 落进来，节点视图从未打开过。
     targets: function () { ensureNodes(); loadTargets(); },
     alerts: function () { loadChannels(); loadRules(); loadEvents(); },
-    settings: function () { loadSettings(); loadThemes(); loadStorage(); loadHeartbeat(); loadBackups(); },
+    settings: function () { loadSettings(); loadThemes(); loadStorage(); loadHeartbeat(); loadBackups(); refreshTotpStatus(); },
     account: function () { loadTOTP(); },
     releases: function () { loadReleases(); },
-    audit: function () { loadAudit(); }
+    audit: function () { loadAuditRetention(); loadAudit(); }
   };
 
   var currentView = 'nodes'; // 当前视图名：深浅切换后按它重跑 loader 重画图表
@@ -1327,15 +1368,28 @@
   });
 
   function archiveNode(id) {
-    if (!confirm('归档节点 #' + id + '？归档后停止告警与离线计时，历史数据保留。')) return;
-    guard(api('/nodes/' + id + '/archive', { method: 'POST' }), '已归档').then(loadNodes);
+    askDialog({
+      title: '归档节点 #' + id,
+      desc: '归档后停止告警与离线计时，历史数据保留。',
+      okText: '归档'
+    }).then(function (r) {
+      if (!r.ok) return;
+      guard(api('/nodes/' + id + '/archive', { method: 'POST' }), '已归档').then(loadNodes);
+    });
   }
 
   function deleteNode(id, name) {
-    var purge = confirm('删除节点「' + (name || id) + '」并同时清除其历史时序数据？\n\n确定 = 连历史一起删（不可恢复）\n取消 = 仅删除节点记录（保留历史）');
-    var url = '/nodes/' + id + '?purge=' + (purge ? 'true' : 'false');
-    if (!confirm('最后确认：删除节点 #' + id + '？')) return;
-    guard(api(url, { method: 'DELETE' }), '已删除').then(loadNodes);
+    askDialog({
+      title: '删除节点 #' + id,
+      desc: '删除节点「' + (name || id) + '」。',
+      checkbox: { label: '同时删除历史时序数据（不可恢复）', checked: false },
+      extra: '不勾则仅删除节点记录、保留历史。此操作不可撤销。',
+      okText: '删除'
+    }).then(function (r) {
+      if (!r.ok) return;
+      var url = '/nodes/' + id + '?purge=' + (r.checked ? 'true' : 'false');
+      guard(api(url, { method: 'DELETE' }), '已删除').then(loadNodes);
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -1806,7 +1860,7 @@
       extra: '在你到节点上执行命令之前，节点仍用旧令牌正常上报。',
       okText: '签发注册码'
     }).then(function (ok) {
-      if (!ok) return;
+      if (!ok.ok) return;
       guard(api('/nodes/' + id + '/enroll-codes', { method: 'POST' })).then(function (r) {
         if (!r) return;
         askDialog({
@@ -1838,9 +1892,15 @@
         var ops = el('td');
         if (!t.revoked) {
           ops.appendChild(btn('吊销', 'ghost mini danger', function () {
-            if (!confirm('吊销令牌 #' + t.id + '？该节点后续请求立即返回 403。')) return;
-            guard(api('/nodes/' + id + '/tokens/' + t.id, { method: 'DELETE' }), '已吊销')
-              .then(function () { loadTokens(id); });
+            askDialog({
+              title: '吊销令牌 #' + t.id,
+              desc: '吊销后该节点后续请求立即返回 403，需重新注册才能恢复上报。',
+              okText: '吊销'
+            }).then(function (r) {
+              if (!r.ok) return;
+              guard(api('/nodes/' + id + '/tokens/' + t.id, { method: 'DELETE' }), '已吊销')
+                .then(function () { loadTokens(id); });
+            });
           }));
         }
         tr.appendChild(ops);
@@ -2985,7 +3045,12 @@
     // 完整请求窗口上。
     if (axisWin && axisWin.tMin != null) {
       tMin = Math.min(tMin, axisWin.tMin);
-      tMax = Math.max(tMax, axisWin.tMax != null ? axisWin.tMax : tMax);
+      // 右边界：数据终点离"现在"够近（≤120s）就钉到数据终点，避免右侧留出
+      // 一段空白（数据总是略滞后于浏览器 now，否则曲线最右端永远差一截）；
+      // 数据明显落后于窗口（新节点、短保留期、刚启用的目标）才退回到窗口
+      // 终点，以保证日期类刻度仍为自然边界（与下方 timeTicks 对齐）。
+      var winMax = axisWin.tMax != null ? axisWin.tMax : tMax;
+      tMax = (tMax >= winMax - 120) ? tMax : winMax;
     }
     if (tMax <= tMin) tMax = tMin + 1;
     var span = tMax - tMin;
@@ -3365,8 +3430,14 @@
         ops.appendChild(btn('编辑', 'ghost mini', function () { openTargetEditor(t); }));
         ops.appendChild(document.createTextNode(' '));
         ops.appendChild(btn('删除', 'ghost mini danger', function () {
-          if (!confirm('删除目标 #' + t.id + '？其历史延迟数据将一并清除。')) return;
-          guard(api('/probe-targets/' + t.id, { method: 'DELETE' }), '已删除').then(loadTargets);
+          askDialog({
+            title: '删除目标 #' + t.id,
+            desc: '删除后其历史延迟数据将一并清除。',
+            okText: '删除'
+          }).then(function (r) {
+            if (!r.ok) return;
+            guard(api('/probe-targets/' + t.id, { method: 'DELETE' }), '已删除').then(loadTargets);
+          });
         }));
         tr.appendChild(ops);
         tb.appendChild(tr);
@@ -3421,9 +3492,15 @@
             }));
             ops.appendChild(document.createTextNode(' '));
             ops.appendChild(btn('删除', 'ghost mini danger', function () {
-              if (!confirm('删除目标 #' + x.id + '？其历史延迟数据将一并清除。')) return;
-              guard(api('/probe-targets/' + x.id, { method: 'DELETE' }), '已删除')
-                .then(function () { reloadAfterTargetChange(id); });
+              askDialog({
+                title: '删除目标 #' + x.id,
+                desc: '删除后其历史延迟数据将一并清除。',
+                okText: '删除'
+              }).then(function (r) {
+                if (!r.ok) return;
+                guard(api('/probe-targets/' + x.id, { method: 'DELETE' }), '已删除')
+                  .then(function () { reloadAfterTargetChange(id); });
+              });
             }));
           } else {
             // 全局目标影响所有节点，编辑入口收口在「探测目标」页，避免两处改同一份数据。
@@ -3659,8 +3736,14 @@
         }));
         ops.appendChild(document.createTextNode(' '));
         ops.appendChild(btn('删除', 'ghost mini danger', function () {
-          if (!confirm('删除渠道「' + c.name + '」？')) return;
-          guard(api('/alert-channels/' + c.id, { method: 'DELETE' }), '已删除').then(loadChannels);
+          askDialog({
+            title: '删除渠道「' + c.name + '」',
+            desc: '删除后该渠道不再接收任何告警通知。',
+            okText: '删除'
+          }).then(function (r) {
+            if (!r.ok) return;
+            guard(api('/alert-channels/' + c.id, { method: 'DELETE' }), '已删除').then(loadChannels);
+          });
         }));
         tr.appendChild(ops);
         tb.appendChild(tr);
@@ -4181,6 +4264,15 @@
     return label;
   }
 
+  // refreshTotpStatus 拉取当前账户的 TOTP 启用状态，写入 state.totpEnabled。
+  // 二次确认对话框据此决定要不要显示"动态验证码/恢复码"输入框：
+  // 没启用 TOTP 的管理员强行要一个动态码，等于把这个破坏性操作彻底锁死。
+  function refreshTotpStatus() {
+    api('/maintenance/totp').then(function (r) {
+      state.totpEnabled = !!(r && r.enabled);
+    }).catch(function () { state.totpEnabled = false; });
+  }
+
   function loadSettings() {
     // 卡片目录与当前值一起取：目录来自后端、值来自库，两者缺一都渲染不出勾选组。
     // 目录取不到时降级为空数组（勾选组只剩"全部展示"开关），不阻断整个设置页。
@@ -4285,7 +4377,15 @@
     var name = $('theme-select').value;
     var t = state.themeList.filter(function (x) { return x.name === name; })[0];
     if (t && !t.builtin) {
-      if (!confirm('切换到外部主题「' + name + '」？\n\n第三方主题与页面同源运行，等同于可信代码，可能读取管理会话。请确认你信任该主题。')) return;
+      var goApply = function () {
+        guard(api('/themes/active', { method: 'PUT', body: { name: name } }), '主题已切换，立即生效');
+      };
+      askDialog({
+        title: '切换到外部主题「' + name + '」',
+        desc: '第三方主题与页面同源运行，等同于可信代码，可能读取管理会话。请确认你信任该主题。',
+        okText: '切换'
+      }).then(function (r) { if (r.ok) goApply(); });
+      return;
     }
     guard(api('/themes/active', { method: 'PUT', body: { name: name } }), '主题已切换，立即生效');
   });
@@ -4419,17 +4519,39 @@
         tsTd.title = b.path;
         tr.appendChild(tsTd);
         tr.appendChild(el('td', null, fmtBytes(b.size_bytes)));
-        // 删除单份备份。刻意不做"一键清空全部"：备份是最后一道退路，
-        // 想整体控制占用应当调小「备份保留份数」让轮转去做（它自带
-        // keep<=0 的保护），而不是给一个点错就无法挽回的全清按钮。
+        // 操作列：恢复 + 删除，二者都需密码（TOTP 开启时再加动态码）二次确认。
+        // 刻意不做"一键清空全部"：备份是最后一道退路，想整体控制占用应当
+        // 调小「备份保留份数」让轮转去做（它自带 keep<=0 的保护）。
         var actTd = el('td');
+        // 从备份恢复：最高危操作，用备份**覆盖当前整个库**，不可撤销。
+        actTd.appendChild(btn('恢复', 'ghost mini', function () {
+          askDialog({
+            title: '从备份恢复「' + b.name + '」',
+            desc: '将用这份备份**覆盖当前整个数据库**（节点、令牌、设置、告警、历史数据等），' +
+              '操作不可撤销，且会把数据回退到备份时刻的状态。当前登录会话会被保留。\n确定要继续吗？',
+            okText: '恢复备份',
+            auth: true
+          }).then(function (res) {
+            if (!res.ok) return;
+            guard(api('/maintenance/backups/' + encodeURIComponent(b.name) + '/restore', {
+              method: 'POST', body: { password: res.password, code: res.code || '' }
+            }), '已从备份「' + b.name + '」恢复').then(function () { loadBackups(); });
+          });
+        }));
         actTd.appendChild(btn('删除', 'ghost danger mini', function () {
-          if (!confirm('删除备份「' + b.name + '」？\n\n' + fmtBytes(b.size_bytes) +
-            ' 会被直接从磁盘删掉，不可恢复。\n' +
-            '（若只是想控制占用，调小设置项「备份保留份数」让轮转自动清理更稳妥。）')) return;
-          guard(api('/maintenance/backups/' + encodeURIComponent(b.name), { method: 'DELETE' }),
-            '已删除备份「' + b.name + '」')
-            .then(function () { loadBackups(); });
+          askDialog({
+            title: '删除备份「' + b.name + '」',
+            desc: fmtBytes(b.size_bytes) + ' 会被直接从磁盘删掉，不可恢复。\n' +
+              '若只是想控制占用，调小设置项「备份保留份数」让轮转自动清理更稳妥。',
+            okText: '删除备份',
+            auth: true
+          }).then(function (res) {
+            if (!res.ok) return;
+            guard(api('/maintenance/backups/' + encodeURIComponent(b.name), {
+              method: 'DELETE', body: { password: res.password, code: res.code || '' }
+            }), '已删除备份「' + b.name + '」')
+              .then(function () { loadBackups(); });
+          });
         }));
         tr.appendChild(actTd);
         tb.appendChild(tr);
@@ -4706,6 +4828,59 @@
       t.appendChild(tb);
       wrap.appendChild(t);
       box.appendChild(wrap);
+
+      // 清理历史时序数据（不可恢复）：删掉早于 cutoff 的全部遥测流水，缓解库膨胀。
+      // 只动遥测流水，节点/令牌/设置等实体不动；需要密码（TOTP 开启时再加动态码）二次确认。
+      var purge = el('div', 'panel');
+      purge.appendChild(el('h3', null, '清理历史数据'));
+      purge.appendChild(el('p', 'muted note',
+        '删除节点更早的时序遥测（CPU/内存/流量/延迟等），不可恢复。节点、令牌、设置等实体不受影响。'));
+      var pf = el('div', 'row');
+      var daysInput = el('input');
+      daysInput.type = 'number'; daysInput.min = '1'; daysInput.value = '90';
+      daysInput.style.width = '90px';
+      var daysLab = el('label', null, '保留最近 ');
+      daysLab.appendChild(daysInput);
+      daysLab.appendChild(document.createTextNode(' 天'));
+      var dateInput = el('input');
+      dateInput.type = 'date';
+      var dateLab = el('label', null, '或删除 ');
+      dateLab.appendChild(dateInput);
+      dateLab.appendChild(document.createTextNode(' 之前的数据'));
+      pf.appendChild(daysLab);
+      pf.appendChild(dateLab);
+      purge.appendChild(pf);
+      purge.appendChild(btn('清理历史数据', 'ghost danger', function () {
+        var days = parseInt(daysInput.value, 10);
+        var beforeDate = dateInput.value;
+        var body = {};
+        if (beforeDate) body.before_date = beforeDate;
+        else if (days > 0) body.days = days;
+        else { toast('请填写保留天数或截止日期', true); return; }
+        askDialog({
+          title: '清理历史时序数据',
+          desc: beforeDate
+            ? ('将删除 ' + beforeDate + ' 之前（不含当天）的全部遥测数据，不可恢复。')
+            : ('将删除最近 ' + days + ' 天之前（即保留最近 ' + days + ' 天）的全部遥测数据，不可恢复。'),
+          okText: '清理数据',
+          auth: true
+        }).then(function (res) {
+          if (!res.ok) return;
+          body.password = res.password;
+          body.code = res.code || '';
+          guard(api('/maintenance/storage/purge', { method: 'POST', body: body }), null)
+            .then(function (out) {
+              if (out && out.deleted) {
+                var parts = Object.keys(out.deleted).map(function (k) {
+                  return k + ' ' + (out.deleted[k] || 0).toLocaleString('zh-CN');
+                });
+                toast('已清理 ' + (out.total || 0).toLocaleString('zh-CN') + ' 行（' + parts.join('、') + '）');
+              }
+              loadStorage();
+            });
+        });
+      }));
+      box.appendChild(purge);
     }).catch(function (e) { toast(e.message, true); });
   }
 
@@ -4730,12 +4905,27 @@
       }
       rels.forEach(function (rel) {
         var card = el('div', 'panel');
-        card.appendChild(el('h3', null, '版本 ' + rel.version));
+        var head = el('div', 'panel-head');
+        head.appendChild(el('h3', null, '版本 ' + rel.version));
+        // 一键删除该版本的全部发布文件（不可恢复，只影响分发源）。
+        head.appendChild(btn('删除整个版本', 'ghost danger mini', function () {
+          askDialog({
+            title: '删除整个版本「' + rel.version + '」',
+            desc: '将删除该版本目录下的全部 Agent 发布文件（' + ((rel.files || []).length) + ' 个），不可恢复。\n' +
+              '注意：已下载到各节点的副本不会被回收，只是收回分发源。',
+            okText: '删除版本'
+          }).then(function (res) {
+            if (!res.ok) return;
+            guard(api('/agent-releases/' + encodeURIComponent(rel.version), { method: 'DELETE' }),
+              '已删除版本「' + rel.version + '」').then(function () { loadReleases(); });
+          });
+        }));
+        card.appendChild(head);
         var wrap = el('div', 'table-wrap');
         var t = el('table');
         var thead = el('thead');
         var htr = el('tr');
-        ['文件', '大小', 'SHA-256'].forEach(function (x) { htr.appendChild(el('th', null, x)); });
+        ['文件', '大小', 'SHA-256', '操作'].forEach(function (x) { htr.appendChild(el('th', null, x)); });
         thead.appendChild(htr);
         t.appendChild(thead);
         var tb = el('tbody');
@@ -4744,6 +4934,19 @@
           tr.appendChild(td(f.name));
           tr.appendChild(td(fmtBytes(f.size)));
           tr.appendChild(td(f.sha256 || '-', 'wrap'));
+          var actTd = td();
+          actTd.appendChild(btn('删除', 'ghost danger mini', function () {
+            askDialog({
+              title: '删除文件「' + f.name + '」',
+              desc: '版本 ' + rel.version + ' 的 ' + f.name + ' 将被删除，不可恢复。',
+              okText: '删除文件'
+            }).then(function (res) {
+              if (!res.ok) return;
+              guard(api('/agent-releases/' + encodeURIComponent(rel.version) + '/' + encodeURIComponent(f.name), { method: 'DELETE' }),
+                '已删除文件「' + f.name + '」').then(function () { loadReleases(); });
+            });
+          }));
+          tr.appendChild(actTd);
           tb.appendChild(tr);
         });
         t.appendChild(tb);
@@ -4761,6 +4964,67 @@
   }
 
   $('btn-refresh-releases').addEventListener('click', loadReleases);
+
+  // 审计日志保留期面板（6.5）。保留期决定"多久前的审计记录会被自动清理"，
+  // 直接关系到能否追溯历史操作，因此修改/立即清理都要密码（TOTP 开启再加动态码）二次确认。
+  function loadAuditRetention() {
+    var box = $('audit-retention-box');
+    clear(box);
+    // 从审计日志分页响应里拿 retention_days 与 total（省一个往返）。
+    api('/audit-log?limit=1&offset=0').then(function (res) {
+      var days = res.retention_days || 30;
+      clear(box);
+      var head = el('div', 'panel-head');
+      head.appendChild(el('h3', null, '审计日志保留'));
+      head.appendChild(el('span', 'muted', '当前 ' + (res.total || 0).toLocaleString('zh-CN') + ' 条记录'));
+      box.appendChild(head);
+      box.appendChild(el('p', 'muted note',
+        '默认保留 30 天，超期的记录会被自动清理。修改保留期会立刻按新值清理一次，' +
+        '并（在告警页开启"审计保留期变更"时）发一条告警。'));
+      var row = el('div', 'row');
+      var inp = el('input');
+      inp.type = 'number'; inp.min = '1'; inp.max = '3650'; inp.value = String(days);
+      inp.style.width = '110px';
+      var lab = el('label', null, '保留最近 ');
+      lab.appendChild(inp);
+      lab.appendChild(document.createTextNode(' 天'));
+      row.appendChild(lab);
+      row.appendChild(btn('保存保留期', 'ghost', function () {
+        var d = parseInt(inp.value, 10);
+        if (!(d >= 1 && d <= 3650)) { toast('保留天数须为 1~3650 的整数', true); return; }
+        askDialog({
+          title: '修改审计日志保留期',
+          desc: '将保留期改为 ' + d + ' 天，并立即清理 ' + d + ' 天之前的记录（不可恢复）。' +
+            (state.totpEnabled ? '请输入密码与动态验证码。' : '请输入管理员密码。'),
+          okText: '保存',
+          auth: true
+        }).then(function (r) {
+          if (!r.ok) return;
+          guard(api('/maintenance/audit/retention', {
+            method: 'PUT', body: { days: d, password: r.password, code: r.code || '' }
+          }), '保留期已改为 ' + d + ' 天').then(function () { loadAuditRetention(); loadAudit(); });
+        });
+      }));
+      row.appendChild(btn('立即清理', 'ghost danger', function () {
+        askDialog({
+          title: '立即清理审计日志',
+          desc: '将按当前保留期（' + days + ' 天）清理一次超期记录，不可恢复。' +
+            (state.totpEnabled ? '请输入密码与动态验证码。' : '请输入管理员密码。'),
+          okText: '清理',
+          auth: true
+        }).then(function (r) {
+          if (!r.ok) return;
+          guard(api('/maintenance/audit/prune', {
+            method: 'POST', body: { password: r.password, code: r.code || '' }
+          }), null).then(function (out) {
+            if (out) toast('已清理 ' + (out.deleted || 0).toLocaleString('zh-CN') + ' 条超期记录');
+            loadAuditRetention(); loadAudit();
+          });
+        });
+      }));
+      box.appendChild(row);
+    }).catch(function (e) { toast(e.message, true); });
+  }
 
   function loadAudit() {
     var st = pages.audit;

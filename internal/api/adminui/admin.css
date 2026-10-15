@@ -252,6 +252,12 @@ label > input, label > select, label > textarea { display: block; width: 100%; m
    编辑/计费这类多字段表单则用 .form-grid 铺满并分列。 */
 .panel.form-sm { max-width: 620px; }
 
+/* 重点监控勾选区：复选框与目标同属一组，用流式网格排布，
+   让多个目标在同一行内换行而不是每个独占一行，压低整块高度（#250）。 */
+.checkbox-list { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-top: 8px; }
+label.check { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; margin: 0; }
+label.check input { width: auto; margin: 0; }
+
 /* .form-grid：多字段编辑表单的列布局。
    -------------------------------------------------------------------------
    这些 label 以前是纵向逐个堆叠在一个 max-width:720px 的窄条里，
@@ -464,6 +470,17 @@ pre.code {
 .modal-card > .muted { margin: 0 0 14px; font-size: 12px; line-height: 1.5; }
 .modal-card .form-grid > label { margin-bottom: 10px; }
 .modal-card .row { margin-top: 4px; }
+/* 发布文件版本卡片的标题行：版本号与"删除整个版本"按钮两端对齐。 */
+.panel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
+.panel-head > h3 { margin: 0; }
+/* 二次确认的密码 / 动态码输入：纵向排列，与对话框整体风格一致。 */
+.modal-card #ask-auth-wrap { margin: 0 0 14px; display: flex; flex-direction: column; gap: 10px; }
+.modal-card #ask-auth-wrap .field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+.modal-card #ask-auth-wrap .field > input {
+  margin: 0; width: 100%; box-sizing: border-box;
+  background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
+  padding: 8px 10px; color: var(--text); font-size: 14px;
+}
 /* 复选框字段：label 是纵向 flex，勾选框不该被 input{width:100%} 拉长 */
 .check-row { display: flex; align-items: center; gap: 8px; font-size: 13px; }
 .check-row > input { width: auto; margin: 0; }

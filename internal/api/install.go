@@ -437,6 +437,85 @@ func fileSHA256(path string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// handleDeleteReleaseFile 删除某版本下的单个发布文件（12.6）。
+//
+// 发布文件被 Agent 的 updater 拉取后就散布到各节点了，删这里只是收回"分发源"、
+// 不回收已下载的副本——这点和删除备份不同，所以这里不需要二次确认密码，
+// 但仍要做路径穿越防护（复用 safeDistPath）。删完若版本目录变空则一并移除，
+// 免得后台留一张没文件的版本卡片。
+func (h *Handler) handleDeleteReleaseFile(w http.ResponseWriter, r *http.Request) {
+	version := r.PathValue("version")
+	file := r.PathValue("file")
+	if version == "" || file == "" {
+		writeErr(w, http.StatusBadRequest, model.ErrInvalidParam, "版本与文件名必填")
+		return
+	}
+	target, err := safeDistPath(h.DistDir, filepath.Join(filepath.FromSlash(version), filepath.FromSlash(file)))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, model.ErrInvalidParam, "非法的文件路径")
+		return
+	}
+	info, err := os.Lstat(target)
+	if err != nil {
+		if os.IsNotExist(err) {
+			writeErr(w, http.StatusNotFound, model.ErrNotFound, "文件不存在")
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, model.ErrInternal, "读取文件失败")
+		return
+	}
+	if info.IsDir() {
+		writeErr(w, http.StatusBadRequest, model.ErrInvalidParam, "不能删除目录")
+		return
+	}
+	if err := os.Remove(target); err != nil {
+		writeErr(w, http.StatusInternalServerError, model.ErrInternal, err.Error())
+		return
+	}
+	_ = h.Repo.Audit(time.Now().Unix(), actorOf(r), "release.delete", version+"/"+file, RealIP(r))
+	// 版本目录若已空，删掉它，避免后台残留空版本卡片。
+	if ents, err := os.ReadDir(filepath.Join(h.DistDir, filepath.FromSlash(version))); err == nil && len(ents) == 0 {
+		_ = os.Remove(filepath.Join(h.DistDir, filepath.FromSlash(version)))
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleDeleteReleaseVersion 删除整个版本目录（一键清空某版本的全部 Agent 文件）。
+//
+// 只允许删 DistDir 下的直接子目录（版本目录），safeDistPath 已保证不越级删别的路径。
+// 这是不可逆操作，但只影响分发源，前台用确认对话框拦一道误触即可。
+func (h *Handler) handleDeleteReleaseVersion(w http.ResponseWriter, r *http.Request) {
+	version := r.PathValue("version")
+	if version == "" {
+		writeErr(w, http.StatusBadRequest, model.ErrInvalidParam, "版本必填")
+		return
+	}
+	target, err := safeDistPath(h.DistDir, filepath.FromSlash(version))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, model.ErrInvalidParam, "非法的版本路径")
+		return
+	}
+	info, err := os.Lstat(target)
+	if err != nil {
+		if os.IsNotExist(err) {
+			writeErr(w, http.StatusNotFound, model.ErrNotFound, "版本不存在")
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, model.ErrInternal, "读取失败")
+		return
+	}
+	if !info.IsDir() {
+		writeErr(w, http.StatusBadRequest, model.ErrInvalidParam, "不是版本目录")
+		return
+	}
+	if err := os.RemoveAll(target); err != nil {
+		writeErr(w, http.StatusInternalServerError, model.ErrInternal, err.Error())
+		return
+	}
+	_ = h.Repo.Audit(time.Now().Unix(), actorOf(r), "release.delete", version+"/", RealIP(r))
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // buildChannelByID 读取并解密渠道配置，构造可发送的渠道（9.4）。
 func (h *Handler) buildChannelByID(id int64) (alert.Channel, error) {
 	rows, err := h.Repo.ListChannels()

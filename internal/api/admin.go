@@ -153,6 +153,45 @@ func (h *Handler) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// reauth 校验"密码（始终）+ 动态码/恢复码（TOTP 开启时）"，用于保护破坏性维护操作
+// （删除/恢复备份、清理历史数据、修改审计保留期等）。
+//
+// 与登录侧共用同一套核验（auth.VerifyPassword + checkSecondFactor），但**不**创建会话、
+// 也不返回令牌——它只是"用当前已登录身份再核一次第二因子"，相当于一次轻量提权确认。
+// 成功返回 admin；失败已写错误响应并返回 nil。
+func (h *Handler) reauth(w http.ResponseWriter, r *http.Request) *store.Admin {
+	var req struct {
+		Password string `json:"password"`
+		Code     string `json:"code"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, model.ErrInvalidParam, "请求体解析失败")
+		return nil
+	}
+	s := adminFrom(r)
+	if s == nil {
+		writeErr(w, http.StatusUnauthorized, "unauthorized", "会话无效")
+		return nil
+	}
+	admin, err := h.Repo.GetAdminByID(s.AdminID)
+	if err != nil || admin == nil {
+		writeErr(w, http.StatusUnauthorized, "unauthorized", "会话无效")
+		return nil
+	}
+	if err := auth.VerifyPassword(req.Password, admin.PWHash); err != nil {
+		_ = h.Repo.RecordLoginFailure(admin.ID, 5, 15*60, time.Now().Unix())
+		_ = h.Repo.Audit(time.Now().Unix(), admin.Username, "auth.reauth_fail", "", RealIP(r))
+		writeErr(w, http.StatusUnauthorized, "unauthorized", "密码错误")
+		return nil
+	}
+	if len(admin.TOTPSecret) > 0 && !h.checkSecondFactor(admin, req.Code, time.Now()) {
+		_ = h.Repo.RecordLoginFailure(admin.ID, 5, 15*60, time.Now().Unix())
+		writeErr(w, http.StatusUnauthorized, "invalid_totp", "动态验证码或恢复码错误")
+		return nil
+	}
+	return admin
+}
+
 // ---------------------------------------------------------------------------
 // 节点
 // ---------------------------------------------------------------------------
@@ -1420,7 +1459,57 @@ func (h *Handler) handleAuditLog(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"items": rows, "limit": meta.Limit, "offset": meta.Offset, "total": meta.Total,
+		"retention_days": int(h.Repo.GetIntSetting("audit.retention_days", 30)),
 	})
+}
+
+// handleSetAuditRetention 修改审计日志保留期（6.5 补充）。
+//
+// 保留期决定了"多久之前的审计记录会被自动清理"，直接关系到能否追溯历史操作，
+// 因此**必须密码（TOTP 开启时再加动态码）二次确认**——这与删除/恢复备份同一口径。
+// 若"审计保留期变更"告警规则处于启用状态，每次修改都会发一条告警（见告警页开关）。
+func (h *Handler) handleSetAuditRetention(w http.ResponseWriter, r *http.Request) {
+	admin := h.reauth(w, r)
+	if admin == nil {
+		return
+	}
+	var req struct {
+		Days int `json:"days"`
+	}
+	if err := decodeJSON(r, &req); err != nil || req.Days < 1 || req.Days > 3650 {
+		writeErr(w, http.StatusBadRequest, model.ErrInvalidParam, "保留天数须为 1~3650 之间的整数")
+		return
+	}
+	if err := h.Repo.SetSetting("audit.retention_days", fmt.Sprint(req.Days), time.Now().Unix()); err != nil {
+		writeErr(w, http.StatusInternalServerError, model.ErrInternal, "保存失败")
+		return
+	}
+	_ = h.Repo.Audit(time.Now().Unix(), admin.Username, "settings.update",
+		"audit.retention_days="+fmt.Sprint(req.Days), RealIP(r))
+	// 规则被关闭时 Fire 直接返回 nil——这就是"告警页可开关"的落点。
+	if h.Alerts != nil {
+		_ = h.Alerts.Fire(r.Context(), 0, alert.KindAuditRetention, alert.KindAuditRetention,
+			alert.LevelInfo, fmt.Sprintf("审计日志保留期已改为 %d 天", req.Days), time.Now().Unix())
+	}
+	// 立刻按新保留期清理一次，让改动马上生效（否则最长要等下一小时的调度）。
+	_, _ = h.Repo.PruneAuditLog(time.Now().AddDate(0, 0, -req.Days).Unix())
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handlePruneAuditLog 立即按当前保留期清理一次审计日志（6.5 补充）。
+//
+// 与"改保留期"分开：管理员想马上回收空间、又不想改配置时用它。同样需二次确认。
+func (h *Handler) handlePruneAuditLog(w http.ResponseWriter, r *http.Request) {
+	if h.reauth(w, r) == nil {
+		return
+	}
+	days := int(h.Repo.GetIntSetting("audit.retention_days", 30))
+	n, err := h.Repo.PruneAuditLog(time.Now().AddDate(0, 0, -days).Unix())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, model.ErrInternal, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"deleted": n, "retention_days": days})
 }
 
 // handleBackup 手动触发一次备份（6.6）。
@@ -1489,6 +1578,10 @@ func (h *Handler) handleListBackups(w http.ResponseWriter, r *http.Request) {
 // 的形状校验（probe-YYYYMMDD-HHMMSS.db）。刻意不提供"清空全部备份"的接口——
 // 那应该通过调小 backup.keep 让轮转去做，多一道配置确认就少一次不可逆的误操作。
 func (h *Handler) handleDeleteBackup(w http.ResponseWriter, r *http.Request) {
+	// 删除备份属于不可逆操作，必须经过密码（TOTP 开启时再加动态码）二次确认。
+	if h.reauth(w, r) == nil {
+		return
+	}
 	name := r.PathValue("name")
 	if err := h.Repo.DeleteBackup(name); err != nil {
 		if errors.Is(err, store.ErrBackupNotFound) {
@@ -1507,6 +1600,84 @@ func (h *Handler) handleDeleteBackup(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = h.Repo.Audit(time.Now().Unix(), actorOf(r), "maintenance.backup_delete", name, RealIP(r))
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleRestoreBackup 用指定备份文件覆盖恢复当前库（6.6 补充）。
+//
+// 为什么需要它：备份如果只是"能生成"，却没有任何途径"用回去"，那它只是
+// 一份给人心理安慰的文件。灾难发生后才发现"原来没法恢复"是最坏的情况。
+// 但恢复是**最高危**的操作（一次点错就把库还原到过去某个时刻），所以这里
+// 强制密码 + 动态码二次确认，且在 store 层先校验备份完整性与版本一致性。
+func (h *Handler) handleRestoreBackup(w http.ResponseWriter, r *http.Request) {
+	admin := h.reauth(w, r)
+	if admin == nil {
+		return
+	}
+	name := r.PathValue("name")
+	if err := h.Repo.RestoreBackup(r.Context(), name); err != nil {
+		if errors.Is(err, store.ErrBackupNotFound) {
+			writeErr(w, http.StatusNotFound, model.ErrNotFound, "备份不存在（可能已被轮转删除）")
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, model.ErrInternal, err.Error())
+		return
+	}
+	_ = h.Repo.Audit(time.Now().Unix(), admin.Username, "maintenance.backup_restore", name, RealIP(r))
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handlePurgeData 清理早于指定时间的时序数据（6.6 补充）。
+//
+// 请求体：{"days": N} 或 {"before_date": "YYYY-MM-DD"}（二选一）。
+//   - days：保留最近 N 天，删除更早的全部遥测流水；
+//   - before_date：删除该日期之前（不含当天）的全部遥测流水。
+//
+// 这是不可逆的数据削减，同样需要密码 + 动态码二次确认。
+func (h *Handler) handlePurgeData(w http.ResponseWriter, r *http.Request) {
+	admin := h.reauth(w, r)
+	if admin == nil {
+		return
+	}
+	var req struct {
+		Days       int64  `json:"days"`
+		BeforeDate string `json:"before_date"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, model.ErrInvalidParam, "请求体解析失败")
+		return
+	}
+	now := time.Now().Unix()
+	var beforeTs int64
+	switch {
+	case req.BeforeDate != "":
+		t, err := time.Parse("2006-01-02", req.BeforeDate)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, model.ErrInvalidParam, "日期格式应为 YYYY-MM-DD")
+			return
+		}
+		beforeTs = t.Unix()
+	case req.Days > 0:
+		beforeTs = now - req.Days*86400
+	default:
+		writeErr(w, http.StatusBadRequest, model.ErrInvalidParam, "请指定保留天数(days)或截止日期(before_date)")
+		return
+	}
+	if beforeTs <= 0 || beforeTs >= now {
+		writeErr(w, http.StatusBadRequest, model.ErrInvalidParam, "截止时间无效（必须是一个过去的时间点）")
+		return
+	}
+	counts, err := h.Repo.PurgeOldData(beforeTs)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, model.ErrInternal, err.Error())
+		return
+	}
+	total := int64(0)
+	for _, c := range counts {
+		total += c
+	}
+	_ = h.Repo.Audit(time.Now().Unix(), admin.Username, "maintenance.data_purge",
+		fmt.Sprintf("before=%d total=%d", beforeTs, total), RealIP(r))
+	writeJSON(w, http.StatusOK, map[string]any{"deleted": counts, "total": total})
 }
 
 // handleHeartbeatStatus 返回外部心跳（A5）的当前状态。

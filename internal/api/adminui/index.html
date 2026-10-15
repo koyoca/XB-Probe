@@ -289,6 +289,7 @@
     <section id="view-audit" class="view" hidden>
       <div class="row"><h2>审计日志</h2><span class="spacer"></span>
         <button id="btn-refresh-audit" class="ghost">刷新</button></div>
+      <div id="audit-retention-box" class="panel"></div>
       <div class="table-wrap"><table id="audit-table">
         <thead><tr><th>时间</th><th>操作者</th><th>动作</th><th title="被操作实体的类型与 ID，例如 node:1 表示节点 #1">对象</th><th>来源 IP</th></tr></thead>
         <tbody></tbody>
@@ -363,6 +364,20 @@
       <button type="button" id="ask-copy" class="ghost">复制</button>
     </div>
     <p class="muted" id="ask-extra" hidden></p>
+    <label class="check" id="ask-check-wrap" hidden>
+      <input type="checkbox" id="ask-check">
+      <span id="ask-check-label"></span>
+    </label>
+    <div id="ask-auth-wrap" hidden>
+      <label class="field">
+        <span>管理员密码</span>
+        <input type="password" id="ask-password" autocomplete="current-password">
+      </label>
+      <label class="field" id="ask-code-wrap" hidden>
+        <span>动态验证码 / 恢复码</span>
+        <input type="text" id="ask-code" autocomplete="off" inputmode="text">
+      </label>
+    </div>
     <div class="row">
       <button type="button" id="ask-ok" class="primary">确定</button>
       <button type="button" id="ask-cancel" class="ghost">取消</button>

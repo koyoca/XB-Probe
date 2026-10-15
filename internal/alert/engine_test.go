@@ -151,8 +151,8 @@ func (c *recChannel) Send(_ context.Context, m Message) error {
 func TestDefaultRulesPinDocumentedDefaults(t *testing.T) {
 	rules := DefaultRules()
 
-	if len(rules) != 7 {
-		t.Fatalf("内置规则应为 7 条，得到 %d 条", len(rules))
+	if len(rules) != 9 {
+		t.Fatalf("内置规则应为 9 条，得到 %d 条", len(rules))
 	}
 
 	type want struct {
@@ -164,13 +164,15 @@ func TestDefaultRulesPinDocumentedDefaults(t *testing.T) {
 		cooldownS int
 	}
 	expect := map[string]want{
-		KindOffline:   {true, 0, 0, 3, nil, 3600},
-		KindCPU:       {true, 9000, 300, 0, nil, 3600},
-		KindMem:       {true, 9000, 300, 0, nil, 3600},
-		KindDisk:      {true, 9000, 300, 0, nil, 3600},
-		KindTraffic:   {true, 0, 0, 0, []int{80, 95, 100}, 21600},
-		KindExpire:    {true, 0, 0, 0, nil, 86400},
-		KindProbeFail: {true, 0, 0, 3, nil, 3600},
+		KindOffline:        {true, 0, 0, 3, nil, 3600},
+		KindOnline:         {true, 0, 0, 0, nil, 3600},
+		KindCPU:            {true, 9000, 300, 0, nil, 3600},
+		KindMem:            {true, 9000, 300, 0, nil, 3600},
+		KindDisk:           {true, 9000, 300, 0, nil, 3600},
+		KindTraffic:        {true, 0, 0, 0, []int{80, 95, 100}, 21600},
+		KindExpire:         {true, 0, 0, 0, nil, 86400},
+		KindProbeFail:      {true, 0, 0, 3, nil, 3600},
+		KindAuditRetention: {true, 0, 0, 0, nil, 0},
 	}
 
 	for kind, w := range expect {
@@ -214,7 +216,7 @@ func TestDefaultRulesReturnsIndependentCopy(t *testing.T) {
 	first[KindDisk] = Rule{Kind: KindDisk, Enabled: false}
 
 	second := DefaultRules()
-	if len(second) != 7 {
+	if len(second) != 9 {
 		t.Fatalf("删改一份不应影响下一次调用，得到 %d 条", len(second))
 	}
 	if !second[KindDisk].Enabled {
@@ -224,7 +226,7 @@ func TestDefaultRulesReturnsIndependentCopy(t *testing.T) {
 
 func TestNewFallsBackToDefaultRules(t *testing.T) {
 	e := New(nil, newFakeStore(), nil)
-	if len(e.rules) != 7 {
+	if len(e.rules) != 9 {
 		t.Fatalf("rules 为 nil 时应使用内置默认规则，得到 %d 条", len(e.rules))
 	}
 	// cpu 默认「持续 300 秒」：第一次命中还不能触发。

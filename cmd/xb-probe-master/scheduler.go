@@ -614,6 +614,10 @@ func (s *Scheduler) scanAlerts(ctx context.Context, now time.Time) {
 					if n.Status == model.StatusOffline {
 						_ = s.alerts.Recover(ctx, n.NodeID, alert.KindOffline, "恢复上报", nowUnix)
 					}
+					// 节点上线提醒：从离线/疑似离线恢复到在线时通知（新节点首次
+					// 上报也会走到这里，因为新建节点默认状态就是 offline）。
+					_ = s.alerts.Fire(ctx, n.NodeID, alert.KindOnline, alert.KindOnline,
+						alert.LevelInfo, "节点已上线（恢复上报）", nowUnix)
 					newStatus = model.StatusOnline
 				}
 				s.alerts.Clear(n.NodeID, alert.KindOffline)
@@ -996,11 +1000,14 @@ func (s *Scheduler) cleanup(now time.Time) {
 			s.log.Error("WAL 截断失败", "err", err.Error())
 		}
 	}
-	// 告警事件、审计日志、过期注册码保留 90 天（6.5 补充）
-	cutoff := now.AddDate(0, 0, -90).Unix()
-	_, _ = s.repo.DB().Write.Exec(`DELETE FROM alert_events WHERE created_at < ?`, cutoff)
-	_, _ = s.repo.DB().Write.Exec(`DELETE FROM audit_log WHERE ts < ?`, cutoff)
-	_, _ = s.repo.DB().Write.Exec(`DELETE FROM enroll_codes WHERE expires_at < ?`, cutoff)
+	// 告警事件保留 90 天（6.5）；审计日志保留期可配置（默认 30 天，可在后台修改）。
+	eventCutoff := now.AddDate(0, 0, -90).Unix()
+	_, _ = s.repo.DB().Write.Exec(`DELETE FROM alert_events WHERE created_at < ?`, eventCutoff)
+	auditDays := int(s.repo.GetIntSetting("audit.retention_days", 30))
+	if _, err := s.repo.PruneAuditLog(now.AddDate(0, 0, -auditDays).Unix()); err != nil {
+		s.log.Error("审计日志清理失败", "err", err.Error())
+	}
+	_, _ = s.repo.DB().Write.Exec(`DELETE FROM enroll_codes WHERE expires_at < ?`, eventCutoff)
 
 	// 每日自动备份（6.6）。放在 cleanup 里而不是单独开 ticker：
 	// 清理是每小时跑一次的既有节拍，备份按"日期去重"天然就是每日一次，

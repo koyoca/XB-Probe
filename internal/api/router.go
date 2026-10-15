@@ -226,6 +226,10 @@ func (h *Handler) AdminRoutes() http.Handler {
 	// 一键安装（12.2）
 	mux.HandleFunc("POST /api/admin/v1/nodes/{id}/install-command", h.requireAdmin(h.handleInstallCommand))
 	mux.HandleFunc("GET /api/admin/v1/agent-releases", h.requireAdmin(h.handleAgentReleases))
+	// 删除发布文件（12.6 补充）：删单文件或一键删某版本全部文件。只影响分发源，
+	// 不做二次确认密码，但仍经 safeDistPath 防路径穿越。
+	mux.HandleFunc("DELETE /api/admin/v1/agent-releases/{version}/{file}", h.requireAdmin(h.handleDeleteReleaseFile))
+	mux.HandleFunc("DELETE /api/admin/v1/agent-releases/{version}", h.requireAdmin(h.handleDeleteReleaseVersion))
 
 	// 计费
 	mux.HandleFunc("PUT /api/admin/v1/nodes/{id}/billing", h.requireAdmin(h.handlePutBilling))
@@ -260,11 +264,18 @@ func (h *Handler) AdminRoutes() http.Handler {
 	mux.HandleFunc("PUT /api/admin/v1/themes/active", h.requireAdmin(h.handleSetTheme))
 	mux.HandleFunc("GET /api/admin/v1/storage/stats", h.requireAdmin(h.handleStorageStats))
 	mux.HandleFunc("GET /api/admin/v1/audit-log", h.requireAdmin(h.handleAuditLog))
+	// 审计日志保留期（6.5）：默认 30 天，可改；改与立即清理都需二次确认密码。
+	mux.HandleFunc("PUT /api/admin/v1/maintenance/audit/retention", h.requireAdmin(h.handleSetAuditRetention))
+	mux.HandleFunc("POST /api/admin/v1/maintenance/audit/prune", h.requireAdmin(h.handlePruneAuditLog))
 	mux.HandleFunc("POST /api/admin/v1/maintenance/backup", h.requireAdmin(h.handleBackup))
 	mux.HandleFunc("GET /api/admin/v1/maintenance/backups", h.requireAdmin(h.handleListBackups))
 	// 删除单份备份：备份不许无限堆积（备份盘满往往是主库写不进去的前奏），
 	// 但也不能只依赖轮转——管理员需要能手动清掉某一份坏备份或占地方的大备份。
+	// 删除/恢复都经 reauth 强制密码（TOTP 开启时再加动态码）二次确认。
 	mux.HandleFunc("DELETE /api/admin/v1/maintenance/backups/{name}", h.requireAdmin(h.handleDeleteBackup))
+	mux.HandleFunc("POST /api/admin/v1/maintenance/backups/{name}/restore", h.requireAdmin(h.handleRestoreBackup))
+	// 清理历史时序数据（不可逆）：删早于 cutoff 的全部遥测流水，同样需要二次确认。
+	mux.HandleFunc("POST /api/admin/v1/maintenance/storage/purge", h.requireAdmin(h.handlePurgeData))
 	mux.HandleFunc("GET /api/admin/v1/maintenance/heartbeat", h.requireAdmin(h.handleHeartbeatStatus))
 
 	// TLS / 证书运行态（只读回显，见 tls_status.go）。

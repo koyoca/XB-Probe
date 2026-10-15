@@ -1830,7 +1830,12 @@
     // 终点取 max(数据终点, 窗口终点)。
     if (axisWin && axisWin.tMin != null) {
       tMin = Math.min(tMin, axisWin.tMin);
-      tMax = Math.max(tMax, axisWin.tMax != null ? axisWin.tMax : tMax);
+      // 右边界：数据终点离"现在"够近（≤120s）就钉到数据终点，避免右侧留出
+      // 一段空白（数据总是略滞后于浏览器 now，否则曲线最右端永远差一截）；
+      // 数据明显落后于窗口（新节点、短保留期、刚启用的目标）才退回到窗口
+      // 终点，以保证日期类刻度仍为自然边界（与下方 timeTicks 对齐）。
+      var winMax = axisWin.tMax != null ? axisWin.tMax : tMax;
+      tMax = (tMax >= winMax - 120) ? tMax : winMax;
     }
     if (tMax <= tMin) tMax = tMin + 1;
     var span = tMax - tMin;

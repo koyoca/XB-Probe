@@ -19,12 +19,16 @@ import (
 // 事件类型（4.5）。
 const (
 	KindOffline   = "offline"
+	KindOnline    = "online"
 	KindCPU       = "cpu"
 	KindMem       = "mem"
 	KindDisk      = "disk"
 	KindTraffic   = "traffic"
 	KindExpire    = "expire"
 	KindProbeFail = "probe_fail"
+	// 审计日志保留期被修改时触发（6.5 补充）：保留期改动属于"安全相关配置变更"，
+	// 值得让管理员知道，且可在告警页关闭。
+	KindAuditRetention = "audit_retention"
 )
 
 // 事件级别。
@@ -55,6 +59,8 @@ func DefaultRules() map[string]Rule {
 	return map[string]Rule{
 		KindOffline: {Kind: KindOffline, Enabled: true,
 			Params: Params{ConfirmN: 3}, CooldownS: 3600},
+		KindOnline: {Kind: KindOnline, Enabled: true,
+			Params: Params{}, CooldownS: 3600},
 		KindCPU: {Kind: KindCPU, Enabled: true,
 			Params: Params{Threshold: 9000, DurationS: 300}, CooldownS: 3600},
 		KindMem: {Kind: KindMem, Enabled: true,
@@ -67,6 +73,8 @@ func DefaultRules() map[string]Rule {
 			Params: Params{}, CooldownS: 86400},
 		KindProbeFail: {Kind: KindProbeFail, Enabled: true,
 			Params: Params{ConfirmN: 3}, CooldownS: 3600},
+		KindAuditRetention: {Kind: KindAuditRetention, Enabled: true,
+			Params: Params{}, CooldownS: 0},
 	}
 }
 
