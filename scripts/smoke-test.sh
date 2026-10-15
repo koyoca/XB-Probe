@@ -828,10 +828,24 @@ else
   bad "备份设置项缺中文标签：${BK_MISSING}"
 fi
 
-if grep -q "\['备份', \['backup.enabled', 'backup.hour', 'backup.keep'\]\]" <<<"${ADMIN_JS}"; then
+# 三个备份设置项必须归入「备份」分组。
+#
+# 判据必须**逐项**检查，不能钉整条分组字符串：那条字符串会因为
+# "往这个分组里又加了一个设置项"（如本轮的 audit.retention_days）而失配——
+# 而分组里多一项恰恰是无害的，护栏不该为它报红。要挡的是
+# "某个备份键掉进了兜底的「其他」分组"这件事本身。
+BK_NOT_GROUPED=""
+for BK in 'backup.enabled' 'backup.hour' 'backup.keep'; do
+  # 取出「备份」分组那一行，检查三个键都在其中。
+  BK_LINE="$(grep -F "['备份'," <<<"${ADMIN_JS}" | head -1)"
+  if ! grep -qF "'${BK}'" <<<"${BK_LINE}"; then
+    BK_NOT_GROUPED="${BK_NOT_GROUPED} ${BK}"
+  fi
+done
+if [ -z "${BK_NOT_GROUPED}" ]; then
   ok "三个备份设置项归入「备份」分组（不落进兜底的「其他」）"
 else
-  bad "备份设置项未归入「备份」分组"
+  bad "备份设置项未归入「备份」分组：${BK_NOT_GROUPED}"
 fi
 
 # 面向前端的散文说明里不该出现裸露的英文设置键名。
