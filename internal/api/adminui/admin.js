@@ -353,7 +353,8 @@
   // -- 国旗：FLAG-COMMON-END --
 
   // renderFlag 渲染国家/地区标识（与公开看板同名同行为）。
-  // 未设置或代码不在 FLAGS 表里就不画：宁可没有标识，也不要画一面错旗。
+  // 未设置不画；内置 FLAGS 表里没有的代码（含管理员自定义的地区）画不出旗，
+  // 就以两位代码作为标识——这是管理员明确设置过的值，不是"缺值占位"。
   function renderFlag(box, code) {
     if (!box) return;
     if (box._code === code) return;
@@ -362,16 +363,40 @@
     box.removeAttribute('title');
     if (!code) return;
     var svg = svgNode(flagSVG(code));
-    if (!svg) return;
+    if (!svg) {
+      var fb = el('span', 'n-flag-code', code);
+      box.appendChild(fb);
+      box.title = countryLabel(code);
+      return;
+    }
     box.appendChild(svg);
     box.title = countryLabel(code);
   }
 
-  // countryLabel 把两位国家代码转成中文名（表里没有就原样回显代码）。
+  // customCountryMap 解析「自定义国家/地区」设置：每行 `代码|名称`。
+  // 只认两位大写字母的代码；坏行跳过而不是让整个清单失效。
+  function customCountryMap() {
+    var out = {};
+    String(state.settings && state.settings['node.custom_countries'] || '')
+      .split('\n').forEach(function (ln) {
+        ln = ln.trim();
+        if (!ln) return;
+        var i = ln.indexOf('|');
+        var code = (i < 0 ? ln : ln.slice(0, i)).trim().toUpperCase();
+        var name = i < 0 ? '' : ln.slice(i + 1).trim();
+        if (/^[A-Z]{2}$/.test(code)) out[code] = name || code;
+      });
+    return out;
+  }
+
+  // countryLabel 把两位国家代码转成中文名（自定义地区用管理员填的名称，
+  // 两边都没有就原样回显代码）。
   function countryLabel(code) {
     if (!code) return '—';
     var e = FLAGS[code];
-    return e ? e[0] : code;
+    if (e) return e[0];
+    var custom = customCountryMap();
+    return custom[code] || code;
   }
 
   var CARRIER = { telecom: '电信', unicom: '联通', mobile: '移动', custom: '自定义' };
@@ -1345,6 +1370,7 @@
       body.appendChild(renderHistoryCard(n));
       loadRuntime(n.id, body.firstChild);
       loadTokens(n.id);
+      loadEnrollCodes(n.id);
       loadTraffic(n);
       loadNodeTargets(n.id);
     }).catch(function (e) {
@@ -1577,23 +1603,31 @@
     // 国家/地区：下拉选择而不是自由文本输入。
     // 这个值是**结构化**的（ISO alpha-2），前端要拿它查表画国旗——
     // 让管理员手敲两位代码，等于把"拼错了就画不出旗、还不报错"的风险留给他。
-    // 选项直接由 FLAGS 生成，所以"能选什么"与"能画什么"永远一致。
+    // 选项由 FLAGS 表 + 系统设置「自定义国家/地区」合并生成：
+    // 内置表覆盖常见地区，管理员补齐它没有的地区（如刚上线的机房所在国）。
     var cLabel = el('label', null, '国家/地区（卡片国旗）');
     var cSel = el('select');
     cSel.id = 'n-country';
     var cNone = el('option', null, '未设置');
     cNone.value = '';
     cSel.appendChild(cNone);
-    Object.keys(FLAGS)
-      .sort(function (a, b) { return FLAGS[a][0].localeCompare(FLAGS[b][0], 'zh'); })
-      .forEach(function (code) {
-        var o = el('option', null, FLAGS[code][0] + '（' + code + '）');
-        o.value = code;
-        cSel.appendChild(o);
-      });
-    // 库里可能存着表里还没收录的代码（先于前端表更新写入的）。这种情况
+    var customMap = customCountryMap();
+    var entries = Object.keys(FLAGS).map(function (code) {
+      return { code: code, name: FLAGS[code][0], builtin: true };
+    });
+    Object.keys(customMap).forEach(function (code) {
+      if (FLAGS[code]) return; // 与内置表撞码时以内置为准
+      entries.push({ code: code, name: customMap[code], builtin: false });
+    });
+    entries.sort(function (a, b) { return a.name.localeCompare(b.name, 'zh'); });
+    entries.forEach(function (e2) {
+      var o = el('option', null, e2.name + '（' + e2.code + '）' + (e2.builtin ? '' : '〔自定义〕'));
+      o.value = e2.code;
+      cSel.appendChild(o);
+    });
+    // 库里可能存着两边表里都还没有的代码（先于表更新写入的）。这种情况
     // 必须把它作为一项补进下拉，否则一打开表单就会静默把它清成"未设置"。
-    if (n.country && !FLAGS[n.country]) {
+    if (n.country && !FLAGS[n.country] && !customMap[n.country]) {
       var cEx = el('option', null, n.country + '（未收录）');
       cEx.value = n.country;
       cSel.appendChild(cEx);
@@ -1699,6 +1733,9 @@
             box.appendChild(el('div', 'muted', k));
             box.appendChild(el('pre', 'code', r.commands[k]));
           });
+          // 生成命令即签发了一个新注册码，下方列表同步刷新，
+          // 否则"刚签发的码"在面板里要等到下次打开详情才出现。
+          loadEnrollCodes(n.id);
         });
     }));
     inst.appendChild(irow);
@@ -1723,6 +1760,26 @@
     t.appendChild(tb);
     twrap.appendChild(t);
     tok.appendChild(twrap);
+    // 注册码：一次性、短时有效。曾经"签发即失踪"——对话框一关就无处可查，
+    // 管理员手里是否还有效码、401 是因为用过还是过期，全都无从判断。
+    // 现在与令牌同面板展示（前 6 位提示 + 状态由服务端按时钟算好）。
+    tok.appendChild(el('h3', null, '注册码（一次性，仅显示前 6 位）'));
+    var cwrap = el('div', 'table-wrap');
+    var ct = el('table');
+    ct.id = 'codes-table';
+    var cthead = el('thead');
+    var chtr = el('tr');
+    ['提示', '签发时间', '有效期至', '状态'].forEach(function (x) { chtr.appendChild(el('th', null, x)); });
+    cthead.appendChild(chtr);
+    ct.appendChild(cthead);
+    var ctb = el('tbody');
+    ctb.id = 'codes-tbody';
+    ct.appendChild(ctb);
+    cwrap.appendChild(ct);
+    tok.appendChild(cwrap);
+    tok.appendChild(el('p', 'muted',
+      '注册码是一次性的：被使用或过期后立即失效，需重新签发。' +
+      '每节点同时存在的有效注册码数量可在系统设置「每节点注册码上限」调整。'));
     wrap.appendChild(tok);
 
     return wrap;
@@ -1789,6 +1846,33 @@
         tr.appendChild(ops);
         tb.appendChild(tr);
       });
+    }).catch(function () { /* 忽略 */ });
+    loadEnrollCodes(id);
+  }
+
+  // loadEnrollCodes 渲染注册码列表。状态是服务端算好的（active/used/expired）：
+  // 各端时钟不一致时，"还剩 3 分钟"被浏览器算成"已过期"只会制造困惑。
+  function loadEnrollCodes(id) {
+    api('/nodes/' + id + '/enroll-codes').then(function (list) {
+      var tb = $('codes-tbody');
+      if (!tb) return;
+      clear(tb);
+      (list || []).forEach(function (c) {
+        var tr = el('tr');
+        tr.appendChild(td(c.hint ? c.hint + '…' : '—'));
+        tr.appendChild(td(fmtTime(c.created_at)));
+        tr.appendChild(td(fmtTime(c.expires_at)));
+        tr.appendChild(td(c.status === 'used' ? '已使用'
+          : c.status === 'expired' ? '已过期' : '有效'));
+        tb.appendChild(tr);
+      });
+      if (!list || !list.length) {
+        var tr = el('tr');
+        var cell = el('td', 'muted', '还没有签发过注册码；点上方「重新签发令牌」或「生成命令」即可。');
+        cell.colSpan = 4;
+        tr.appendChild(cell);
+        tb.appendChild(tr);
+      }
     }).catch(function () { /* 忽略 */ });
   }
 
@@ -2302,7 +2386,7 @@
 
     var sel = el('select');
     sel.id = 'hist-range';
-    [['30m', '最近 30 分钟（内存实时层）'], ['1h', '最近 1 小时'], ['5h', '最近 5 小时'], ['24h', '最近 24 小时'], ['7d', '最近 7 天'], ['30d', '最近 30 天']]
+    [['30m', '最近 30 分钟'], ['1h', '最近 1 小时'], ['5h', '最近 5 小时'], ['24h', '最近 24 小时'], ['7d', '最近 7 天'], ['30d', '最近 30 天']]
       .forEach(function (o) {
         var op = el('option', null, o[1]);
         op.value = o[0];
@@ -3886,8 +3970,26 @@
     'install.dist_base': ['二进制下载源（留空用 Master 的 /dist）', 'text'],
     'install.agent_version': ['安装的 Agent 版本（留空取最新）', 'text'],
     'install.code_ttl_min': ['注册码有效期分钟（5-1440）', 'number'],
+    'install.max_enroll_codes': ['每节点注册码上限（1-20）', 'number',
+      '同一个节点同时最多存在多少个"未使用且未过期"的注册码。' +
+      '注册是一次性的，排查注册失败时常常要连签几个码；默认 3，' +
+      '被"已达上限"卡住时可以调大。下方令牌面板能查看每个码的状态。'],
     'install.spki_sha256': ['Master SPKI 指纹（自签证书场景，逗号分隔）', 'text'],
     'install.pubkey': ['minisign 公钥（校验 SHA256SUMS，两行文本；留空则不校验）', 'raw'],
+    'cdn.enabled': ['CDN 来源识别', 'select:0=关闭,1=开启',
+      '节点经 CDN（如 Cloudflare）回源时，Master 看到的连接来源是 CDN 的边缘地址。' +
+      '开启后，下方网段清单会被当作"已知的 CDN 边缘跳"：解析 X-Forwarded-For 时' +
+      '把这些跳跳过去，记录到的才是节点的真实公网地址。Cloudflare 的官方网段已内置，' +
+      '这里只补其它 CDN 或自建加速层。'],
+    'cdn.ranges': ['CDN 边缘网段清单（每行一个 CIDR 或 IP）', 'raw',
+      '从 CDN 官方页面复制即可，一行一条，支持 IPv4/IPv6；逗号分隔也可以。' +
+      '例如：173.245.48.0/20。只添加你能确认属于该 CDN 的网段——' +
+      '来源不落在清单里时一律按连接对端处理，伪造的代理头不会生效。'],
+    'node.custom_countries': ['自定义国家/地区（每行：代码|名称）', 'raw',
+      '内置地区表没有收录的地区在这里补。每行一条，格式：两位代码|名称，' +
+      '例如 GB|英国 或 HK|中国香港（代码为 ISO 3166-1 alpha-2）。' +
+      '只写代码不写名称也可以；保存后在节点编辑的国家/地区下拉里出现。' +
+      '自定义地区没有内置国旗图形，卡片上以两位代码显示。'],
     'heartbeat_url': ['外部心跳地址（https，Master 每 5 分钟 GET 一次）', 'text'],
     'backup.enabled': ['每日自动备份', 'select:1=开启,0=关闭',
       '开启后 Master 每天在指定时刻自动生成一次数据库备份（VACUUM INTO 在线快照，不需要停服）。' +
@@ -3919,10 +4021,11 @@
     ['数据保留', ['retention.raw_hours', 'retention.mid_days', 'retention.days', 'raw_resolution_s']],
     ['Agent 与上报', ['report_interval_s', 'probe_interval_s', 'offline_timeout_s', 'disk_min_free_mb',
       'agent.ip_whitelist_enabled', 'agent.ip_whitelist']],
-    ['安装与下载', ['install.mode', 'install.master_url', 'install.dist_base', 'install.agent_version', 'install.code_ttl_min', 'install.spki_sha256', 'install.pubkey']],
+    ['安装与下载', ['install.mode', 'install.master_url', 'install.dist_base', 'install.agent_version', 'install.code_ttl_min', 'install.max_enroll_codes', 'install.spki_sha256', 'install.pubkey']],
+    ['CDN 与来源 IP', ['cdn.enabled', 'cdn.ranges']],
     ['备份', ['backup.enabled', 'backup.hour', 'backup.keep']],
     ['脚本注入', ['inject.script_enabled', 'inject.head', 'inject.body_end']],
-    ['外部与高级', ['heartbeat_url']]
+    ['外部与高级', ['heartbeat_url', 'node.custom_countries']]
   ];
 
   // buildCardPicker 渲染 public.cards 的勾选组。

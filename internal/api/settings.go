@@ -116,8 +116,24 @@ var settingDefaults = map[string]string{
 	"install.dist_base":          "",
 	"install.agent_version":      "",
 	"install.code_ttl_min":       "30",
-	"install.spki_sha256":        "",
-	"install.pubkey":             "",
+	// install.max_enroll_codes 是单节点有效注册码的数量上限。默认 3 与
+	// 升级前写死的值一致；现在可调——节点注册失败排查时经常要连签几个码，
+	// 上限太小会把人卡在"无法重新获取"的死胡同里。
+	"install.max_enroll_codes": "3",
+	"install.spki_sha256":      "",
+	"install.pubkey":           "",
+	// CDN 与来源 IP（middleware.go resolveClientIP）。
+	//   cdn.enabled 开启后，cdn.ranges 里的网段会被当作"已知的 CDN 边缘跳"：
+	//   解析 X-Forwarded-For 时把这些跳跳过去，取到的才是真实客户端地址。
+	//   网段来源必须可靠（CDN 官方公布的回源/边缘网段）；来源不落在名单里时
+	//   一律按对端地址处理，伪造头洗不进来。
+	"cdn.enabled": "0",
+	"cdn.ranges":  "",
+	// node.custom_countries 是管理员自定义的国家/地区清单，每行一条：
+	//   两位代码|中文名    例如  GB|英国
+	// 两位代码用 ISO 3166-1 alpha-2（节点卡片与下拉框都以它为键）；名称仅用于
+	// 展示。内置 FLAGS 表覆盖常见地区，清单在这里补齐它没有的。
+	"node.custom_countries": "",
 	// 每日自动备份与轮转（6.6）。
 	//   backup.enabled 默认开启：备份是"存在感很低但缺了就致命"的功能，
 	//     默认关闭的话没人会去打开它，等出事时才发现从来没备过。
@@ -162,8 +178,12 @@ var settingSpecs = map[string]func(string) error{
 	"install.dist_base":          optionalStrictURL,
 	"install.agent_version":      maxLen(32),
 	"install.code_ttl_min":       intRange(5, 1440),
+	"install.max_enroll_codes":   intRange(1, 20),
 	"install.spki_sha256":        base64ish,
 	"install.pubkey":             validateMinisignPubKey,
+	"cdn.enabled":                enumValue("0", "1"),
+	"cdn.ranges":                 validateCIDRList,
+	"node.custom_countries":      validateCustomCountries,
 	"backup.enabled":             enumValue("0", "1"),
 	"backup.hour":                intRange(0, 23),
 	// 下限 1：配成 0 会让 PruneBackups 保留 0 份（尽管它自身有兜底，
@@ -307,6 +327,81 @@ func validateIPWhitelist(v string) error {
 		}
 		if net.ParseIP(item) == nil {
 			return fmt.Errorf("非法 IP：%s", item)
+		}
+	}
+	return nil
+}
+
+// validateCIDRList 校验 cdn.ranges：换行或逗号分隔的 CDN 边缘网段清单，
+// 每项必须是合法的单 IP 或 CIDR。这项配置直接影响"谁是真实客户端"的判定
+// （写错了会把 CDN 节点当成客户端、或把攻击者的地址当成客户端），
+// 因此格式错误必须在保存时拦下，而不是上线后 silently 不生效。
+func validateCIDRList(v string) error {
+	if v == "" {
+		return nil
+	}
+	if len(v) > 8192 {
+		return fmt.Errorf("清单过长")
+	}
+	for _, item := range splitCIDRList(v) {
+		if strings.Contains(item, "/") {
+			if _, _, err := net.ParseCIDR(item); err != nil {
+				return fmt.Errorf("非法网段：%s", item)
+			}
+			continue
+		}
+		if net.ParseIP(item) == nil {
+			return fmt.Errorf("非法 IP：%s", item)
+		}
+	}
+	return nil
+}
+
+// splitCIDRList 把网段清单拆成条目：这类清单通常从 CDN 官方页面整页复制，
+// 分隔符按最宽的形式认（换行、逗号、空格）。
+func splitCIDRList(v string) []string {
+	return strings.FieldsFunc(v, func(r rune) bool {
+		return r == '\n' || r == '\r' || r == ',' || r == ' ' || r == '\t'
+	})
+}
+
+// validateCustomCountries 校验 node.custom_countries：每行一条 `代码|名称`，
+// 代码是两位字母（ISO 3166-1 alpha-2，国旗与下拉框都以它为键）。
+// 只允许裸代码（没有名称）——名称留空时前端直接显示代码。
+// 重复代码按一条计（后写的覆盖先写的），这里不去重只查格式。
+func validateCustomCountries(v string) error {
+	if v == "" {
+		return nil
+	}
+	if len(v) > 8192 {
+		return fmt.Errorf("清单过长")
+	}
+	n := 0
+	for _, ln := range strings.Split(v, "\n") {
+		ln = strings.TrimSpace(ln)
+		if ln == "" {
+			continue
+		}
+		n++
+		if n > 500 {
+			return fmt.Errorf("条目过多（上限 500 行）")
+		}
+		code, name := ln, ""
+		if i := strings.Index(ln, "|"); i >= 0 {
+			code, name = ln[:i], ln[i+1:]
+		}
+		code = strings.ToUpper(strings.TrimSpace(code))
+		name = strings.TrimSpace(name)
+		if len(code) != 2 {
+			return fmt.Errorf("地区代码必须是两位字母：%s", code)
+		}
+		for _, r := range code {
+			if r < 'A' || r > 'Z' {
+				return fmt.Errorf("地区代码只能是大写字母：%s", code)
+			}
+		}
+		if len(name) > 64 {
+			return fmt.Errorf("地区名称过长：%s", name)
 		}
 	}
 	return nil

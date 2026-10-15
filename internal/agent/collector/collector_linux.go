@@ -547,10 +547,12 @@ func countConns() (int, bool) {
 //
 // 判定顺序按"证据强度"排：
 //
-//	① 容器运行时**自报**的名字（环境变量 container=）——运行时自己说的，最硬；
+//	① 容器运行时**自报**的名字（环境变量 container=、/run/systemd/container）
+//	   ——运行时自己说的，最硬；
 //	② 容器专属的物证（/.dockerenv、cgroup 路径里的运行时名）；
-//	③ "我们在不在容器里"这个**隔离事实**（PID 命名空间）。只要在，就绝不许把
-//	   宿主机的指纹当成本机身份——容器里能看到的 DMI / cpuinfo 全是宿主的；
+//	③ "我们在不在容器里"这个**隔离事实**（PID 命名空间：NSpid 行或命名空间
+//	   inode）。只要在，就绝不许把宿主机的指纹当成本机身份——容器里能看到的
+//	   DMI / cpuinfo 全是宿主的；
 //	④ 最后才是宿主机的虚拟化指纹（cpuinfo 的 QEMU、DMI 厂商串）。
 //
 // ③ 这一层是后补的：真机反馈「节点是 LXC 容器，虚拟化却显示 kvm」——那台 LXC 的
@@ -558,6 +560,11 @@ func countConns() (int, bool) {
 // "lxc" 字样，于是三层容器判据全部落空，最后 DMI 读到**宿主**（一台 KVM 虚机）的
 // "QEMU" 就认成了 kvm。隔离事实（PID 命名空间）不走文件名/环境变量，这类环境里
 // 反而是最可靠的一条。
+//
+// ③ 里又补了一层：NSpid 行是 Linux 4.15（2018）才有的，老内核（如 CentOS 7 的
+// 3.10）上的 LXC 容器根本没有这一行，于是"隔离事实"再次落空、又回到 kvm。
+// 现在用 /proc/self/ns/pid 的命名空间 inode（内核常量，任何版本可用）兜底，
+// 并新增 /run/systemd/container 作为自报名来源（systemd-detect-virt 同款判据）。
 func detectVirt() string {
 	// ① 容器运行时自报的名字。
 	if v := containerEnvName(); v != "" {
@@ -645,19 +652,25 @@ func detectVirt() string {
 	return "none"
 }
 
-// containerEnvName 从环境变量里读出容器运行时**自报**的名字。
+// containerEnvName 从环境变量与 systemd 标记文件里读出容器运行时**自报**的名字。
 //
 // 为什么优先信它：它是运行时自己写的，不像 DMI / cpuinfo 那样在容器里读到的是
 // 宿主机的指纹。LXC 的 lxc-start 默认注入 container=lxc，systemd 还会把这个变量
 // 透给各服务单元；docker / podman / systemd-nspawn 同理。
 //
-// 两处都看：/proc/1/environ 在容器里可能不可读（非 root、或 PID 命名空间收紧），
-// 此时自己的 environ（由 systemd 透下来的那份）往往还带着 container=。
+// 三处都看：/proc/1/environ 在容器里可能不可读（非 root、或 PID 命名空间收紧），
+// 此时自己的 environ（由 systemd 透下来的那份）往往还带着 container=；
+// 两处都没有时再看 /run/systemd/container——这是 systemd-detect-virt 的同名
+// 判据，systemd 在容器里启动时会把运行时名写进这个文件，既不依赖环境变量
+// 透传，也不依赖内核版本（LXC + 老内核、env 被裁剪的形态靠它兜住）。
 func containerEnvName() string {
 	for _, p := range []string{"/proc/1/environ", "/proc/self/environ"} {
 		if v := containerNameOf(envValue(readEnvFile(p), "container")); v != "" {
 			return v
 		}
+	}
+	if v := containerNameOf(readFileLine("/run/systemd/container")); v != "" {
+		return v
 	}
 	return ""
 }
@@ -665,11 +678,28 @@ func containerEnvName() string {
 // inContainer 只依据"隔离事实"判断是否身处容器，不看任何硬件/厂商指纹
 // （宿主机的指纹在容器里照样看得见，正是这次误判的来源）。
 //
-// 判据是 /proc/self/status 的 NSpid（见 nsPidCount）：容器有自己的 PID 命名空间，
-// 这一行会有两个及以上值；宿主机上只有一个。它不读文件名、不读环境变量，
-// LXC 的各种裁剪形态都躲不掉——真机那台 LXC 正是前两类判据全部落空的情形。
+// 两条判据（见 inContainerByPidNS）：
+//   - /proc/self/status 的 NSpid（见 nsPidCount）：容器有自己的 PID 命名空间，
+//     这一行会有两个及以上值。它是 Linux 4.15 才有的；
+//   - /proc/self/ns/pid 的命名空间 inode ≠ 初始值（initialPidNSIno）——老内核
+//     没有 NSpid 行时的兜底，readlink 任何内核都可用。
+//
+// 两条都不依赖文件名、不依赖环境变量，LXC 的各种裁剪形态都躲不掉。
 func inContainer() bool {
-	return nsPidCount(readFileLine("/proc/self/status")) > 1
+	return inContainerByPidNS(
+		nsPidCount(readFileLine("/proc/self/status")),
+		pidNSLink(),
+	)
+}
+
+// pidNSLink 读 /proc/self/ns/pid 符号链接的目标；读不到返回空串
+// （pidNSIno 会把它解析成 0 = 没有证据）。
+func pidNSLink() string {
+	s, err := os.Readlink("/proc/self/ns/pid")
+	if err != nil {
+		return ""
+	}
+	return s
 }
 
 // readEnvFile 读 /proc/<pid>/environ（NUL 分隔），转成可搜索的字符串。

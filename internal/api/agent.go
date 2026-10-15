@@ -37,15 +37,26 @@ func (h *Handler) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now()
-	nodeID, ok, err := h.Repo.ConsumeEnrollCode(auth.EnrollCodeHash(req.Code), now.Unix())
+	nodeID, ok, reason, err := h.Repo.ConsumeEnrollCode(auth.EnrollCodeHash(req.Code), now.Unix())
 	if err != nil {
 		h.logErr("consume enroll code", err)
 		writeErr(w, http.StatusInternalServerError, model.ErrInternal, "内部错误")
 		return
 	}
 	if !ok {
-		// 注册码无效/已使用/已过期——统一返回 401，不泄露具体原因。
-		writeErr(w, http.StatusUnauthorized, model.ErrInvalidCode, "注册码无效或已过期")
+		// 归因到**可行动**的原因：后台现在能看到注册码列表（提示位+状态），
+		// "已被使用"与"已过期"的处置完全不同。不存在的码仍然沿用统一口径，
+		// 不泄露存在性（避免枚举探测，docs/02 6.x 验收项）。
+		switch reason {
+		case "used":
+			writeErr(w, http.StatusUnauthorized, model.ErrInvalidCode,
+				"注册码已被使用：注册码一次性有效，请到后台该节点的「重新签发令牌」重新签发")
+		case "expired":
+			writeErr(w, http.StatusUnauthorized, model.ErrInvalidCode,
+				"注册码已过期：请到后台重新签发（有效期可在系统设置「注册码有效期」调整）")
+		default:
+			writeErr(w, http.StatusUnauthorized, model.ErrInvalidCode, "注册码无效或已过期")
+		}
 		return
 	}
 

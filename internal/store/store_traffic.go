@@ -349,8 +349,9 @@ func (r *Repo) retentionMidDays() int {
 // MetricsTableForRange 按查询跨度**与保留期**选择指标表。
 //
 // 三层精度：raw（上报粒度，retention.raw_hours）→ 1m（retention.mid_days）
-// → 10m（retention.days）。跨度落在哪层就查哪层，30 分钟以内由调用方走
-// 内存环形缓冲（返回空串）。
+// → 10m（retention.days）。跨度落在哪层就查哪层；30 分钟档与 1h 一样落
+// metrics_raw（曾经它返回空串、由调用方改读内存环形缓冲——缓冲随 Master
+// 重启清空，"关掉网站过一阵再回来"时这一档就只剩重启以来的几分钟）。
 //
 // 三层的选择口径都是"该层保留期覆盖得住整个查询窗口吗"：
 //
@@ -366,9 +367,6 @@ func (r *Repo) retentionMidDays() int {
 // 表——曲线左半边凭空消失，而后台设置页显示一切正常，排查时完全看不出
 // 是"保留期"与"查询层"对不上。
 func (r *Repo) MetricsTableForRange(rangeStr string) string {
-	if rangeStr == "30m" {
-		return "" // 内存环形缓冲
-	}
 	span := rangeDurationSeconds(rangeStr)
 	if span <= 0 {
 		// 未知跨度：给最粗的一层。它保留最久，永远不可能"已过期"。

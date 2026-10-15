@@ -44,7 +44,7 @@ func TestEnrollCodeAtomicConsumption(t *testing.T) {
 		t.Fatalf("生成注册码失败：%v", err)
 	}
 	hash := auth.HashToken(auth.NormalizeEnrollCode(code))
-	if err := r.CreateEnrollCode(nodeID, hash, now+1800, "admin:1", "shell", now); err != nil {
+	if err := r.CreateEnrollCode(nodeID, hash, code[:6], now+1800, "admin:1", "shell", now); err != nil {
 		t.Fatalf("写入注册码失败：%v", err)
 	}
 
@@ -58,7 +58,7 @@ func TestEnrollCodeAtomicConsumption(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			gotNode, ok, err := r.ConsumeEnrollCode(hash, now+1)
+			gotNode, ok, _, err := r.ConsumeEnrollCode(hash, now+1)
 			if err != nil {
 				return
 			}
@@ -74,9 +74,11 @@ func TestEnrollCodeAtomicConsumption(t *testing.T) {
 	if success != 1 {
 		t.Fatalf("并发 %d 次消费应恰好成功 1 次，实际 %d 次", workers, success)
 	}
-	// 二次消费必须失败
-	if _, ok, _ := r.ConsumeEnrollCode(hash, now+2); ok {
+	// 二次消费必须失败，且归因为"已使用"
+	if _, ok, reason, _ := r.ConsumeEnrollCode(hash, now+2); ok {
 		t.Error("同一注册码不应被使用两次")
+	} else if reason != "used" {
+		t.Errorf("二次消费的归因应为 used，得到 %q", reason)
 	}
 }
 
@@ -86,11 +88,19 @@ func TestEnrollCodeExpired(t *testing.T) {
 	now := int64(1_760_000_000)
 	hash := auth.HashToken("EXPIREDCODE1")
 
-	if err := r.CreateEnrollCode(nodeID, hash, now-1, "admin:1", "shell", now-60); err != nil {
+	if err := r.CreateEnrollCode(nodeID, hash, "EXPIRE", now-1, "admin:1", "shell", now-60); err != nil {
 		t.Fatalf("写入注册码失败：%v", err)
 	}
-	if _, ok, _ := r.ConsumeEnrollCode(hash, now); ok {
+	if _, ok, reason, _ := r.ConsumeEnrollCode(hash, now); ok {
 		t.Error("已过期的注册码不应被消费")
+	} else if reason != "expired" {
+		t.Errorf("过期注册码的归因应为 expired，得到 %q", reason)
+	}
+	// 不存在的码：统一按"missing"归因，上层沿用"无效或已过期"口径（避免枚举探测）。
+	if _, ok, reason, _ := r.ConsumeEnrollCode(auth.HashToken("NOSUCHCODE01"), now); ok {
+		t.Error("不存在的注册码不应被消费")
+	} else if reason != "missing" {
+		t.Errorf("不存在注册码的归因应为 missing，得到 %q", reason)
 	}
 }
 
@@ -101,13 +111,74 @@ func TestEnrollCodeLimitPerNode(t *testing.T) {
 	now := int64(1_760_000_000)
 	for i := 0; i < 3; i++ {
 		h := auth.HashToken("CODE" + string(rune('A'+i)))
-		if err := r.CreateEnrollCode(nodeID, h, now+1800, "admin:1", "shell", now); err != nil {
+		if err := r.CreateEnrollCode(nodeID, h, "CODE0"+string(rune('A'+i)), now+1800, "admin:1", "shell", now); err != nil {
 			t.Fatalf("第 %d 个注册码应可创建：%v", i+1, err)
 		}
 	}
 	h4 := auth.HashToken("CODE4")
-	if err := r.CreateEnrollCode(nodeID, h4, now+1800, "admin:1", "shell", now); err == nil {
+	if err := r.CreateEnrollCode(nodeID, h4, "CODE04", now+1800, "admin:1", "shell", now); err == nil {
 		t.Error("第 4 个注册码应被拒绝（上限 3）")
+	}
+	// 上限可调：调到 5 之后第 4、5 个都能创建，第 6 个被拒。
+	if err := r.SetSetting("install.max_enroll_codes", "5", now); err != nil {
+		t.Fatalf("写入上限设置失败：%v", err)
+	}
+	if err := r.CreateEnrollCode(nodeID, h4, "CODE04", now+1800, "admin:1", "shell", now); err != nil {
+		t.Errorf("上限调到 5 后第 4 个注册码应可创建：%v", err)
+	}
+	h5 := auth.HashToken("CODE5")
+	if err := r.CreateEnrollCode(nodeID, h5, "CODE05", now+1800, "admin:1", "shell", now); err != nil {
+		t.Errorf("上限调到 5 后第 5 个注册码应可创建：%v", err)
+	}
+	if err := r.CreateEnrollCode(nodeID, auth.HashToken("CODE6"), "CODE06", now+1800, "admin:1", "shell", now); err == nil {
+		t.Error("第 6 个注册码应被拒绝（上限 5）")
+	}
+}
+
+// 后台令牌面板要能看到注册码（前 6 位提示 + 状态）。曾经的实现只存哈希，
+// "已签发但未被使用"的码在后台无处可查——注册失败时既拿不回码、也无法
+// 判断该等它过期还是重新签发。
+func TestListEnrollCodesShowsHintsAndStatus(t *testing.T) {
+	r := newTestRepo(t)
+	nodeID := mustNode(t, r, "n5")
+	now := int64(1_760_000_000)
+
+	if err := r.CreateEnrollCode(nodeID, auth.HashToken("ABCDEFGHJK12"), "ABCDEF", now+1800, "admin:1", "shell", now); err != nil {
+		t.Fatalf("写注册码 1 失败：%v", err)
+	}
+	if err := r.CreateEnrollCode(nodeID, auth.HashToken("ZZZZZZZZZZ99"), "ZZZZZZ", now+1800, "admin:1", "shell", now); err != nil {
+		t.Fatalf("写注册码 2 失败：%v", err)
+	}
+	codes, err := r.ListEnrollCodes(nodeID)
+	if err != nil {
+		t.Fatalf("列注册码失败：%v", err)
+	}
+	if len(codes) != 2 {
+		t.Fatalf("应有 2 条注册码，得到 %d 条", len(codes))
+	}
+	// 未使用且未过期 → 有效。
+	if codes[0].Hint != "ZZZZZZ" || codes[0].UsedAt != 0 {
+		t.Errorf("第一条应为未使用的 ZZZZZZ，实际 %+v", codes[0])
+	}
+	// 消费一条后 → 已使用，且提示位仍在。
+	if _, ok, _, err := r.ConsumeEnrollCode(auth.HashToken("ABCDEFGHJK12"), now+1); err != nil || !ok {
+		t.Fatalf("消费注册码失败：ok=%v err=%v", ok, err)
+	}
+	codes, err = r.ListEnrollCodes(nodeID)
+	if err != nil {
+		t.Fatalf("列注册码失败：%v", err)
+	}
+	var used int
+	for _, c := range codes {
+		if c.UsedAt > 0 {
+			used++
+			if c.Hint != "ABCDEF" {
+				t.Errorf("已使用注册码的提示位应为 ABCDEF，得到 %q", c.Hint)
+			}
+		}
+	}
+	if used != 1 {
+		t.Errorf("应有 1 条已使用，得到 %d 条", used)
 	}
 }
 
@@ -375,7 +446,9 @@ func TestMetricsTableForRangeFollowsRetention(t *testing.T) {
 	t.Run("默认保留期", func(t *testing.T) {
 		r := newTestRepo(t) // 不写任何 settings，走默认 24h / 7d
 		cases := map[string]string{
-			"30m": "",            // 内存环形缓冲
+			// 30m 曾经返回空串、由调用方改读内存环形缓冲；缓冲随 Master 重启清空，
+			// "关掉网站过一阵再回来"时这一档就只剩重启以来的几分钟。现在与 1h 同层。
+			"30m": "metrics_raw",
 			"1h":  "metrics_raw", // 1h ≤ 24h
 			"5h":  "metrics_raw",
 			"24h": "metrics_raw", // 24h ≤ 24h，恰好覆盖

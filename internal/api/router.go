@@ -84,7 +84,7 @@ func (h *Handler) PublicRoutes() http.Handler {
 	}
 	// RealIPMiddleware 必须最外层：让内部所有处理（限速/门控/记录来源）都能
 	// 取到经可信代理还原后的真实来源，而非 TCP 对端的 127.0.0.1（#1 根因）。
-	h2 = RealIPMiddleware(h.TrustedProxies, h2)
+	h2 = RealIPMiddleware(h.TrustedProxies, h.cdnRangeList, h2)
 	return h2
 }
 
@@ -220,6 +220,7 @@ func (h *Handler) AdminRoutes() http.Handler {
 	// 令牌
 	mux.HandleFunc("GET /api/admin/v1/nodes/{id}/tokens", h.requireAdmin(h.handleListTokens))
 	mux.HandleFunc("POST /api/admin/v1/nodes/{id}/enroll-codes", h.requireAdmin(h.handleCreateEnrollCode))
+	mux.HandleFunc("GET /api/admin/v1/nodes/{id}/enroll-codes", h.requireAdmin(h.handleListEnrollCodes))
 	mux.HandleFunc("DELETE /api/admin/v1/nodes/{id}/tokens/{tid}", h.requireAdmin(h.handleRevokeToken))
 
 	// 一键安装（12.2）
@@ -296,7 +297,7 @@ func (h *Handler) AdminRoutes() http.Handler {
 	if h.AccessLog {
 		h2 = AccessLogMiddleware(h.Logger, h2)
 	}
-	h2 = RealIPMiddleware(h.TrustedProxies, h2)
+	h2 = RealIPMiddleware(h.TrustedProxies, h.cdnRangeList, h2)
 	return h2
 }
 
@@ -321,7 +322,7 @@ func (h *Handler) AgentRoutes() http.Handler {
 	if h.AccessLog {
 		h2 = AccessLogMiddleware(h.Logger, h2)
 	}
-	h2 = RealIPMiddleware(h.TrustedProxies, h2)
+	h2 = RealIPMiddleware(h.TrustedProxies, h.cdnRangeList, h2)
 	return h2
 }
 
@@ -339,7 +340,7 @@ func (h *Handler) AgentRoutes() http.Handler {
 func (h *Handler) agentIPGate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if h.Repo.GetSettingDefault("agent.ip_whitelist_enabled", "0") == "1" {
-			ip := resolveClientIP(r, parseCIDRs(h.TrustedProxies))
+			ip := resolveClientIP(r, h.trustCIDRs())
 			allow := strings.Split(h.Repo.GetSettingDefault("agent.ip_whitelist", ""), ",")
 			if !isTrusted(ip, parseCIDRs(allow)) {
 				writeErr(w, http.StatusForbidden, "forbidden", "来源 IP 不在白名单内")

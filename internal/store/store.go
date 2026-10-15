@@ -198,26 +198,31 @@ func (r *Repo) ListTokens(nodeID int64) ([]model.Token, error) {
 // 注册码（S6 / 13.4.7）
 // ---------------------------------------------------------------------------
 
-// CreateEnrollCode 创建一次性注册码（30 分钟有效，仅存哈希）。同一节点最多 3 个有效码。
-func (r *Repo) CreateEnrollCode(nodeID int64, hash []byte, expiresAt int64, createdBy, platform string, now int64) error {
+// CreateEnrollCode 创建一次性注册码（默认 30 分钟有效，仅存哈希与前 6 位提示）。
+// 同一节点的有效码数量上限可在系统设置（install.max_enroll_codes，默认 3）调整。
+func (r *Repo) CreateEnrollCode(nodeID int64, hash []byte, hint string, expiresAt int64, createdBy, platform string, now int64) error {
 	tx, err := r.db.Write.Begin()
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	limit := int(r.GetIntSetting("install.max_enroll_codes", 3))
+	if limit < 1 {
+		limit = 1
+	}
 	var active int
 	if err := tx.QueryRow(
 		`SELECT COUNT(*) FROM enroll_codes WHERE node_id=? AND used_at IS NULL AND expires_at>?`,
 		nodeID, now).Scan(&active); err != nil {
 		return err
 	}
-	if active >= 3 {
-		return fmt.Errorf("该节点已有 3 个有效注册码，请先等待其过期或被使用")
+	if active >= limit {
+		return fmt.Errorf("该节点已有 %d 个有效注册码（上限可在系统设置调整），请等待其过期或被使用", limit)
 	}
 	if _, err := tx.Exec(
-		`INSERT INTO enroll_codes(node_id, code_hash, expires_at, created_at, created_by, platform)
-		 VALUES(?,?,?,?,?,?)`, nodeID, hash, expiresAt, now, createdBy, platform); err != nil {
+		`INSERT INTO enroll_codes(node_id, code_hash, code_hint, expires_at, created_at, created_by, platform)
+		 VALUES(?,?,?,?,?,?,?)`, nodeID, hash, hint, expiresAt, now, createdBy, platform); err != nil {
 		return err
 	}
 	if err := r.insertAuditTx(tx, now, createdBy, "enroll_code.create", fmt.Sprint(nodeID), ""); err != nil {
@@ -228,10 +233,18 @@ func (r *Repo) CreateEnrollCode(nodeID int64, hash []byte, expiresAt int64, crea
 
 // ConsumeEnrollCode 原子消费注册码，返回绑定的节点 ID。
 // 使用带条件的 UPDATE 并检查受影响行数，避免并发下同一码被用两次（S6）。
-func (r *Repo) ConsumeEnrollCode(hash []byte, now int64) (nodeID int64, ok bool, err error) {
+//
+// reason 仅在 ok=false 时有意义，供上层给出**可行动**的提示（后台现在能看到
+// 注册码列表，"已被使用"与"已过期"的处置完全不同）：
+//
+//	"used"    注册码存在但已被使用（一次性语义）；
+//	"expired" 注册码存在但已过有效期；
+//	"missing" 注册码不存在（含并发窗口下刚被别人消费走的情形）——
+//	          上层对它必须沿用"无效或已过期"的统一口径，不泄露存在性。
+func (r *Repo) ConsumeEnrollCode(hash []byte, now int64) (nodeID int64, ok bool, reason string, err error) {
 	tx, err := r.db.Write.Begin()
 	if err != nil {
-		return 0, false, err
+		return 0, false, "", err
 	}
 	defer func() { _ = tx.Rollback() }()
 
@@ -239,25 +252,75 @@ func (r *Repo) ConsumeEnrollCode(hash []byte, now int64) (nodeID int64, ok bool,
 		`UPDATE enroll_codes SET used_at=? WHERE code_hash=? AND used_at IS NULL AND expires_at>?`,
 		now, hash, now)
 	if err != nil {
-		return 0, false, err
+		return 0, false, "", err
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return 0, false, err
+		return 0, false, "", err
 	}
 	if n != 1 {
-		return 0, false, nil // 无效码/已使用/已过期
+		// 归因：已使用 / 已过期 / 不存在。归因失败一律按"不存在"处理。
+		var used sql.NullInt64
+		var exp int64
+		switch err := tx.QueryRow(
+			`SELECT used_at, expires_at FROM enroll_codes WHERE code_hash=?`, hash,
+		).Scan(&used, &exp); {
+		case errors.Is(err, sql.ErrNoRows):
+			return 0, false, "missing", nil
+		case err != nil:
+			return 0, false, "", err
+		case used.Valid:
+			return 0, false, "used", nil
+		case exp <= now:
+			return 0, false, "expired", nil
+		default:
+			// 未使用且未过期却没消费成功：并发下刚被另一事务消费，按"已使用"理解。
+			return 0, false, "used", nil
+		}
 	}
 	if err := tx.QueryRow(`SELECT node_id FROM enroll_codes WHERE code_hash=?`, hash).Scan(&nodeID); err != nil {
-		return 0, false, err
+		return 0, false, "", err
 	}
 	if err := r.insertAuditTx(tx, now, fmt.Sprintf("node:%d", nodeID), "enroll_code.consume", "", ""); err != nil {
-		return 0, false, err
+		return 0, false, "", err
 	}
 	if err := tx.Commit(); err != nil {
-		return 0, false, err
+		return 0, false, "", err
 	}
-	return nodeID, true, nil
+	return nodeID, true, "", nil
+}
+
+// EnrollCodeRow 是注册码的后台可见形态：只有提示位与状态，绝不含哈希或明文。
+type EnrollCodeRow struct {
+	ID        int64
+	NodeID    int64
+	Hint      string
+	CreatedAt int64
+	ExpiresAt int64
+	UsedAt    int64 // 0 = 未使用
+	Platform  string
+}
+
+// ListEnrollCodes 列出某节点的注册码（提示位 + 状态），供后台令牌面板展示。
+// 旧库行（迁移前签发）没有提示位，Hint 为空串，前端显示占位即可。
+func (r *Repo) ListEnrollCodes(nodeID int64) ([]EnrollCodeRow, error) {
+	rows, err := r.db.Read.Query(
+		`SELECT id, node_id, COALESCE(code_hint,''), COALESCE(created_at,0), expires_at,
+		        COALESCE(used_at,0), COALESCE(platform,'')
+		 FROM enroll_codes WHERE node_id=? ORDER BY id DESC`, nodeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []EnrollCodeRow
+	for rows.Next() {
+		var c EnrollCodeRow
+		if err := rows.Scan(&c.ID, &c.NodeID, &c.Hint, &c.CreatedAt, &c.ExpiresAt, &c.UsedAt, &c.Platform); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
 }
 
 // ---------------------------------------------------------------------------

@@ -68,3 +68,49 @@ func TestNsPidCount(t *testing.T) {
 		t.Errorf("缺少 NSpid 行时应当返回 0（拿不到证据），实得 %d", got)
 	}
 }
+
+// PID 命名空间 inode 判据：老内核（<4.15）没有 NSpid 行，readlink 是唯一
+// 不依赖内核版本的"隔离事实"。初始命名空间的 inode 是内核常量 4026531836。
+func TestPidNSIno(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int64
+	}{
+		{"pid:[4026531836]", 4026531836}, // 宿主机（初始命名空间）
+		{"pid:[4026532622]", 4026532622}, // 容器（另一层命名空间）
+		{"pid:[1]", 1},
+		{"", 0},                // 读不到
+		{"pid:[]", 0},          // 空值
+		{"pid:[abc]", 0},       // 非数字
+		{"pid:[4026531836", 0}, // 缺右括号：宁可当没证据，也不能猜
+	}
+	for _, c := range cases {
+		if got := pidNSIno(c.in); got != c.want {
+			t.Errorf("pidNSIno(%q) = %d，期望 %d", c.in, got, c.want)
+		}
+	}
+}
+
+// inContainerByPidNS 是"隔离事实"的汇总判据：NSpid ≥2 命中；NSpid 拿不到时
+// 用命名空间 inode 兜底；两条都没有证据时不许替调用方下"不在容器里"的结论。
+func TestInContainerByPidNS(t *testing.T) {
+	const hostNS = "pid:[4026531836]"
+	const boxNS = "pid:[4026532622]"
+
+	// 宿主机：NSpid=1 + 初始 inode → 不在容器里（走宿主机指纹是对的）。
+	if inContainerByPidNS(1, hostNS) {
+		t.Error("NSpid=1 且 inode 为初始值时不应判定在容器里")
+	}
+	// 容器（新内核）：NSpid=2。
+	if !inContainerByPidNS(2, hostNS) {
+		t.Error("NSpid=2 应判定在容器里")
+	}
+	// 容器（老内核，无 NSpid 行）：inode 非初始值兜底。
+	if !inContainerByPidNS(0, boxNS) {
+		t.Error("inode 非初始值应判定在容器里（老内核没有 NSpid 行）")
+	}
+	// 老内核 + readlink 失败：没有证据，返回 false 交给宿主机指纹。
+	if inContainerByPidNS(0, "") {
+		t.Error("两条判据都拿不到证据时不应判定在容器里（证据不足 ≠ 在容器里）")
+	}
+}

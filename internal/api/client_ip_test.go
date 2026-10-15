@@ -120,3 +120,55 @@ func TestRequestSecureTreatsCloudflareEdgeAsProxy(t *testing.T) {
 		t.Error("不可信来源的 X-Forwarded-Proto 被采信了：任意客户端都能伪造 HTTPS")
 	}
 }
+
+// 后台 CDN 列表（cdn.enabled / cdn.ranges）：除 Cloudflare 之外的 CDN 也要能
+// 把"边缘那一跳"跳过去。硬编码的 CF 网段覆盖不了别的 CDN，而 CDN 的网段
+// 又会调整——所以清单进设置项、每次现读，开关关闭时行为与升级前完全一致。
+func TestCDNRangeListExtendsTrustedHops(t *testing.T) {
+	h, repo := newTOTPTestHandler(t)
+
+	// 未启用：清单再怎么填都不参与判定。
+	if err := repo.SetSetting("cdn.ranges", "198.18.0.0/15", 1_760_000_000); err != nil {
+		t.Fatalf("写设置失败：%v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/agent/v1/report", nil)
+	req.RemoteAddr = "198.18.4.7:443"
+	req.Header.Set("X-Forwarded-For", "203.0.113.9")
+	if got := resolveClientIP(req, h.trustCIDRs()); got != "198.18.4.7" {
+		t.Errorf("cdn.enabled=0 时不应信任清单网段：got %q，期望对端 198.18.4.7", got)
+	}
+
+	// 启用：落在清单里的对端被当作 CDN 边缘跳，XFF 还原出真实客户端。
+	if err := repo.SetSetting("cdn.enabled", "1", 1_760_000_000); err != nil {
+		t.Fatalf("写设置失败：%v", err)
+	}
+	if got := resolveClientIP(req, h.trustCIDRs()); got != "203.0.113.9" {
+		t.Errorf("cdn.enabled=1 时应跳过 CDN 边缘跳取 XFF 真实地址：got %q", got)
+	}
+
+	// CDN 后面再挂一层自建反代（trusted_proxies）：链要一路走通。
+	proxyReq := httptest.NewRequest(http.MethodGet, "/api/agent/v1/report", nil)
+	proxyReq.RemoteAddr = "127.0.0.1:54321"
+	proxyReq.Header.Set("X-Forwarded-For", "203.0.113.9, 198.18.4.7")
+	h.TrustedProxies = []string{"127.0.0.1/32"}
+	if got := resolveClientIP(proxyReq, h.trustCIDRs()); got != "203.0.113.9" {
+		t.Errorf("CDN → 自建反代链路应还原真实客户端：got %q", got)
+	}
+
+	// 非 CDN 来源直连：伪造的 XFF 依旧不采信（清单不是"谁都能洗白"的口子）。
+	direct := httptest.NewRequest(http.MethodGet, "/api/agent/v1/report", nil)
+	direct.RemoteAddr = "198.51.100.7:443"
+	direct.Header.Set("X-Forwarded-For", "203.0.113.9")
+	if got := resolveClientIP(direct, h.trustCIDRs()); got != "198.51.100.7" {
+		t.Errorf("对端不在清单内时伪造头不应生效：got %q", got)
+	}
+
+	// requestSecure 共用同一份清单：CDN 边缘写的 X-Forwarded-Proto 才算数。
+	sec := httptest.NewRequest(http.MethodGet, "/admin/", nil)
+	sec.RemoteAddr = "198.18.4.7:443"
+	sec.Header.Set("X-Forwarded-Proto", "https")
+	if !h.requestSecure(sec) {
+		t.Error("对端在 CDN 清单内且 X-Forwarded-Proto: https 时应判为 HTTPS，" +
+			"否则套 CDN 的部署拿不到 Secure Cookie（trustCIDRs 必须三处共用）")
+	}
+}

@@ -168,24 +168,8 @@ func (h *Handler) handleAdminHistory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now()
-	if rangeStr == "30m" {
-		from := now.Add(-30 * time.Minute).Unix()
-		// 必须走 RingPoints：Registry.Get 返回的是副本，为避免与上报路径竞争，
-		// 副本里的 Ring 已被置为 nil（环形缓冲是原地 Push 的）。直接写 rt.Ring.Since
-		// 会在 nil 上取字段而 panic。
-		pts, _ := h.Registry.RingPoints(id, from)
-		series := make([]model.PublicSeries, 0, len(metrics))
-		for _, m := range metrics {
-			s := model.PublicSeries{Metric: m, Unit: unitOf(m)}
-			for _, p := range pts {
-				s.Points = append(s.Points, model.PublicHistoryPoint{TS: p.TS, Value: pickRing(p, m)})
-			}
-			series = append(series, s)
-		}
-		writeJSON(w, http.StatusOK, series)
-		return
-	}
-
+	// 与公开版同口径："最近 30 分钟"读原始精度层（metrics_raw），不再读内存
+	// 环形缓冲——缓冲随 Master 重启清空，重启后这一档就只剩重启以来的几分钟。
 	table := h.Repo.MetricsTableForRange(rangeStr)
 	from := now.Add(-rangeDuration(rangeStr)).Unix()
 	series := make([]model.PublicSeries, 0, len(metrics))

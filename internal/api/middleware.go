@@ -33,12 +33,49 @@ func RealIP(r *http.Request) string {
 
 // RealIPMiddleware 解析来源 IP（S5）。
 // 仅当 TCP 对端命中 trustedProxies（或本身就是 Cloudflare 边缘）时才解析代理头。
-func RealIPMiddleware(trustedProxies []string, next http.Handler) http.Handler {
-	trusted := parseCIDRs(trustedProxies)
+//
+// extra 是**每次请求现取**的补充可信网段（后台的 CDN 列表）：CDN 网段随设置
+// 增删，不能在启动时定死；返回 nil/空表示未启用。静态部分照旧只解析一次。
+func RealIPMiddleware(trustedProxies []string, extra func() []string, next http.Handler) http.Handler {
+	static := parseCIDRs(trustedProxies)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		trusted := static
+		if extra != nil {
+			if e := parseCIDRs(extra()); len(e) > 0 {
+				trusted = make([]*net.IPNet, 0, len(static)+len(e))
+				trusted = append(trusted, static...)
+				trusted = append(trusted, e...)
+			}
+		}
 		ctx := context.WithValue(r.Context(), ctxKeyRealIP{}, resolveClientIP(r, trusted))
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// cdnRangeList 读取后台的 CDN 边缘网段清单（设置 cdn.enabled / cdn.ranges）。
+// 未启用时返回 nil。每次现读：列表可以在后台随时增删，不需要重启 Master。
+func (h *Handler) cdnRangeList() []string {
+	if h.Repo == nil {
+		return nil
+	}
+	if h.Repo.GetSettingDefault("cdn.enabled", "0") != "1" {
+		return nil
+	}
+	return splitCIDRList(h.Repo.GetSettingDefault("cdn.ranges", ""))
+}
+
+// trustCIDRs 是"这一跳算不算代理"的唯一取值来源：
+// 配置文件里的 trusted_proxies + 后台 CDN 列表（开启时）。
+//
+// RealIPMiddleware 之外的调用方（Agent IP 白名单、会话 Cookie 的 Secure 判定）
+// 必须都用它——三处各拼各的清单，迟早有一处漏掉 CDN 网段，表现就是
+// "同一个请求，日志里是真实客户端、Cookie 却降级 / 白名单却拒绝"。
+func (h *Handler) trustCIDRs() []*net.IPNet {
+	c := parseCIDRs(h.TrustedProxies)
+	if e := parseCIDRs(h.cdnRangeList()); len(e) > 0 {
+		c = append(c, e...)
+	}
+	return c
 }
 
 // resolveClientIP 是"这个请求到底是谁发的"的唯一判据（中间件与 Agent IP 白名单共用）。

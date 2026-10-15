@@ -375,3 +375,70 @@ func TestAdminSiteLayoutSettingsHaveChineseLabels(t *testing.T) {
 		t.Errorf("SETTING_GROUPS 缺少「站点形态」分组标题")
 	}
 }
+
+// 本轮新增的设置项必须有中文名、可配置，且各自落进正确的分组（#240~247）。
+//
+// 这四个键分别支撑三件新功能：
+//   - install.max_enroll_codes：单节点有效注册码上限（默认 3，1~20）；
+//   - cdn.enabled / cdn.ranges：CDN 边缘网段清单，开启后这些网段被当作
+//     "已知的代理跳"参与真实客户端 IP 解析（替代写死的 Cloudflare 快照）；
+//   - node.custom_countries：管理员自定义的国家/地区（每行 `代码|名称`）。
+//
+// 漏掉任何一条的后果与 backup.* 那次一样：设置页把英文键名当标签、
+// 字段落进兜底的「其他」分组，管理员无从知道功能存在、更无从配置。
+func TestAdminNewSettingKeysHaveChineseLabelsAndGroups(t *testing.T) {
+	js := readFrontend(t, adminJS)
+
+	type spec struct {
+		key   string
+		group string
+	}
+	cases := []spec{
+		{"install.max_enroll_codes", "['安装与下载',"},
+		{"cdn.enabled", "['CDN 与来源 IP',"},
+		{"cdn.ranges", "['CDN 与来源 IP',"},
+		{"node.custom_countries", "['外部与高级',"},
+	}
+
+	gi := strings.Index(js, "var SETTING_GROUPS")
+	if gi < 0 {
+		t.Fatalf("%s 找不到 SETTING_GROUPS", adminJS)
+	}
+	groups := js[gi:]
+	ge := strings.Index(groups, "];")
+	if ge < 0 {
+		t.Fatalf("无法界定 SETTING_GROUPS 数组")
+	}
+	groups = groups[:ge]
+
+	for _, c := range cases {
+		marker := "'" + c.key + "': ["
+		at := strings.Index(js, marker)
+		if at < 0 {
+			t.Errorf("%s 的 SETTING_LABELS 缺少 %q", adminJS, c.key)
+			continue
+		}
+		rest := strings.TrimLeft(js[at+len(marker):], " \t")
+		if strings.HasPrefix(rest, "null") {
+			t.Errorf("%q 被标成 null（不显示）：它必须可配置", c.key)
+			continue
+		}
+		if !strings.HasPrefix(rest, "'") {
+			t.Errorf("%q 的标签不是字符串字面量，实际起始：%.40s", c.key, rest)
+			continue
+		}
+		label := rest[1 : strings.Index(rest[1:], "'")+1]
+		if !hasHan(label) {
+			t.Errorf("%q 的标签 %q 不含汉字", c.key, label)
+		}
+		if !strings.Contains(groups, "'"+c.key+"'") {
+			t.Errorf("SETTING_GROUPS 里没有 %q：它会落进兜底的「其他」分组", c.key)
+		}
+	}
+
+	for _, g := range []string{"['CDN 与来源 IP',", "['外部与高级',"} {
+		if !strings.Contains(groups, g) {
+			t.Errorf("SETTING_GROUPS 缺少分组标题 %s", g)
+		}
+	}
+}

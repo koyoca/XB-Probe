@@ -442,6 +442,41 @@ func (h *Handler) handleCreateEnrollCode(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, map[string]any{"code": code, "expires_at": expiresAt})
 }
 
+// handleListEnrollCodes 列出某节点的注册码（仅前 6 位提示 + 状态）。
+//
+// 为什么必须能看：一次性注册码在界面上曾经"签发即失踪"——对话框一关就再也
+// 找不回来，管理员既不知道自己手里是否还有效码，也不知道 401 是因为用过还是
+// 过期。状态由服务端算好（避免各端时钟不一致导致"还剩 3 分钟"变"已过期"）。
+func (h *Handler) handleListEnrollCodes(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathInt64(r, "id")
+	if !ok {
+		writeErr(w, http.StatusBadRequest, model.ErrInvalidParam, "非法 ID")
+		return
+	}
+	codes, err := h.Repo.ListEnrollCodes(id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, model.ErrInternal, "查询失败")
+		return
+	}
+	now := time.Now().Unix()
+	out := make([]map[string]any, 0, len(codes))
+	for _, c := range codes {
+		status := "active"
+		switch {
+		case c.UsedAt > 0:
+			status = "used"
+		case c.ExpiresAt <= now:
+			status = "expired"
+		}
+		out = append(out, map[string]any{
+			"id": c.ID, "hint": c.Hint, "created_at": c.CreatedAt,
+			"expires_at": c.ExpiresAt, "used_at": c.UsedAt,
+			"platform": c.Platform, "status": status,
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
 func (h *Handler) handleRevokeToken(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathInt64(r, "id")
 	if !ok {

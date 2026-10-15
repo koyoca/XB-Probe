@@ -49,7 +49,7 @@ func (h *Handler) requestSecure(r *http.Request) bool {
 		return true
 	}
 	peer := remoteHost(r.RemoteAddr)
-	if isTrusted(peer, parseCIDRs(h.TrustedProxies)) || cfEdge(peer) {
+	if isTrusted(peer, h.trustCIDRs()) || cfEdge(peer) {
 		if strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https") {
 			return true
 		}

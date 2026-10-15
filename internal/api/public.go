@@ -125,7 +125,9 @@ func (h *Handler) handlePublicNode(w http.ResponseWriter, r *http.Request) {
 }
 
 // handlePublicHistory 对应 GET /nodes/{public_id}/history。
-// 按跨度自动选层：≤30 分钟读内存，≤24h 读高精度层，≤7d 读中精度层，更长读低精度层（4.2）。
+// 按跨度与保留期自动选层：30m/1h/24h 读原始精度层，7d 读中精度层，更长读低精度层（4.2）。
+// 30m 曾经走内存环形缓冲，缓冲随 Master 重启清空——重启后这一档只剩
+// 重启以来的几分钟，而 1h 及以上读库一切正常。现在全部落库，口径一致。
 func (h *Handler) handlePublicHistory(w http.ResponseWriter, r *http.Request) {
 	publicID := r.PathValue("public_id")
 	rt, ok := h.Registry.GetByPublicID(publicID)
@@ -145,25 +147,10 @@ func (h *Handler) handlePublicHistory(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	span := rangeDuration(rangeStr)
 
-	if rangeStr == "30m" {
-		// 内存实时层：必须走 RingPoints 在锁内取快照。
-		// GetByPublicID 返回的是副本且 Ring 已被置空，直接读 rt.Ring 会 panic，
-		// 更要紧的是环形缓冲是原地 Push 的，锁外读会与上报路径竞争。
-		from := now.Add(-30 * time.Minute).Unix()
-		pts, _ := h.Registry.RingPointsByPublicID(publicID, from)
-		series := make([]model.PublicSeries, 0, len(metrics))
-		for _, m := range metrics {
-			s := model.PublicSeries{Metric: m, Unit: unitOf(m)}
-			for _, p := range pts {
-				s.Points = append(s.Points, model.PublicHistoryPoint{TS: p.TS, Value: pickRing(p, m)})
-			}
-			series = append(series, s)
-		}
-		w.Header().Set("Cache-Control", "max-age=2")
-		writeJSON(w, http.StatusOK, series)
-		return
-	}
-
+	// "最近 30 分钟"不再读内存环形缓冲：环形缓冲随 Master 进程生死，重启即空，
+	// 而且"关掉网站过一阵再回来"时缓冲里只剩重启后的几分钟（本缺陷）。
+	// 与延迟曲线同口径：30m 读原始精度层（metrics_raw / latency_raw），
+	// 行为与 1h/24h 完全一致、可持久回看。
 	table := h.Repo.MetricsTableForRange(rangeStr)
 	from := now.Add(-span).Unix()
 	series := make([]model.PublicSeries, 0, len(metrics))

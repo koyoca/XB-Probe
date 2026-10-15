@@ -425,9 +425,10 @@
 
   // renderFlag 渲染国家/地区标识。
   //
-  // 未设置 country（空串）或代码不在 FLAGS 表里时不画旗帜，也不填占位符：
-  // 这一格由 CSS 固定宽度（.n-flag），所以"有没有旗帜"不会让同一行的
-  // 名称起点左右跳动——卡片位置固定是本项目的硬约束。
+  // 未设置 country（空串）时不画旗帜也不填占位符。内置 FLAGS 表没有的代码
+  // （管理员在后台自定义的地区）画不出旗，就以两位代码作为标识——这不是
+  // "缺值占位"（管理员明确设置过国家），且 .n-flag 是固定宽度，两个字母
+  // 不会让同一行的名称起点移位，卡片位置依旧稳定。
   function renderFlag(box, code) {
     if (!box) return;
     if (box._code === code) return; // 3 秒轮询一次，代码没变就别重建 DOM
@@ -436,7 +437,12 @@
     box.removeAttribute('title');
     if (!code) return;
     var svg = svgNode(flagSVG(code));
-    if (!svg) return;
+    if (!svg) {
+      var fb = el('span', 'n-flag-code', code);
+      box.appendChild(fb);
+      box.title = '地区 ' + code;
+      return;
+    }
     box.appendChild(svg);
     var e = FLAGS[code];
     box.title = e ? e[0] : ('地区 ' + code);

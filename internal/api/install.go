@@ -326,7 +326,7 @@ func (h *Handler) handleInstallCommand(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// newEnrollCode 生成一次性注册码（Crockford base32、库内仅存哈希、绑定节点）。
+// newEnrollCode 生成一次性注册码（Crockford base32、库内仅存哈希与前 6 位提示、绑定节点）。
 func (h *Handler) newEnrollCode(nodeID int64, actor, platform string) (string, int64, error) {
 	code, err := auth.GenerateEnrollCode()
 	if err != nil {
@@ -336,7 +336,14 @@ func (h *Handler) newEnrollCode(nodeID int64, actor, platform string) (string, i
 	now := time.Now()
 	expiresAt := now.Add(time.Duration(ttlMin) * time.Minute).Unix()
 
-	if err := h.Repo.CreateEnrollCode(nodeID, auth.EnrollCodeHash(code),
+	// 提示位只存前 6 位（与 node_tokens.token_hint 同思路）：后台令牌面板要能
+	// 看到"已签发但未被使用"的注册码，否则"码已发出但界面上无迹可查"，
+	// 一次对话框关闭就永远拿不回来。
+	hint := code
+	if len(hint) > 6 {
+		hint = hint[:6]
+	}
+	if err := h.Repo.CreateEnrollCode(nodeID, auth.EnrollCodeHash(code), hint,
 		expiresAt, actor, platform, now.Unix()); err != nil {
 		return "", 0, err
 	}

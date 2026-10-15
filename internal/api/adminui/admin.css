@@ -664,6 +664,12 @@ canvas.chart { width: 100%; height: clamp(150px, 13vw, 230px); display: block; }
    元素为空是渲染的既定状态：renderFlag 先 textContent = '' 再 appendChild(svg)，
    所以 :empty 只在"确实没旗"时命中。 */
 .n-flag:empty { display: none; }
+/* 自定义/未收录地区没有内置旗帜图形：以两位代码作为标识（与公开看板同款）。 */
+.n-flag-code {
+  font-size: 9px; font-weight: 600; letter-spacing: .3px;
+  color: var(--muted, #868686); line-height: 1;
+  white-space: nowrap;
+}
 
 .kpis {
   display: grid; grid-template-columns: repeat(5, minmax(0, 1fr));

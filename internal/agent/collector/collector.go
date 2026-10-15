@@ -10,6 +10,7 @@ package collector
 
 import (
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -203,4 +204,45 @@ func nsPidCount(status string) int {
 		return len(strings.Fields(strings.TrimPrefix(ln, "NSpid:")))
 	}
 	return 0
+}
+
+// initialPidNSIno 是**初始** PID 命名空间的 inode。这个值在内核源码里是静态
+// 初始化的常量（init_pid_ns），历代内核都不变——因此"readlink 出来的 inode
+// 不是它"本身就是"我们在另一个 PID 命名空间里"的充分证据。
+const initialPidNSIno int64 = 4026531836
+
+// pidNSIno 从 readlink(/proc/self/ns/pid) 的结果（形如 "pid:[4026531836]"）里
+// 取出命名空间 inode。解析失败返回 0——那是"拿不到证据"，调用方不得当成
+// "不在容器里"。
+//
+// 为什么需要它：NSpid 这一行是 Linux 4.15（2018）才加进 /proc/self/status 的。
+// 老内核（比如还跑着 3.10 的 CentOS 7 宿主机）上的 LXC 容器根本没有这一行，
+// nsPidCount 恒为 0，"隔离事实"这一层就漏了——容器里读到的 DMI 又全是宿主的，
+// 最后 LXC 被报成宿主那台 KVM 虚机的 kvm。readlink 在任何内核上都可用，
+// 且不需要任何权限。
+func pidNSIno(link string) int64 {
+	link = strings.TrimSpace(link)
+	i := strings.IndexByte(link, '[')
+	j := strings.LastIndexByte(link, ']')
+	if i < 0 || j <= i {
+		return 0
+	}
+	n, err := strconv.ParseInt(link[i+1:j], 10, 64)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
+}
+
+// inContainerByPidNS 汇总两条"隔离事实"判据：NSpid 个数 ≥2，或 PID 命名空间
+// inode 不是初始值。任一命中即在容器里；两条都拿不到证据时返回 false，
+// 由调用方继续走宿主机指纹（那是"证据不足"时的无奈之举，不是误报来源）。
+func inContainerByPidNS(nspid int, link string) bool {
+	if nspid > 1 {
+		return true
+	}
+	if ino := pidNSIno(link); ino != 0 && ino != initialPidNSIno {
+		return true
+	}
+	return false
 }
