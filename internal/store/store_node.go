@@ -381,6 +381,25 @@ func (r *Repo) ArchiveNode(id, now int64) error {
 	return err
 }
 
+// UnarchiveNode 解除归档（重新接回）。
+//
+// 存在理由：归档原本是**单向**的——`xb-probe-agent uninstall` 会归档节点并
+// 吊销令牌，而重新安装拿到的新令牌在上报时又因 `nodes.status='archived'` 被拒，
+// 全仓库却没有解除入口，于是节点再也装不上（用户实测的死锁）。
+// 现在由 enroll 路径在"凭有效注册码重新注册"时自动调用。
+//
+// 两列都要改：`archived_at` 是"是否归档"的权威来源（运行态、公开看板、
+// 调度器都看它），`status` 则是 Tokens.Authenticate 读的那一列。
+// 只改一个会让两边判断打架——正是这次死锁的成因之一。
+//
+// 状态置回 'offline' 而不是沿用旧值：刚重新注册的节点还没有任何上报，
+// 由调度器的离线判定在收到第一次上报后自然推进到 online。
+func (r *Repo) UnarchiveNode(id int64) error {
+	_, err := r.db.Write.Exec(
+		`UPDATE nodes SET status='offline', archived_at=NULL WHERE id=?`, id)
+	return err
+}
+
 // DeleteNode 删除节点；purge=true 时同时清除历史数据（后台分批清理，A7）。
 func (r *Repo) DeleteNode(id int64, purge bool) error {
 	if _, err := r.db.Write.Exec(`DELETE FROM nodes WHERE id=?`, id); err != nil {

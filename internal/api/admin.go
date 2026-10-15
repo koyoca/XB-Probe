@@ -444,6 +444,48 @@ func (h *Handler) handleArchiveNode(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handleUnarchiveNode 解除归档，让节点重新参与采集与告警。
+//
+// 为什么需要它：归档原本是**单向**的——`xb-probe-agent uninstall` 会归档节点
+// 并吊销令牌，而重新安装后上报会被 `nodes.status='archived'` 拒掉，
+// 全仓库却没有解除入口。enroll 路径现在会在重新注册时自动解除（那是主要路径），
+// 但管理员仍需要能手工把一个"莫名归档"的节点接回来：
+//   - 误点了归档按钮；
+//   - 节点是别人卸载的，而现在要把它恢复成采集状态（且不想重新装 agent）。
+//
+// 不清令牌：归档时令牌已被吊销（uninstall 那一路）或仍在有效期内（后台点归档
+// 那一路）。前者需要重新注册才能拿到新令牌，后者原令牌仍可用——两种都由
+// 调用方自己判断，这里只负责把节点从归档态放出来。
+func (h *Handler) handleUnarchiveNode(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathInt64(r, "id")
+	if !ok {
+		writeErr(w, http.StatusBadRequest, model.ErrInvalidParam, "非法 ID")
+		return
+	}
+	now := time.Now().Unix()
+	cur, _ := h.Repo.GetNode(id)
+	if cur == nil {
+		writeErr(w, http.StatusNotFound, model.ErrNotFound, "节点不存在")
+		return
+	}
+	if cur.ArchivedAt == 0 {
+		// 已是正常状态：不报错（幂等），避免前端"点了没反应"的困惑。
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if err := h.Repo.UnarchiveNode(id); err != nil {
+		writeErr(w, http.StatusInternalServerError, model.ErrInternal, "解除归档失败")
+		return
+	}
+	// 两处都要复位：库（见 UnarchiveNode）+ 内存运行态。运行态里的 Archived
+	// 决定公开看板是否展示它、调度器是否跳过离线判定——只改库不改运行态，
+	// 要等下一次 SyncMeta（可达数分钟）才生效。
+	h.Registry.SyncMeta(id, cur.PublicID, cur.Name, cur.GroupName, cur.SortOrder,
+		cur.PublicVisible, false, cur.IPv4 != "", cur.IPv6 != "", cur.Country)
+	_ = h.Repo.Audit(now, actorOf(r), "node.unarchive", fmt.Sprint(id), RealIP(r))
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (h *Handler) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathInt64(r, "id")
 	if !ok {

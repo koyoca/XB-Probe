@@ -75,3 +75,31 @@ func TestTOTPEnableShowsRecoveryCodesAfterRender(t *testing.T) {
 		t.Fatal("loadTOTP 没有 return Promise：调用方无法在渲染完成后再写入恢复码")
 	}
 }
+
+// TestUnarchivePathIsRegistered 钉"解除归档"的前后端接线。
+//
+// 背景（用户实测的死锁）：`xb-probe-agent uninstall` 会归档节点并吊销令牌，
+// 重新安装后上报被 `nodes.status='archived'` 拒掉 → 节点永远装不上。
+// 修法是双保险：enroll 时自动解除 + 后台一个手工入口。
+// 手工入口最容易漏的就是接线（前端调了后端没注册 = 404 = 点按钮没反应），
+// 与 TOTP 那次是同一个坑，所以放在同一处判据里钉。
+func TestUnarchivePathIsRegistered(t *testing.T) {
+	js := readSrc(t, filepath.Join("adminui", "admin.js"))
+	router := readSrc(t, "router.go")
+
+	if !strings.Contains(js, "api('/nodes/' + id + '/unarchive', { method: 'POST' })") {
+		t.Error("admin.js 没有调用 POST /nodes/{id}/unarchive：界面上没有解除归档的出口")
+	}
+	if !strings.Contains(router, `"POST /api/admin/v1/nodes/{id}/unarchive"`) {
+		t.Fatal("router.go 未注册 POST /api/admin/v1/nodes/{id}/unarchive：前端调用会 404")
+	}
+	// 已归档的节点必须给出解入口，否则用户只能删节点重建。
+	if !strings.Contains(js, "if (n.archived_at) {") ||
+		!strings.Contains(js, "解除归档") {
+		t.Error("节点详情没有按归档状态切换「归档 / 解除归档」按钮")
+	}
+	// 审计动作要有中文名（否则审计页显示裸英文键）。
+	if !strings.Contains(js, "'node.unarchive': '解除归档'") {
+		t.Error("审计动作 node.unarchive 缺中文映射")
+	}
+}

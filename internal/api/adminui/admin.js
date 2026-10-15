@@ -414,6 +414,7 @@
   var AUDIT_ACTION = {
     'node.create': '创建节点', 'node.update': '更新节点', 'node.delete': '删除节点',
     'node.archive': '归档节点',
+    'node.unarchive': '解除归档',
     'node.deregister': '节点注销（Agent 主动）',
     // 后端早就在记这几个动作，但表里缺中文 → 审计日志里孤零零一行英文键，
     // 管理员看不懂那是什么操作（用户反馈"有些字体是英文"）。
@@ -1422,6 +1423,23 @@
     });
   }
 
+  // unarchiveNode 把节点从归档态放出来。
+  //
+  // 存在的理由：卸载 Agent 会归档节点，而重新安装后上报会被归档状态拒掉——
+  // 因此需要一个手工补救通道（重新注册时也会自动解除，这里是"不想重装"或
+  // "误点归档"时的出路）。
+  function unarchiveNode(id) {
+    askDialog({
+      title: '解除归档 #' + id,
+      desc: '解除后节点重新参与采集与告警，离线判定立即恢复。'
+        + '若该节点已被卸载（令牌已吊销），还需在节点上重新安装 Agent 才能上报。',
+      okText: '解除归档'
+    }).then(function (r) {
+      if (!r.ok) return;
+      guard(api('/nodes/' + id + '/unarchive', { method: 'POST' }), '已解除归档').then(loadNodes);
+    });
+  }
+
   function deleteNode(id, name) {
     askDialog({
       title: '删除节点 #' + id,
@@ -1926,7 +1944,13 @@
         .then(function () { loadNodeDetail(n.id); loadNodes(); });
     }));
     row.appendChild(btn('重新签发令牌', 'ghost', function () { reenroll(n.id); }));
-    row.appendChild(btn('归档节点', 'ghost', function () { archiveNode(n.id); }));
+    // 已归档的节点给出「解除归档」，正常节点才给「归档」——两个方向都有出口，
+    // 不再像以前那样"归档了就回不来"（重新安装会被归档状态拒掉，只能删节点重建）。
+    if (n.archived_at) {
+      row.appendChild(btn('解除归档', 'ghost', function () { unarchiveNode(n.id); }));
+    } else {
+      row.appendChild(btn('归档节点', 'ghost', function () { archiveNode(n.id); }));
+    }
     row.appendChild(btn('删除节点', 'ghost danger', function () { deleteNode(n.id, n.name); }));
     panel.appendChild(row);
     wrap.appendChild(panel);
@@ -4212,16 +4236,16 @@
       '「分离」= 公开域名只服务公开路径、管理域名只服务管理路径，用错域名返回 421，' +
       '适合"一个域名给访客、一个域名给自己"。选「分离」时必须同时填下面两项（或写在 master.yaml 里），' +
       '否则保存会被拒绝——那会把你自己锁在后台外面。保存后立即生效，不需要重启。'],
-    'site.public_hosts': ['公开域名清单（一行一个，留空则用 master.yaml 的 public_hosts）', 'lines',
+    'site.public_hosts': ['公开域名清单', 'lines',
       '公开看板允许使用的主机名[:端口]。填了就顶替 master.yaml 里的 public_hosts；' +
       '留空 = 没在后台配过，回落到配置文件。' +
       'host 不匹配的请求返回 421（而不是 404）——那是部署配置错误的特征，' +
       '比一个 404 好排查得多。同一台机器不同端口算不同的源，需显式写出 :端口。'],
-    'site.admin_hosts': ['管理域名清单（一行一个，留空则用 master.yaml 的 admin_hosts）', 'lines',
+    'site.admin_hosts': ['管理域名清单', 'lines',
       '管理后台允许使用的主机名[:端口]。作用同上一项，但它是**安全开关**：' +
       '配好之后，拿公开域名访问 /admin/ 或 /api/admin/v1/* 会被 421 拦掉。' +
       '选「分离」形态时该项必须非空。'],
-    'site.admin_url': ['后台入口地址（公开看板的「管理后台」按钮指向这里）', 'text',
+    'site.admin_url': ['后台入口地址', 'text',
       '留空则自动推导：master.yaml 的 admin_origin → 分离且只有一个管理域名时按访问协议拼出 → ' +
       '都拿不到就保持同站相对路径 /admin/。' +
       '只有当公开看板与后台**不在同一个源**（不同端口，或不同域名）而自动推导又推不出来时才需要填，' +
@@ -4239,7 +4263,7 @@
     'public.enabled': ['公开看板', 'select:1=开放,0=关闭',
       '是否对外公开节点看板。关闭后未登录访客访问公开页面与公开 API 均返回 404，' +
       '但登录管理员仍可正常打开看板自查效果；一键安装脚本与 Agent 发布文件仍然可用，不影响新节点接入。'],
-    'public.cards': ['公开看板卡片（勾选 = 对公展示，逐张开关）', 'cards',
+    'public.cards': ['公开看板卡片', 'cards',
       '逐张控制公开看板上显示哪些卡片。取消勾选只是**不渲染那张卡片**，数据仍会下发；' +
       '如果连数据也不想下发，请改用公开字段白名单 public.fields。' +
       '全部取消勾选 = 一张都不展示；勾上「全部展示」= 不做限制（默认）。'],
@@ -4247,15 +4271,17 @@
       '节点卡片「延迟 / 丢包」点阵统计的时间范围。30 分钟 / 1 小时读原始探测层' +
       '（10 分钟层在这么短的窗口里只有 3/6 个桶，画不出点阵），6 小时 / 24 小时读 10 分钟聚合层。' +
       '保存后调度器在 1 分钟内按新窗口重算点阵。'],
-    'public.show_ip_badge': ['公开卡片显示 IP 标识（IPv4/IPv6）', 'select:1=显示,0=隐藏',
+    'public.show_ip_badge': ['公开卡片 IP 标识', 'select:1=显示,0=隐藏',
       '控制公开卡片是否渲染 IPv4/IPv6 协议栈标识。关闭后该标识不再展示，相关的协议栈信息也不再下发。'],
-    'admin.session_ttl_hours': ['登录有效期小时（1-720，到期必须重新登录）', 'number',
+    'admin.session_ttl_hours': ['登录有效期（小时）', 'number',
       '从**登录那一刻**算起，超过这个时长就必须重新登录（默认 12 小时）。' +
       '它与空闲超时是两条独立的线：页面停在那里不动由空闲超时兜底（固定 2 小时），' +
       '一直在用则由本项兜底——所以这条才是"登录多久之后要重新输密码"的那个数。' +
       '判定用的是**当前设置值**，因此改小立即生效：已经超过新时长的会话在下一个请求' +
       '就会被踢回登录页（改大同样对已登录的会话生效）。'],
-    'timezone': ['全局时区（IANA 名称，如 Asia/Shanghai）', 'text'],
+    'timezone': ['全局时区', 'text',
+      'IANA 名称，如 Asia/Shanghai。留空表示跟随 Master 所在系统时区。' +
+      '影响「今日流量」的日界与到期提醒的日期计算。'],
     'retention.raw_hours': ['高精度层保留小时（1-72）', 'number'],
     'retention.mid_days': ['中精度层保留天（1-30）', 'number'],
     'retention.days': ['低精度层/总保留天（1-365）', 'number'],
@@ -4263,25 +4289,35 @@
     'report_interval_s': ['Agent 上报间隔秒（2-60）', 'number'],
     'probe_interval_s': ['探测周期秒（10-600）', 'number'],
     'offline_timeout_s': ['离线超时阈值秒（10-3600）', 'number'],
-    'disk_min_free_mb': ['磁盘剩余告警阈值 MB（50-100000）', 'number'],
+    'disk_min_free_mb': ['磁盘剩余阈值（MB）', 'number',
+      'Master 所在磁盘剩余空间低于此值时暂停时序写入（保护数据库不被写坏）。' +
+      '取值 50-100000。'],
     'install.mode': ['安装入口模式', 'select:on_demand=按需生成,always=始终可用,off=关闭安装入口',
       '控制 /install.sh 的响应策略：按需生成表示需要携带有效注册码才下发脚本。'],
-    'install.master_url': ['Master 公网地址（https，拼入安装命令）', 'text'],
-    'install.dist_base': ['二进制下载源（留空用 Master 的 /dist）', 'text'],
+    'install.master_url': ['Master 公网地址', 'text',
+      '会被拼进一键安装命令，因此必须是 https 开头、且仅含字母数字与 .-:/_。' +
+      '留空则回落到公开站地址。'],
+    'install.dist_base': ['二进制下载源', 'text',
+      '安装脚本从这里下载 Agent 二进制。留空表示用 Master 自带的 /dist。' +
+      '填第三方镜像时注意：SHA256SUMS 始终取自 Master，镜像无法伪造校验和。'],
     'install.agent_version': ['安装的 Agent 版本（留空取最新）', 'text'],
     'install.code_ttl_min': ['注册码有效期分钟（5-1440）', 'number'],
     'install.max_enroll_codes': ['每节点注册码上限（1-20）', 'number',
       '同一个节点同时最多存在多少个"未使用且未过期"的注册码。' +
       '注册是一次性的，排查注册失败时常常要连签几个码；默认 3，' +
       '被"已达上限"卡住时可以调大。下方令牌面板能查看每个码的状态。'],
-    'install.spki_sha256': ['Master SPKI 指纹（自签证书场景，逗号分隔）', 'text'],
-    'install.pubkey': ['minisign 公钥（校验 SHA256SUMS，两行文本；留空则不校验）', 'raw'],
+    'install.spki_sha256': ['Master SPKI 指纹', 'text',
+      '自签证书场景下，安装脚本用固定公钥指纹校验 Master 身份（防中间人）。' +
+      '多个指纹用逗号分隔。留空表示不校验。'],
+    'install.pubkey': ['minisign 公钥', 'raw',
+      '两行文本（注释行 + 一行 base64）。配了之后安装脚本会验签 SHA256SUMS，' +
+      '把信任锚从「镜像 URL 可信」收敛为「校验和出自维护者私钥」。留空则不校验。'],
     'cdn.enabled': ['CDN 来源识别', 'select:0=关闭,1=开启',
       '节点经 CDN（如 Cloudflare）回源时，Master 看到的连接来源是 CDN 的边缘地址。' +
       '开启后，下方网段清单会被当作"已知的 CDN 边缘跳"：解析 X-Forwarded-For 时' +
       '把这些跳跳过去，记录到的才是节点的真实公网地址。Cloudflare 的官方网段已内置，' +
       '这里只补其它 CDN 或自建加速层。'],
-    'cdn.ranges': ['CDN 边缘网段清单（每行一个 CIDR 或 IP）', 'raw',
+    'cdn.ranges': ['CDN 边缘网段', 'raw',
       '从 CDN 官方页面复制即可，一行一条，支持 IPv4/IPv6；逗号分隔也可以。' +
       '例如：173.245.48.0/20。只添加你能确认属于该 CDN 的网段——' +
       '来源不落在清单里时一律按连接对端处理，伪造的代理头不会生效。'],
@@ -4290,12 +4326,14 @@
       '例如 GB|英国 或 HK|中国香港（代码为 ISO 3166-1 alpha-2）。' +
       '只写代码不写名称也可以；保存后在节点编辑的国家/地区下拉里出现。' +
       '自定义地区没有内置国旗图形，卡片上以两位代码显示。'],
-    'heartbeat_url': ['外部心跳地址（https，Master 每 5 分钟 GET 一次）', 'text'],
+    'heartbeat_url': ['外部心跳地址', 'text',
+      'Master 每 5 分钟 GET 一次这个地址（https）。配合外部监控的「心跳缺失告警」，' +
+      '可以覆盖「Master 整机失联」这种自己发不出告警的情况。'],
     'backup.enabled': ['每日自动备份', 'select:1=开启,0=关闭',
       '开启后 Master 每天在指定时刻自动生成一次数据库备份（VACUUM INTO 在线快照，不需要停服）。' +
       '关闭后不再自动备份，只能在下方「数据库备份」区手动点「立即备份」。' +
       '备份是"存在感很低但缺了就致命"的功能，除非你有自己的备份方案，否则建议保持开启。'],
-    'backup.hour': ['自动备份时刻（0-23 时，Master 本地时区）', 'number',
+    'backup.hour': ['自动备份时刻（时）', 'number',
       '一天中的哪个整点执行自动备份。按 Master 的本地时区解释——' +
       '你脑子里想的"凌晨 4 点"就是本机时钟上的 4 点（库里记录的时间戳仍是 UTC）。' +
       '建议选业务低谷时段，备份期间会有一次全库读取。'],
@@ -4303,24 +4341,39 @@
       '最多保留多少份备份，超出的自动删除最旧的一份。' +
       '手动「立即备份」同样受这个上限约束，否则连点几次就能把备份盘塞满。' +
       '下限为 1：不允许配成"一份都不保留"。'],
-    'billing.base_currency': ['主币种（月费合计以它计价，如 CNY）', 'text',
+    'billing.base_currency': ['主币种', 'text',
       '留空 = 不换算：月费合计直接累加各节点的原值，币种取第一个有月支出的节点' +
       '（升级前的行为）。填了主币种（三位字母，ISO 4217）之后：' +
       '每个节点的月均费用先按下方汇率换算成主币种，再累加，合计币种恒为主币种。' +
       '公开看板与后台的「月费合计」共用这一份口径，改完立即生效、无需重启。'],
-    'billing.rates': ['汇率表（每项：币种:数值；数值 = 1 单位该币种折合多少主币种）', 'text',
-      '逗号分隔，例如主币种是 CNY 时填 USD:7,JPY:0.05（1 USD = 7 CNY）。' +
+    // 标签一律写**短**（单行放得下），详细解释放第三个元素当悬浮说明。
+    // 设置页的列宽是 280px 起，超过 ~22 个汉字的标签必然折行——而折行的
+    // 标签会让同一行的所有输入框跟着下移，整块看着参差（用户反馈
+    // "本来一行的却占用两行"）。
+    'billing.rates': ['汇率表', 'text',
+      '格式：币种:数值，逗号分隔；数值 = 1 单位该币种折合多少主币种。' +
+      '例如主币种是 CNY 时填 USD:7,JPY:0.05（1 USD = 7 CNY）。' +
       '主币种自己不用填（恒为 1）。没有配汇率的币种按原值计入，不会被乘上一个编造的倍率。' +
       '币种代码三位字母、数值必须大于 0。'],
     // 审计日志保留期（天）。它同时由**审计日志页**的专用面板管理（那里带
     // 密码/动态码二次确认、改完立即清理一次）；这里给出同一份可读标签，
     // 免得该键被改过一次之后在设置页里以英文键名形式冒出来（用户反馈"改为中文"）。
-    'audit.retention_days': ['审计日志保留天数（1-3650）', 'number',
+    'audit.retention_days': ['审计日志保留天数', 'number',
       '审计日志超过这个天数的记录会被自动清理（每小时一次），也可在审计页点「立即清理」。' +
       '修改本项与审计页的「保存保留期」是同一个值：审计页那条会额外要求密码（TOTP 开启时' +
       '再加动态码）并立即清理一次。保留期越长，能追溯的历史操作越多，但库也越大。'],
-    'inject.head': ['自定义 <head> 注入（支持 <meta>/<link>/<style>，不含脚本）', 'text'],
-    'inject.body_end': ['页尾 </body> 前注入（0/1 开关开启后才会插入，可含 <script>）', 'text'],
+    'alert.retention_days': ['告警事件保留天数', 'number',
+      '告警事件（告警页下方那张表）超过这个天数的记录会被每小时一次的清理删掉。' +
+      '此前固定保留 90 天、不可调整；现在可以按自己的告警量与磁盘情况调整。' +
+      '保留期越长，能回看的告警历史越多，但 alert_events 表也越大。'],
+    // 注入类字段的内容通常很长（HTML/脚本片段），标签保持短、输入框加高：
+    // 单行 input 里编辑多行 HTML 很难受，而这两个字段本就允许很长（上限 8192）。
+    'inject.head': ['页头注入（<head>）', 'area',
+      '插入到测试页 <head> 里的自定义内容，支持 <meta>/<link>/<style>，**不含脚本**。' +
+      '常用来加统计代码、外部字体或验证标签。留空表示不注入。'],
+    'inject.body_end': ['页尾注入（</body> 前）', 'area',
+      '插入到 </body> 之前的内容。可含 <script>，但只有在下一项「页尾脚本注入」' +
+      '开启后脚本才会真正执行（并为其下发 CSP nonce）。留空表示不注入。'],
     'inject.script_enabled': ['页尾脚本注入', 'select:0=关闭,1=开启',
       '开启后 /inject.body_end 里的 <script> 才会真正插入页面并执行，同时 CSP 会为该脚本下发 nonce。只在你完全信任脚本来源时开启。'],
     'theme.active': null,
@@ -4334,12 +4387,13 @@
     ['站点形态', ['site.layout', 'site.public_hosts', 'site.admin_hosts', 'site.admin_url']],
     ['登录与会话', ['admin.session_ttl_hours']],
     ['公开看板', ['public.enabled', 'public.cards', 'public.lat_window', 'public.show_ip_badge']],
-    ['数据保留', ['retention.raw_hours', 'retention.mid_days', 'retention.days', 'raw_resolution_s']],
+    ['数据保留', ['retention.raw_hours', 'retention.mid_days', 'retention.days', 'raw_resolution_s',
+      'audit.retention_days', 'alert.retention_days']],
     ['Agent 与上报', ['report_interval_s', 'probe_interval_s', 'offline_timeout_s', 'disk_min_free_mb',
       'agent.ip_whitelist_enabled', 'agent.ip_whitelist']],
     ['安装与下载', ['install.mode', 'install.master_url', 'install.dist_base', 'install.agent_version', 'install.code_ttl_min', 'install.max_enroll_codes', 'install.spki_sha256', 'install.pubkey']],
     ['CDN 与来源 IP', ['cdn.enabled', 'cdn.ranges']],
-    ['备份', ['backup.enabled', 'backup.hour', 'backup.keep', 'audit.retention_days']],
+    ['备份', ['backup.enabled', 'backup.hour', 'backup.keep']],
     ['多币种（月费合计）', ['billing.base_currency', 'billing.rates']],
     ['脚本注入', ['inject.script_enabled', 'inject.head', 'inject.body_end']],
     ['外部与高级', ['heartbeat_url', 'node.custom_countries']]
@@ -4471,6 +4525,20 @@
       ta2.value = state.settings[key] == null ? '' : String(state.settings[key]);
       lab2.appendChild(ta2);
       return lab2;
+    }
+    if (type === 'area') {
+      // 长文本注入（页头/页尾）：与 'raw' 同样是原样多行、不做任何切分，
+      // 但输入区更高（rows=6）——注入的 HTML/脚本片段通常几十行，
+      // 给 3 行的框等于逼着用户在滚动条里编辑。
+      var lab3 = el('label', 'setting-wide');
+      lab3.title = tip;
+      lab3.appendChild(el('span', 'lbl', text));
+      var ta3 = el('textarea');
+      ta3.rows = 6;
+      ta3.setAttribute('data-key', key);
+      ta3.value = state.settings[key] == null ? '' : String(state.settings[key]);
+      lab3.appendChild(ta3);
+      return lab3;
     }
     var label = el('label');
     label.title = tip;

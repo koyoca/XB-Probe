@@ -1000,14 +1000,27 @@ func (s *Scheduler) cleanup(now time.Time) {
 			s.log.Error("WAL 截断失败", "err", err.Error())
 		}
 	}
-	// 告警事件保留 90 天（6.5）；审计日志保留期可配置（默认 30 天，可在后台修改）。
-	eventCutoff := now.AddDate(0, 0, -90).Unix()
-	_, _ = s.repo.DB().Write.Exec(`DELETE FROM alert_events WHERE created_at < ?`, eventCutoff)
+	// 清理段：三者保留期各自独立，**不能共用一个 cutoff**。
+	// 曾经 alert_events 与 enroll_codes 都拿同一个 `eventCutoff`（写死 90 天），
+	// 于是"改告警保留期"会连带影响注册码的清理窗口——而注册码本来只需要
+	// 活到"过期后没人再查"就够了，与告警完全无关。
+	//
+	// 告警事件保留期改为可配置（设置项 alert.retention_days，默认 90 与升级前一致）。
+	alertDays := int(s.repo.GetIntSetting("alert.retention_days", 90))
+	if alertDays < 1 {
+		alertDays = 1
+	}
+	_, _ = s.repo.DB().Write.Exec(`DELETE FROM alert_events WHERE created_at < ?`,
+		now.AddDate(0, 0, -alertDays).Unix())
+
 	auditDays := int(s.repo.GetIntSetting("audit.retention_days", 30))
 	if _, err := s.repo.PruneAuditLog(now.AddDate(0, 0, -auditDays).Unix()); err != nil {
 		s.log.Error("审计日志清理失败", "err", err.Error())
 	}
-	_, _ = s.repo.DB().Write.Exec(`DELETE FROM enroll_codes WHERE expires_at < ?`, eventCutoff)
+	// 注册码：过期 90 天后清掉（无保留期设置项——它的"有效期"由
+	// install.code_ttl_min 决定，这里只是把早已失效的记录收走）。
+	_, _ = s.repo.DB().Write.Exec(`DELETE FROM enroll_codes WHERE expires_at < ?`,
+		now.AddDate(0, 0, -90).Unix())
 
 	// 每日自动备份（6.6）。放在 cleanup 里而不是单独开 ticker：
 	// 清理是每小时跑一次的既有节拍，备份按"日期去重"天然就是每日一次，

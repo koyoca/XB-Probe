@@ -1,6 +1,9 @@
 package store
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -664,5 +667,85 @@ func TestCleanupNICBaselines(t *testing.T) {
 	}
 	if _, ok := out["fresh0"]; !ok {
 		t.Error("未过期基线不应被删除")
+	}
+}
+
+// TestUnarchiveNodeClearsBothMarkers 钉"解除归档"必须同时清掉两个标记。
+//
+// 背景（用户实测的死锁）：`xb-probe-agent uninstall` 会归档节点并吊销令牌；
+// 重新安装拿到的新令牌在上报时被 `Tokens.Authenticate` 以
+// `nodes.status='archived'` 拒掉，而归档标记的**权威来源**却是
+// `archived_at`（运行态、公开看板、调度器都看它）——两列各管一摊。
+// 只清其中一列 = 那一边继续拦着，现象依旧是"令牌有效却报 node_archived"。
+func TestUnarchiveNodeClearsBothMarkers(t *testing.T) {
+	r := newTestRepo(t)
+	id := mustNode(t, r, "unarchive")
+
+	if err := r.ArchiveNode(id, 1_760_000_000); err != nil {
+		t.Fatalf("归档失败：%v", err)
+	}
+	n, err := r.GetNode(id)
+	if err != nil {
+		t.Fatalf("读取节点失败：%v", err)
+	}
+	if n.ArchivedAt == 0 {
+		t.Fatal("归档后 archived_at 应为非 0")
+	}
+	if st, _ := r.NodeStatus(id); st != "archived" {
+		t.Fatalf("归档后 status 应为 archived，实际 %q", st)
+	}
+
+	if err := r.UnarchiveNode(id); err != nil {
+		t.Fatalf("解除归档失败：%v", err)
+	}
+	n2, err := r.GetNode(id)
+	if err != nil {
+		t.Fatalf("读取节点失败：%v", err)
+	}
+	if n2.ArchivedAt != 0 {
+		t.Errorf("解除归档后 archived_at 应清零，实际 %d（运行态/公开看板仍会把它当归档）", n2.ArchivedAt)
+	}
+	// status 必须是 Authenticate 认得的"非归档"值，否则令牌仍会被拒。
+	st2, err := r.NodeStatus(id)
+	if err != nil {
+		t.Fatalf("读取状态失败：%v", err)
+	}
+	if st2 == "archived" {
+		t.Error("解除归档后 status 仍为 archived：Tokens.Authenticate 会继续拒绝该节点的令牌（死锁未解）")
+	}
+}
+
+// TestEnrollPathUnarchivesNode 是上面那条的**端到端**版本：走真实的
+// "注册码消费 → 建令牌"两步，确认解除归档确实发生在注册流程里，
+// 而不是只有 store 层的一个孤儿方法（"有这个方法"≠"它被调用了"）。
+//
+// 判据落在 handler 源码上：这条链路跨 api/store 两层，
+// 而 api 层没有轻量的 enroll 测试夹具（要起完整 Handler），
+// 因此用"锚点必须存在且成对出现"来钉接线。
+func TestEnrollPathUnarchivesNode(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("..", "api", "agent.go"))
+	if err != nil {
+		t.Fatalf("读取 agent.go 失败：%v", err)
+	}
+	s := string(src)
+	at := strings.Index(s, "func (h *Handler) handleEnroll")
+	if at < 0 {
+		t.Fatal("找不到 handleEnroll")
+	}
+	// 切到下一个顶层函数。
+	rest := s[at:]
+	end := strings.Index(rest[1:], "\nfunc ")
+	if end < 0 {
+		t.Fatal("无法界定 handleEnroll 的函数体")
+	}
+	body := rest[:end+1]
+
+	if !strings.Contains(body, "UnarchiveNode(") {
+		t.Error("handleEnroll 没有调用 UnarchiveNode：卸载后重新安装的节点会永远上报不上去" +
+			"（令牌有效但被 nodes.status=archived 拒掉，且没有任何解除入口）")
+	}
+	if !strings.Contains(body, "st.ArchivedAt > 0") {
+		t.Error("handleEnroll 没有判断 archived_at：应对『已归档』的节点解除归档，" +
+			"对正常节点不必多写一次库")
 	}
 }

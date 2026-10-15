@@ -70,6 +70,36 @@ func (h *Handler) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, model.ErrInternal, "内部错误")
 		return
 	}
+
+	// 重新注册必须**顺便解除归档**，否则是一条死锁。
+	//
+	// 死锁链条（用户实测：uninstall 后重装，节点永远不上线，日志刷
+	// `code=node_archived 令牌无效或已吊销`）：
+	//   1) `xb-probe-agent uninstall` 会调 deregister → `ArchiveNode` +
+	//      吊销全部令牌（这是对的，卸载就该停掉上报）；
+	//   2) 重新安装时凭新的注册码走 enroll，拿到**全新令牌**；
+	//   3) 但上报路径 `Tokens.Authenticate` 会查 `nodes.status`，
+	//      见到 'archived' 就一律拒绝——**新令牌也一样被拒**；
+	//   4) 而全仓库没有任何"解除归档"的入口（归档按钮是单向的），
+	//      于是这个节点从此再也装不上，只能删掉重建。
+	//
+	// 为什么在这里解除是安全的：能拿出一个**未使用、未过期、且绑定该节点**的
+	// 注册码，等价于管理员在后台明确点了「重新签发」并把它交给了这台机器——
+	// 那就是"我要让这个节点重新接入"的明确意图。而归档的本意是"停止采集与告警"
+	// （保留历史），不是"永久拉黑这台机器"。
+	//
+	// 顺序上放在 CreateToken 之后：先把新令牌备好，再放行——中间若崩，
+	// 节点仍是归档态（安全侧），不会出现"解了归档却没有可用令牌"的空窗。
+	if st, err := h.Repo.GetNode(nodeID); err == nil && st != nil && st.ArchivedAt > 0 {
+		if err := h.Repo.UnarchiveNode(nodeID); err != nil {
+			h.logErr("unarchive on enroll", err)
+		} else {
+			h.Registry.SyncMeta(nodeID, st.PublicID, st.Name, st.GroupName, st.SortOrder,
+				st.PublicVisible, false, st.IPv4 != "", st.IPv6 != "", st.Country)
+			_ = h.Repo.Audit(now.Unix(), fmt.Sprintf("node:%d", nodeID), "node.unarchive", "自动：重新注册", RealIP(r))
+		}
+	}
+
 	_ = h.Repo.Audit(now.Unix(), fmt.Sprintf("node:%d", nodeID), "token.issue", hint, RealIP(r))
 	h.recordObservedIP(nodeID, r, "", "")
 

@@ -232,6 +232,10 @@ func (h *Handler) AdminRoutes() http.Handler {
 	mux.HandleFunc("GET /api/admin/v1/nodes/{id}", h.requireAdmin(h.handleGetNode))
 	mux.HandleFunc("PATCH /api/admin/v1/nodes/{id}", h.requireAdmin(h.handlePatchNode))
 	mux.HandleFunc("POST /api/admin/v1/nodes/{id}/archive", h.requireAdmin(h.handleArchiveNode))
+	// 解除归档：归档原本是单向的，而卸载 Agent 会归档节点 → 重新安装后
+	// 上报被 archived 状态拒掉，形成"怎么也装不上"的死锁（用户实测）。
+	// enroll 路径会在重新注册时自动解除，这个接口是管理员的手工补救通道。
+	mux.HandleFunc("POST /api/admin/v1/nodes/{id}/unarchive", h.requireAdmin(h.handleUnarchiveNode))
 	mux.HandleFunc("DELETE /api/admin/v1/nodes/{id}", h.requireAdmin(h.handleDeleteNode))
 
 	// 实时态与历史（5.2 全量资产视察；按真实 node_id，隐藏节点也可查）

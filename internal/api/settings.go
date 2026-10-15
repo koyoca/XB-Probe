@@ -152,6 +152,10 @@ var settingDefaults = map[string]string{
 	// 输入框（用户反馈"改为中文"），且真去改它还会被白名单拒掉（"不允许的设置项"）。
 	// 现在给它中文标签与校验规则，两处入口共用同一个键、不会各存一份值。
 	"audit.retention_days": "30",
+	// alert.retention_days 是告警事件的保留天数。此前**硬编码 90 天**
+	// （见调度器清理段），管理员无法调整——而告警量大的部署里 90 天会占掉
+	// 可观的空间，告警量小的又想留更久。默认 90 与升级前行为一致。
+	"alert.retention_days": "90",
 	// 多币种换算（月费合计）。
 	//
 	//   billing.base_currency 是**主币种**：月费合计一律以它计价（ISO 4217，如 CNY）。
@@ -214,6 +218,7 @@ var settingSpecs = map[string]func(string) error{
 	// 审计日志保留期（天）：与 handleSetAuditRetention 的 1~3650 同一口径，
 	// 两处入口（审计页面板 / 设置页字段）不能有各自的范围。
 	"audit.retention_days": intRange(1, 3650),
+	"alert.retention_days": intRange(1, 3650),
 	// 多币种（见 settingDefaults 的说明）。
 	"billing.base_currency": validateCurrencyCode,
 	"billing.rates":         validateCurrencyRates,

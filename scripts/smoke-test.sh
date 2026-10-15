@@ -729,6 +729,27 @@ else
   bad "审计日志默认每页不是 20 条"
 fi
 
+# 告警事件保留期可配置：后端要有校验规则、前端要有中文标签并落进「数据保留」分组。
+# 三处缺一都会表现为"设置页里没有这一项"或"改了保存不了"。
+if grep -q '"alert.retention_days": intRange(' "${ROOT}/internal/api/settings.go"; then
+  ok "alert.retention_days 有取值范围校验"
+else
+  bad "settings.go 缺少 alert.retention_days 的校验规则（保存会被白名单拒掉）"
+fi
+if grep -q "'alert.retention_days': \['" <<<"${ADMIN_JS}"; then
+  ok "告警事件保留期有设置项标签"
+else
+  bad "admin.js 缺少 alert.retention_days 标签（设置页看不到这一项）"
+fi
+# 注意：分组定义可能**跨行**（键多时一行放不下），只取 head -1 会漏判。
+# 这里取「数据保留」那一项起到下一个分组标题之前的所有文本。
+DR_GROUP="$(grep -A 3 -F "['数据保留'," <<<"${ADMIN_JS}" | head -4)"
+if grep -qF "'alert.retention_days'" <<<"${DR_GROUP}"; then
+  ok "告警事件保留期归入「数据保留」分组"
+else
+  bad "alert.retention_days 未归入「数据保留」分组（会落进兜底的「其他」）"
+fi
+
 # ---------------------------------------------------------------------------
 sec "7.8 系统设置页：保存提示必须跟随视口 + 备份设置项必须是中文"
 # ---------------------------------------------------------------------------

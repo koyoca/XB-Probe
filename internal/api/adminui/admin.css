@@ -517,6 +517,9 @@ pre.code {
   font-family: ui-monospace, Consolas, monospace; font-size: 12.5px;
   line-height: 1.6;
 }
+/* 注入类字段（页头/页尾）的内容通常是几十行 HTML 或脚本，给更高的初始高度，
+   并且用更大的字号——这些内容要读、要改，等宽小字看着累。 */
+.settings-grid .setting-wide textarea[rows="6"] { min-height: 180px; font-size: 13px; }
 .card-picker { display: flex; flex-wrap: wrap; gap: 8px; }
 .card-picker .grp {
   width: 100%; font-size: 12px; color: var(--muted);
