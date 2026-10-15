@@ -1271,13 +1271,20 @@ else
   ok "越界 offset 被拉回最后一页并回传生效值 offset=${AU_FOFF}"
 fi
 
-# ---- 备份：单份删除（6.6 的补充：只增不减会把备份盘撑满）----
+# ---- 备份：单份删除（6.6 补充：只增不减会把备份盘撑满）----
+# 删除备份是"凭一个已登录会话 + CSRF 就能抹掉最后一道退路"的操作，因此改成
+# 二次确认：必须再带一次管理员密码（启用 TOTP 时还要动态码）。冒烟里只验密码这一层。
 BK="$(curl -s -X POST "${ADM}/maintenance/backup" -H "${AUTH_COOKIE}" -H "X-CSRF-Token: ${CSRF}" -H 'Content-Type: application/json' -d '{}')"
 BNAME="$(echo "${BK}" | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
 if [ -n "${BNAME}" ]; then
   ok "手动备份成功：${BNAME}"
-  check_code 204 "DELETE /maintenance/backups/{name} 删除刚生成的备份" \
-    "${ADM}/maintenance/backups/${BNAME}" -X DELETE -H "${AUTH_COOKIE}" -H "X-CSRF-Token: ${CSRF}"
+  # 密码不对 → 401：不能只凭一个会话就删掉备份。
+  check_code 401 "删除备份密码错误 -> 401" \
+    "${ADM}/maintenance/backups/${BNAME}" -X DELETE -H "${AUTH_COOKIE}" -H "X-CSRF-Token: ${CSRF}" \
+    -H 'Content-Type: application/json' -d '{"password":"wrong-password-xyz"}'
+  check_code 204 "DELETE /maintenance/backups/{name} 删除刚生成的备份（带密码）" \
+    "${ADM}/maintenance/backups/${BNAME}" -X DELETE -H "${AUTH_COOKIE}" -H "X-CSRF-Token: ${CSRF}" \
+    -H 'Content-Type: application/json' -d "{\"password\":\"${ADMIN_PASS}\"}"
   if curl -s "${ADM}/maintenance/backups" -H "${AUTH_COOKIE}" | grep -q "${BNAME}"; then
     bad "删除后备份列表里仍有 ${BNAME}"
   else
@@ -1285,15 +1292,18 @@ if [ -n "${BNAME}" ]; then
   fi
   # 再删一次：应为 404，而不是 500（"不存在"是正常结果，不是服务端故障）。
   check_code 404 "重复删除同一份备份返回 404" \
-    "${ADM}/maintenance/backups/${BNAME}" -X DELETE -H "${AUTH_COOKIE}" -H "X-CSRF-Token: ${CSRF}"
+    "${ADM}/maintenance/backups/${BNAME}" -X DELETE -H "${AUTH_COOKIE}" -H "X-CSRF-Token: ${CSRF}" \
+    -H 'Content-Type: application/json' -d "{\"password\":\"${ADMIN_PASS}\"}"
   # 形状不合法的文件名必须 400：这个接口最终会落到 os.Remove 上，
-  # 放开任意路径就是一个数据丢失面。
+  # 放开任意路径就是一个数据丢失面。（带正确密码，确保 400 来自文件名校验而非认证层。）
   check_code 400 "删除非备份文件名（含路径分隔）被拒" \
-    "${ADM}/maintenance/backups/notabackup.db" -X DELETE -H "${AUTH_COOKIE}" -H "X-CSRF-Token: ${CSRF}"
+    "${ADM}/maintenance/backups/notabackup.db" -X DELETE -H "${AUTH_COOKIE}" -H "X-CSRF-Token: ${CSRF}" \
+    -H 'Content-Type: application/json' -d "{\"password\":\"${ADMIN_PASS}\"}"
   # 主库文件本身绝不能被这个接口删掉。
   if [ -f "${WORK}/data/probe.db" ]; then
     check_code 400 "删除 probe.db 被拒（主库不可被这个接口删除）" \
-      "${ADM}/maintenance/backups/probe.db" -X DELETE -H "${AUTH_COOKIE}" -H "X-CSRF-Token: ${CSRF}"
+      "${ADM}/maintenance/backups/probe.db" -X DELETE -H "${AUTH_COOKIE}" -H "X-CSRF-Token: ${CSRF}" \
+      -H 'Content-Type: application/json' -d "{\"password\":\"${ADMIN_PASS}\"}"
   fi
 else
   bad "手动备份未返回文件名：${BK}"
