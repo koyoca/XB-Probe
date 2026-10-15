@@ -31,7 +31,7 @@
     // 节点详情页「历史曲线」当前标签：resources / latency
     nodeHistoryTab: 'resources',
     // 是否已启用 TOTP：决定二次确认对话框要不要显示"动态验证码/恢复码"输入框。
-    // 登录后由 GET /maintenance/totp 填充（见 refreshTotpStatus）。
+    // 登录后由 GET /account/totp 填充（见 refreshTotpStatus / loadTOTP）。
     totpEnabled: false
   };
 
@@ -4270,8 +4270,14 @@
   // refreshTotpStatus 拉取当前账户的 TOTP 启用状态，写入 state.totpEnabled。
   // 二次确认对话框据此决定要不要显示"动态验证码/恢复码"输入框：
   // 没启用 TOTP 的管理员强行要一个动态码，等于把这个破坏性操作彻底锁死。
+  //
+  // 路径必须是 /account/totp：TOTP 相关端点全部挂在账户安全之下
+  // （见 router.go「账户安全」段）。曾经这里把前缀错写成了 maintenance，
+  // 而该路径并未注册 → 404 → catch 把 state.totpEnabled 恒置为 false →
+  // 二次确认对话框**永远不显示动态码输入框** → 提交空的 code →
+  // 删备份/清数据/改保留期统统报"动态验证码或恢复码错误"（用户实测）。
   function refreshTotpStatus() {
-    api('/maintenance/totp').then(function (r) {
+    api('/account/totp').then(function (r) {
       state.totpEnabled = !!(r && r.enabled);
     }).catch(function () { state.totpEnabled = false; });
   }
@@ -4576,8 +4582,15 @@
   //  2. **恢复码只显示一次**，用醒目的样式+明确的"请现在保存"提示。
   //     刷新页面后就再也取不回来了（库里只有哈希），不说清楚的话
   //     管理员会以为"以后还能在后台查到"。
+  // loadTOTP 拉取并渲染账户安全页；返回 Promise 以便调用方在**渲染完成之后**
+  // 再往 #recovery-box 里塞东西（见 handleTOTPEnable 的注释：明文恢复码必须在
+  // renderRecovery 的 clear() 之后才写，否则会被立刻抹掉）。
   function loadTOTP() {
-    api('/account/totp').then(function (r) {
+    return api('/account/totp').then(function (r) {
+      // 顺手同步全局状态：启用/关闭 TOTP 之后如果不刷新页面就去做破坏性维护，
+      // 二次确认对话框要靠 state.totpEnabled 决定显不显示动态码框——不同步的话
+      // 刚启用完的那次操作仍会隐藏输入框、提交空 code 而报"动态码错误"。
+      state.totpEnabled = !!(r && r.enabled);
       renderTOTP(r);
       renderRecovery(r);
     }).catch(function (e) { toast(e.message, true); });
@@ -4708,8 +4721,13 @@
         } else {
           toast('两步验证已启用');
         }
-        if (res.recovery_code) showRecoveryCodes(res.recovery_code);
-        loadTOTP();
+        // 顺序**必须**是先刷新、后展示：loadTOTP → renderRecovery 会 clear()
+        // #recovery-box，如果先 showRecoveryCodes 再 loadTOTP，刚下发的那份明文
+        // 恢复码会在同一帧里被抹掉（用户实测："成功开启后没看到恢复码，直接消失了"）。
+        // 恢复码只此一次可见，丢了就只能重新生成，所以这里等渲染完成再写入。
+        loadTOTP().then(function () {
+          if (res.recovery_code) showRecoveryCodes(res.recovery_code);
+        });
       }).catch(function (e) {
         confirm.disabled = false;
         err.textContent = e.message;
