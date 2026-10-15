@@ -175,7 +175,10 @@ func delayDeleteFile(path string) error {
 	binDir := filepath.Dir(path)
 	exe := filepath.Base(path)
 	// 用 timeout 而不是 ping 做延迟（ping 在部分精简系统上不可用）。
-	script := fmt.Sprintf(`timeout /t 3 /nobreak >nul & del /f /q "%s"`, exe)
+	// 删完文件再顺手收掉空目录：Windows 上 Agent 的二进制与配置同目录
+	// （都在 ProgramData\xb-probe-agent），进程退出后那里就只剩空壳。
+	// rd 不带 /s，目录非空时本就删不动，2>nul 把这种"失败"咽掉即可。
+	script := fmt.Sprintf(`timeout /t 3 /nobreak >nul & del /f /q "%s" & rd "%s" 2>nul`, exe, binDir)
 	cmd := exec.Command("cmd", "/c", script)
 	cmd.Dir = binDir
 	cmd.SysProcAttr = hiddenWindow()

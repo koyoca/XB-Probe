@@ -559,6 +559,39 @@ func TestUninstallPromptDefaultsToCancel(t *testing.T) {
 // 工具函数
 // ---------------------------------------------------------------------------
 
+// TestBinaryNameForGOOS 钉住 Windows 的可执行文件名必须带 .exe。
+//
+// 为什么值得单独一条：CI 只有 ubuntu，`runtime.GOOS == "windows"` 这条分支
+// 在流水线里**永远跑不到**，而它恰恰出过生产缺陷——Windows 上落盘的是
+// xb-probe-agent.exe，代码却按 "xb-probe-agent" 记安装清单，于是卸载时
+// 延迟删除删了个不存在的文件、真正的 exe 永远留在磁盘上，同时整目录清理
+// 撞上"映像被占用"把一次成功的卸载报成失败。把平台抽成参数，就能在
+// Linux 上断言 Windows 的行为。
+func TestBinaryNameForGOOS(t *testing.T) {
+	if got := binaryNameForGOOS("windows"); got != "xb-probe-agent.exe" {
+		t.Errorf("windows 上可执行文件名必须带 .exe，得到 %q", got)
+	}
+	for _, goos := range []string{"linux", "darwin", "freebsd"} {
+		if got := binaryNameForGOOS(goos); got != "xb-probe-agent" {
+			t.Errorf("%s 上不应带 .exe，得到 %q", goos, got)
+		}
+	}
+}
+
+// TestResolvePathsUsesPlatformBinaryName 确认 resolvePaths 真的走了
+// binaryName()，而不是某处又硬编码一份字符串（只测当前平台；
+// 与上面那条合起来覆盖"平台分支 + 接线"两侧都不漂移）。
+func TestResolvePathsUsesPlatformBinaryName(t *testing.T) {
+	dir := t.TempDir()
+	_, binPath, err := resolvePaths(dir, true)
+	if err != nil {
+		t.Fatalf("resolvePaths 报错：%v", err)
+	}
+	if want := filepath.Join(dir, binaryName()); binPath != want {
+		t.Errorf("二进制路径应使用平台可执行文件名：%q vs %q", binPath, want)
+	}
+}
+
 func TestResolvePathsWithExplicitDir(t *testing.T) {
 	// 显式 --dir + --no-service：文件只落进用户指定的目录、不注册任何系统服务，
 	// 所以非 root 也必须放行。（这条曾经是生产缺陷：Linux 非 root 上被误判成
@@ -571,7 +604,7 @@ func TestResolvePathsWithExplicitDir(t *testing.T) {
 	if cfgPath != filepath.Join(dir, "agent.yaml") {
 		t.Errorf("配置路径不对：%q", cfgPath)
 	}
-	if binPath != filepath.Join(dir, "xb-probe-agent") {
+	if binPath != filepath.Join(dir, binaryName()) {
 		t.Errorf("二进制路径不对：%q", binPath)
 	}
 }
@@ -645,7 +678,7 @@ func TestResolvePathsDefaultsPerPlatform(t *testing.T) {
 	if cfgPath != agentconfig.DefaultPath() {
 		t.Errorf("配置路径未采用平台默认：%q vs %q", cfgPath, agentconfig.DefaultPath())
 	}
-	if binPath != filepath.Join(agentconfig.DefaultBinaryDir(), "xb-probe-agent") {
+	if binPath != filepath.Join(agentconfig.DefaultBinaryDir(), binaryName()) {
 		t.Errorf("二进制路径未采用平台默认：%q", binPath)
 	}
 	if !filepath.IsAbs(cfgPath) || !filepath.IsAbs(binPath) {

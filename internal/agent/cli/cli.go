@@ -471,7 +471,7 @@ func cmdUninstall(args []string) int {
 	// 2) 停止并移除服务
 	binPath, _ := readManifest(*cfgPath)
 	if binPath == "" {
-		binPath = filepath.Join(agentconfig.DefaultBinaryDir(), "xb-probe-agent")
+		binPath = filepath.Join(agentconfig.DefaultBinaryDir(), binaryName())
 	}
 	if err := service.Detect().Uninstall(binPath, *cfgPath); err != nil {
 		fmt.Fprintln(os.Stderr, "移除服务时出错（继续清理）：", err)
@@ -479,11 +479,21 @@ func cmdUninstall(args []string) int {
 
 	// 3) 清理配置目录与二进制（只删除安装清单记录的内容，S13）
 	dir := filepath.Dir(*cfgPath)
+	// 先摘掉配置文件：它是最该被清掉的东西，且与"二进制正在运行"无关。
+	_ = os.Remove(*cfgPath)
 	if err := os.RemoveAll(dir); err != nil {
-		fmt.Fprintln(os.Stderr, "清理配置目录失败：", err)
+		// Windows 上二进制与配置同目录，而它正是当前进程的映像：整目录
+		// RemoveAll 清到它就会以"进程正在访问"失败。此时若目录里只剩这个
+		// 正在运行的二进制（它已由上面的 Uninstall 延迟删除），卸载其实
+		// 是成功的——不该把一次顺利的卸载报成失败、把用户吓住。
+		rest, rerr := os.ReadDir(dir)
+		onlySelf := rerr == nil && len(rest) == 1 && rest[0].Name() == filepath.Base(binPath)
+		if !onlySelf {
+			fmt.Fprintln(os.Stderr, "清理配置目录失败：", err)
+		}
 	}
 	_ = os.Remove(binPath)
-	_ = os.Remove(filepath.Join(agentconfig.DefaultBinaryDir(), "xb-probe-agent"))
+	_ = os.Remove(filepath.Join(agentconfig.DefaultBinaryDir(), binaryName()))
 
 	fmt.Println("卸载完成。")
 	return 0
@@ -528,15 +538,32 @@ func resolvePaths(dir string, noService bool) (cfgPath, binPath string, err erro
 		if needsRootForExplicitDir(noService, service.Detect().Name(), isRoot()) {
 			return "", "", fmt.Errorf("安装为系统服务需要 root 权限（或加 --no-service 只放文件）")
 		}
-		return filepath.Join(dir, "agent.yaml"), filepath.Join(dir, "xb-probe-agent"), nil
+		return filepath.Join(dir, "agent.yaml"), filepath.Join(dir, binaryName()), nil
 	}
 	// 缺省路径是系统目录（/usr/local/bin、/etc/xb-probe-agent）：能不能写进去本身
 	// 就取决于权限，与是否注册服务无关，所以这条不看 noService。
 	if !isRoot() && runtime.GOOS != "windows" {
 		return "", "", fmt.Errorf("安装需要 root 权限（请使用 sudo，或用 --dir 指定可写目录）")
 	}
-	return agentconfig.DefaultPath(), filepath.Join(agentconfig.DefaultBinaryDir(), "xb-probe-agent"), nil
+	return agentconfig.DefaultPath(), filepath.Join(agentconfig.DefaultBinaryDir(), binaryName()), nil
 }
+
+// binaryNameForGOOS 返回指定平台的可执行文件名。
+//
+// Windows 上必须是 xb-probe-agent.exe。这里曾经硬编码 "xb-probe-agent"：
+// install.ps1 用 --dir 把文件放进 ProgramData 时，实际落盘的是
+// xb-probe-agent.exe，而清单里记的是一个**并不存在**的路径。后果是卸载时
+// 延迟删除 `del xb-probe-agent` 删了个空气，真正的 exe 永远留在磁盘上，
+// 同时整目录清理撞上"映像被占用"把一次成功的卸载报成失败。
+func binaryNameForGOOS(goos string) string {
+	if goos == "windows" {
+		return "xb-probe-agent.exe"
+	}
+	return "xb-probe-agent"
+}
+
+// binaryName 返回当前平台的可执行文件名。
+func binaryName() string { return binaryNameForGOOS(runtime.GOOS) }
 
 func isRoot() bool { return os.Geteuid() == 0 }
 

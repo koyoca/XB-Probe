@@ -72,3 +72,8 @@ if ($PublicIpUrl) {
 & $target @args
 
 Write-Host '==> 安装完成。若页面未显示节点，请检查服务状态：Get-Service xb-probe-agent'
+# 二进制装在 ProgramData 下、并不在 PATH 里。不说清楚路径和卸载命令，
+# 用户装完想卸载时根本找不到这个 exe（实测直接敲 xb-probe-agent 会报
+# 「无法识别为 cmdlet」），只能回来问"Windows 上怎么卸载"。
+Write-Host "==> 程序目录：$installDir（不在 PATH，需用完整路径执行）"
+Write-Host "==> 卸载命令（管理员 PowerShell 执行）：& '$target' uninstall --yes"
