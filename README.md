@@ -16,14 +16,13 @@
 ```bash
 # 方式 A：预编译二进制（推荐，小机器无需 Go/git/编译；仅 linux/amd64、linux/arm64）
 sudo sh -c "$(curl -fsSL https://raw.githubusercontent.com/koyoca/XB-Probe/main/install-master-bin.sh)"
-
+```
+```
 # 方式 B：取源码现场编译（其它架构含 FreeBSD 用这个）
 sudo sh -c "$(curl -fsSL https://raw.githubusercontent.com/koyoca/XB-Probe/main/install-master.sh)"
 ```
 
-脚本自动探测 systemd / OpenRC / procd / SysV，需要时下载官方 Go，并依次询问「对外访问方式 / 域名与邮箱 / 监听端口 / 管理员账号口令」——每步回车取默认值。**再跑一次即升级**；参数给全就不问（`--yes` 全默认）。
-
-对外访问方式五选一（说的是"对外看起来是什么"，不是"证书从哪来"）：
+### 证书申请
 
 | 选项 | 对外 | 证书谁办 |
 |---|---|---|
