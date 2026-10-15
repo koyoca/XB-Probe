@@ -159,6 +159,12 @@ func (h *Handler) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 // 与登录侧共用同一套核验（auth.VerifyPassword + checkSecondFactor），但**不**创建会话、
 // 也不返回令牌——它只是"用当前已登录身份再核一次第二因子"，相当于一次轻量提权确认。
 // 成功返回 admin；失败已写错误响应并返回 nil。
+//
+// 状态码口径（与 handleChangePassword 一致，这是本函数的关键）：
+//   - 会话本身失效 → 401（前端据此跳登录页，合理）；
+//   - 密码/动态码**核验失败** → 403。会话还是好的，只是这一次提权没通过，
+//     若也用 401，前端会把它当成"会话过期"而把人踢回登录页——密码打错一个字
+//     就莫名登出，正是本轮要修的可疑行为。
 func (h *Handler) reauth(w http.ResponseWriter, r *http.Request) *store.Admin {
 	var req struct {
 		Password string `json:"password"`
@@ -181,12 +187,12 @@ func (h *Handler) reauth(w http.ResponseWriter, r *http.Request) *store.Admin {
 	if err := auth.VerifyPassword(req.Password, admin.PWHash); err != nil {
 		_ = h.Repo.RecordLoginFailure(admin.ID, 5, 15*60, time.Now().Unix())
 		_ = h.Repo.Audit(time.Now().Unix(), admin.Username, "auth.reauth_fail", "", RealIP(r))
-		writeErr(w, http.StatusUnauthorized, "unauthorized", "密码错误")
+		writeErr(w, http.StatusForbidden, "forbidden", "密码错误")
 		return nil
 	}
 	if len(admin.TOTPSecret) > 0 && !h.checkSecondFactor(admin, req.Code, time.Now()) {
 		_ = h.Repo.RecordLoginFailure(admin.ID, 5, 15*60, time.Now().Unix())
-		writeErr(w, http.StatusUnauthorized, "invalid_totp", "动态验证码或恢复码错误")
+		writeErr(w, http.StatusForbidden, "forbidden", "动态验证码或恢复码错误")
 		return nil
 	}
 	return admin

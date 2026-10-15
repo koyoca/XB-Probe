@@ -1278,8 +1278,8 @@ BK="$(curl -s -X POST "${ADM}/maintenance/backup" -H "${AUTH_COOKIE}" -H "X-CSRF
 BNAME="$(echo "${BK}" | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
 if [ -n "${BNAME}" ]; then
   ok "手动备份成功：${BNAME}"
-  # 密码不对 → 401：不能只凭一个会话就删掉备份。
-  check_code 401 "删除备份密码错误 -> 401" \
+  # 密码不对 → 403（会话仍有效，只是提权没通过；用 401 会被人当成会话过期踢去登录页）。
+  check_code 403 "删除备份密码错误 -> 403" \
     "${ADM}/maintenance/backups/${BNAME}" -X DELETE -H "${AUTH_COOKIE}" -H "X-CSRF-Token: ${CSRF}" \
     -H 'Content-Type: application/json' -d '{"password":"wrong-password-xyz"}'
   check_code 204 "DELETE /maintenance/backups/{name} 删除刚生成的备份（带密码）" \

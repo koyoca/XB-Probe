@@ -620,6 +620,14 @@
   }
 
   function closeAskDialog(result) {
+    // 先把要带出去的值读进本地变量，**再**清空输入框。
+    // 顺序反了会把刚填的密码/动态码清成空串再读——后端拿到空密码必然 401，
+    // 前端于是跳登录页，表现为"密码对错都登出、操作永远不成功"。
+    var authShown = !$('ask-auth-wrap').hidden;
+    var checked = !$('ask-check-wrap').hidden ? $('ask-check').checked : undefined;
+    var password = authShown ? $('ask-password').value : undefined;
+    var code = (authShown && !$('ask-code-wrap').hidden) ? $('ask-code').value : undefined;
+
     $('ask-modal').hidden = true;
     setText($('ask-value'), ''); // 凭据不留 DOM
     // 密码/动态码是敏感输入，关对话时一并清空，绝不能留在 DOM 里等下一双眼睛。
@@ -627,11 +635,6 @@
     if ($('ask-code')) $('ask-code').value = '';
     var r = askResolve;
     askResolve = null;
-    // 有勾选项时把勾选状态一并带回；没有则退化为纯布尔，保持旧调用点不变。
-    var checked = !$('ask-check-wrap').hidden ? $('ask-check').checked : undefined;
-    // 需要二次确认时带回密码与动态码（没启用 TOTP 时 code 为空串）。
-    var password = !$('ask-auth-wrap').hidden ? $('ask-password').value : undefined;
-    var code = (!$('ask-auth-wrap').hidden && !$('ask-code-wrap').hidden) ? $('ask-code').value : undefined;
     if (r) r({ ok: !!result, checked: checked, password: password, code: code });
   }
 
