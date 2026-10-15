@@ -13,12 +13,12 @@
 
 ## 部署（Linux）
 
+### 方式 A：预编译二进制（推荐，小机器无需 Go/git/编译；仅 linux/amd64、linux/arm64）
 ```bash
-# 方式 A：预编译二进制（推荐，小机器无需 Go/git/编译；仅 linux/amd64、linux/arm64）
 sudo sh -c "$(curl -fsSL https://raw.githubusercontent.com/koyoca/XB-Probe/main/install-master-bin.sh)"
 ```
+### 方式 B：取源码现场编译（其它架构含 FreeBSD 用这个）
 ```
-# 方式 B：取源码现场编译（其它架构含 FreeBSD 用这个）
 sudo sh -c "$(curl -fsSL https://raw.githubusercontent.com/koyoca/XB-Probe/main/install-master.sh)"
 ```
 
