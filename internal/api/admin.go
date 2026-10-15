@@ -1,10 +1,12 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -165,12 +167,28 @@ func (h *Handler) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 //   - 密码/动态码**核验失败** → 403。会话还是好的，只是这一次提权没通过，
 //     若也用 401，前端会把它当成"会话过期"而把人踢回登录页——密码打错一个字
 //     就莫名登出，正是本轮要修的可疑行为。
+//
+// **Body 必须可重复读**：二次确认的请求体里同时装着业务参数（保留天数、
+// 截止日期……），调用方在 reauth 之后还要按自己的结构体再解一次同一个 body。
+// HTTP 的 Body 是只读一次的流，这里不解回去，后面那次 decodeJSON 只会读到
+// EOF——于是用户明明填了 10，却回报"保留天数须为整数""请求体解析失败"。
+// 删/恢复备份、立即清理审计之所以是好的，只因它们恰好不解第二遍。
 func (h *Handler) reauth(w http.ResponseWriter, r *http.Request) *store.Admin {
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, model.ErrInvalidParam, "请求体读取失败")
+		return nil
+	}
+	_ = r.Body.Close()
+	// 把刚读走的字节还回去——**并且自己不能再从 r.Body 里解**：第一次 Decode
+	// 会把流推到末尾，调用方随后那次 decodeJSON 又是 EOF。所以这里直接用
+	// json.Unmarshal 验 raw 字节，还原好的 Body 原封不动留给调用方。
+	r.Body = io.NopCloser(bytes.NewReader(raw))
 	var req struct {
 		Password string `json:"password"`
 		Code     string `json:"code"`
 	}
-	if err := decodeJSON(r, &req); err != nil {
+	if err := json.Unmarshal(raw, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, model.ErrInvalidParam, "请求体解析失败")
 		return nil
 	}
