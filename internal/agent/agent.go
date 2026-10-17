@@ -1,7 +1,9 @@
 // Package agent 实现 Agent 常驻守护进程的主循环（文档 3.1 / 8.1）。
 //
 // Agent 是无状态常驻守护进程，只做“本地采集、主动外呼”：
-//   - 不做远程自更新，不响应任何远程指令（9.5）。
+//   - 只接受**两个**固定的远程运维动作：切换 Master 地址、按目标版本自升级
+//     （用户明确要求；除此之外不响应任何远程指令）。换地址前必须先验证新地址
+//     可用，升级复用 `upgrade` 的同一条实现（下载→校验→替换→.old 留底）。
 //   - 上报失败指数退避（上限 60 秒）并在本地缓存最近若干条，恢复后按 ts 升序补报（13.4.2）。
 //   - 配置同步纯被动：上报响应带回 config_version，不一致时才 GET /config（带 ETag）。
 package agent
@@ -11,7 +13,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,6 +23,8 @@ import (
 	"github.com/koyoca/xb-probe/internal/agent/client"
 	"github.com/koyoca/xb-probe/internal/agent/collector"
 	"github.com/koyoca/xb-probe/internal/agent/prober"
+	"github.com/koyoca/xb-probe/internal/agent/updater"
+	"github.com/koyoca/xb-probe/internal/dist"
 	"github.com/koyoca/xb-probe/internal/model"
 )
 
@@ -58,8 +64,11 @@ type Daemon struct {
 	curEtcd     string
 	version     string
 	staticDirty bool
-	pubIP       string // 最近一次探测到的公网 IPv4（空=未配置或尚未成功）
-	pubIP6      string // 最近一次探测到的公网 IPv6（同上；单栈节点恒为空）
+	// upgradeTried 保证"每个进程只尝试一次自动升级"：失败后不重试，
+	// 否则版本不匹配会变成每轮上报都下载一次二进制。
+	upgradeTried bool
+	pubIP        string // 最近一次探测到的公网 IPv4（空=未配置或尚未成功）
+	pubIP6       string // 最近一次探测到的公网 IPv6（同上；单栈节点恒为空）
 }
 
 // New 创建守护进程。
@@ -259,7 +268,114 @@ func (d *Daemon) syncConfig(ctx context.Context, version string) error {
 	d.log.Info("配置已更新", "config_version", remote.ConfigVersion,
 		"targets", len(remote.Targets), "report_interval_s", remote.ReportIntervalS,
 		"probe_interval_s", remote.ProbeIntervalS)
+
+	d.applyRemoteOps(ctx, *remote)
 	return nil
+}
+
+// applyRemoteOps 执行 Master 下发的两个固定运维动作。
+//
+// 顺序有意：先换地址、再升级。反过来的话，升级后进程重启仍指向旧域名，
+// 而旧域名可能已经被撤掉，节点就再也拉不到配置了。
+func (d *Daemon) applyRemoteOps(ctx context.Context, remote model.AgentConfig) {
+	d.maybeSwitchMaster(ctx, remote.MasterURL)
+	d.maybeAutoUpgrade(ctx, remote)
+}
+
+// maybeSwitchMaster 按 Master 的指令平滑切换域名。
+//
+// 换域名的难点不在"改配置"，而在"改错了就失联"：一旦把 master_url 写成一个
+// 不可用（或证书不对）的地址，Agent 就再也拉不到配置，只能人工上机改文件。
+// 所以这里的顺序是 **先验证、后落盘**：
+//  1. 用新地址 + 同一令牌拉一次配置，通得过才算可用；
+//  2. 通过后写回 agent.yaml 并换掉客户端；
+//  3. 没通过就继续用旧地址，下一轮再试（旧域名保持可用的那段时间就是窗口）。
+func (d *Daemon) maybeSwitchMaster(ctx context.Context, want string) {
+	want = strings.TrimSpace(want)
+	if want == "" {
+		return
+	}
+	d.mu.Lock()
+	cur := d.cfg.MasterURL
+	tok := d.cfg.Token
+	spki := d.cfg.SPKISHA256
+	insec := d.cfg.InsecureHTTP
+	d.mu.Unlock()
+	if want == cur {
+		return
+	}
+
+	nc, err := client.New(client.Options{
+		MasterURL: want, Token: tok, SPKISHA256: spki, InsecureHTTP: insec,
+	})
+	if err != nil {
+		d.log.Warn("新 Master 地址非法，继续使用旧地址", "new", want, "err", err.Error())
+		return
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	if _, _, err := nc.GetConfig(probeCtx, ""); err != nil {
+		// 不可达/证书不匹配/令牌不被承认 —— 一律不切，旧地址继续工作。
+		d.log.Warn("新 Master 地址暂不可用，继续使用旧地址", "new", want, "err", err.Error())
+		return
+	}
+
+	d.mu.Lock()
+	d.cfg.MasterURL = want
+	d.cli = nc
+	d.curEtcd = "" // 新地址上的配置摘要未知，强制下一轮重新拉
+	cfg := d.cfg
+	d.mu.Unlock()
+
+	if err := agentconfig.Save(d.cfgPath, cfg); err != nil {
+		d.log.Warn("切换 Master 地址后写配置失败", "err", err.Error())
+		return
+	}
+	d.log.Info("已切换 Master 地址", "from", cur, "to", want)
+}
+
+// maybeAutoUpgrade 按 Master 的指令自升级。
+//
+// 每个进程只试一次：下载失败、校验失败、替换失败都不重试——否则
+// "目标版本号写错"会变成每轮上报都下载一次二进制，白白吃掉节点带宽。
+// 替换成功后**不自行重启**：交给服务管理器（systemd Restart=always 等），
+// 与 `xb-probe-agent upgrade` 的行为保持一致。
+func (d *Daemon) maybeAutoUpgrade(ctx context.Context, remote model.AgentConfig) {
+	if !remote.AutoUpgrade {
+		return
+	}
+	want := strings.TrimSpace(remote.TargetVersion)
+	if want == "" || want == d.version {
+		return
+	}
+	d.mu.Lock()
+	if d.upgradeTried {
+		d.mu.Unlock()
+		return
+	}
+	d.upgradeTried = true
+	cli := d.cli
+	d.mu.Unlock()
+
+	exe, err := os.Executable()
+	if err != nil {
+		d.log.Warn("自动升级：无法确定自身路径", "err", err.Error())
+		return
+	}
+	d.log.Info("自动升级：开始", "from", d.version, "to", want)
+	res, err := updater.Upgrade(ctx, cli, updater.Options{
+		Platform: dist.CurrentTag(), Current: d.version, Version: want, Target: exe,
+	})
+	if err != nil {
+		d.log.Warn("自动升级失败（本进程不再重试）", "err", err.Error())
+		return
+	}
+	if res.NoChange {
+		d.log.Info("自动升级：已是最新", "version", res.To)
+		return
+	}
+	d.log.Info("自动升级完成，等待服务管理器重启进程",
+		"from", res.From, "to", res.To, "backup", res.Backup)
 }
 
 // probeLoop 按配置周期异步探测目标，结果缓存于内存等待下次上报（3.1）。

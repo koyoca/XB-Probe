@@ -65,6 +65,11 @@ type Deps struct {
 	// Heartbeat 暴露外部心跳（A5）的运行态供后台展示。
 	// 由 cmd/xb-probe-master 的调度器实现并注入；测试或未接线的场景允许为 nil。
 	Heartbeat model.HeartbeatReader
+
+	// AccessRecorder 把访问记录旁路写入 access_log（设置项 security.access_log_enabled）。
+	// 为 nil 表示不记录（测试与未接线场景）。开关在 Record 内部每次现读设置，
+	// 因此"后台打开开关"立即生效、不需要重启。
+	AccessRecorder *AccessRecorder
 }
 
 // Handler 持有全部 HTTP 处理逻辑。

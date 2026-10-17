@@ -52,6 +52,8 @@ func (h *Handler) PublicRoutes() http.Handler {
 	mux.HandleFunc("GET /api/public/v1/nodes/{public_id}", h.handlePublicNode)
 	mux.HandleFunc("GET /api/public/v1/nodes/{public_id}/history", h.handlePublicHistory)
 	mux.HandleFunc("GET /api/public/v1/nodes/{public_id}/latency", h.handlePublicLatency)
+	// 在线情况时间线（近 N 小时，按指标落库推导）。
+	mux.HandleFunc("GET /api/public/v1/nodes/{public_id}/online", h.handlePublicOnline)
 
 	// --- 一键安装（12.2）：免鉴权，不含任何节点秘密 ---
 	mux.HandleFunc("GET /install.sh", h.handleInstallSh)
@@ -292,6 +294,8 @@ func (h *Handler) AdminRoutes() http.Handler {
 	mux.HandleFunc("GET /api/admin/v1/audit-log", h.requireAdmin(h.handleAuditLog))
 	// 审计日志保留期（6.5）：默认 30 天，可改；改与立即清理都需二次确认密码。
 	mux.HandleFunc("PUT /api/admin/v1/maintenance/audit/retention", h.requireAdmin(h.handleSetAuditRetention))
+	// 访问日志（migration 0011）。只读分页接口，供后台"访问日志"页使用。
+	mux.HandleFunc("GET /api/admin/v1/access-log", h.requireAdmin(h.handleAccessLog))
 	mux.HandleFunc("POST /api/admin/v1/maintenance/audit/prune", h.requireAdmin(h.handlePruneAuditLog))
 	mux.HandleFunc("POST /api/admin/v1/maintenance/backup", h.requireAdmin(h.handleBackup))
 	mux.HandleFunc("GET /api/admin/v1/maintenance/backups", h.requireAdmin(h.handleListBackups))
@@ -331,9 +335,12 @@ func (h *Handler) AdminRoutes() http.Handler {
 	h2 = RateLimitMiddleware(NewIPLimiter(120, 240), h2)
 	// 管理端不允许任何注入内容，CSP 恒为最严（13.4.5）。
 	h2 = SecurityHeaders(h.securityPolicy(), nil, h2)
+	h2 = accessLogMiddleware(h.AccessRecorder, h2)
 	if h.AccessLog {
 		h2 = AccessLogMiddleware(h.Logger, h2)
 	}
+	// 黑名单同样覆盖管理端：扫后台的 IP 往往就是被公开站拦住的那批。
+	h2 = h.IPBlacklistMiddleware(h2)
 	h2 = RealIPMiddleware(h.TrustedProxies, h.cdnRangeList, h2)
 	return h2
 }

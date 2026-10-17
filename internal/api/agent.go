@@ -475,6 +475,9 @@ func agentConfigOf(version string, eff config.EffectiveConfig) model.AgentConfig
 		NICInclude:      eff.NICInclude,
 		NICExclude:      eff.NICExclude,
 		Targets:         eff.Targets,
+		MasterURL:       eff.MasterURL,
+		AutoUpgrade:     eff.AutoUpgrade,
+		TargetVersion:   eff.TargetVersion,
 	}
 }
 

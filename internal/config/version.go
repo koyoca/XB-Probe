@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"sort"
+	"strings"
 
 	"github.com/koyoca/xb-probe/internal/model"
 )
@@ -18,6 +19,11 @@ type EffectiveConfig struct {
 	NICInclude      []string       `json:"nic_include"`
 	NICExclude      []string       `json:"nic_exclude"`
 	Targets         []model.Target `json:"targets"`
+
+	// 远程运维指令（见 model.AgentConfig 的说明）：换域名与自动升级。
+	MasterURL     string `json:"master_url,omitempty"`
+	AutoUpgrade   bool   `json:"auto_upgrade,omitempty"`
+	TargetVersion string `json:"target_version,omitempty"`
 }
 
 // ComputeConfigVersion 计算配置摘要：规范化 JSON 的 SHA-256 前 8 字节（16 位十六进制）。
@@ -57,6 +63,12 @@ func BuildEffective(settings map[string]string, targets []*model.ProbeTarget) Ef
 		NICInclude:      splitList(settings["nic_include"]),
 		NICExclude:      splitList(settings["nic_exclude"]),
 		Targets:         toTargets(targets),
+		// 换域名：install.master_url 既用于拼接安装命令，也作为"应切换到的地址"
+		// 下发给已装节点——这样改一处就能同时覆盖新装与存量（否则要分两步做，
+		// 中间那段时间新装的节点和存量节点指向不同域名，排查起来极乱）。
+		MasterURL:     strings.TrimSpace(settings["install.master_url"]),
+		AutoUpgrade:   settings["agent.auto_upgrade"] == "1",
+		TargetVersion: strings.TrimSpace(settings["agent.target_version"]),
 	}
 }
 

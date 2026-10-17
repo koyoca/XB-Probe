@@ -590,6 +590,11 @@ func (s *Scheduler) scanAlerts(ctx context.Context, now time.Time) {
 
 		// --- 离线判定 ---
 		stale := nowUnix-n.LastSeen > timeout
+		// 一旦离开在线态，就把"上线提醒"的去重状态复位：它没有恢复动作，
+		// 状态会永远停在 firing，导致节点一小时内二次上线时提醒被冷却丢掉。
+		if stale {
+			s.alerts.Reset(n.NodeID, alert.KindOnline)
+		}
 		switch {
 		case stale && n.SuspectSince == 0:
 			newSuspect = nowUnix
@@ -1021,6 +1026,16 @@ func (s *Scheduler) cleanup(now time.Time) {
 	// install.code_ttl_min 决定，这里只是把早已失效的记录收走）。
 	_, _ = s.repo.DB().Write.Exec(`DELETE FROM enroll_codes WHERE expires_at < ?`,
 		now.AddDate(0, 0, -90).Unix())
+
+	// 访问日志：按 security.access_log_days 清理。开关关掉之后**仍然清**——
+	// 否则关掉日志只停止新增，库里那批旧记录会永久留着（用户会以为关了就不占了）。
+	accessDays := int(s.repo.GetIntSetting("security.access_log_days", 30))
+	if accessDays < 1 {
+		accessDays = 1
+	}
+	if _, err := s.repo.PruneAccessLog(now.AddDate(0, 0, -accessDays).Unix()); err != nil {
+		s.log.Error("访问日志清理失败", "err", err.Error())
+	}
 
 	// 每日自动备份（6.6）。放在 cleanup 里而不是单独开 ticker：
 	// 清理是每小时跑一次的既有节拍，备份按"日期去重"天然就是每日一次，

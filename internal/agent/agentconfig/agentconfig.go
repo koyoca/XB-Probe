@@ -25,6 +25,10 @@ type Config struct {
 	// 开发专用：允许 http:// 的 Master 地址（仅回环）。S7。
 	InsecureHTTP bool `yaml:"insecure_http,omitempty"`
 
+	// AutoUpgrade 由 Master 下发（设置项 agent.auto_upgrade）：为真时，
+	// Agent 发现目标版本与自己不同就自行升级。
+	AutoUpgrade bool `yaml:"auto_upgrade,omitempty"`
+
 	ReportIntervalS int `yaml:"report_interval_s"`
 	ProbeIntervalS  int `yaml:"probe_interval_s"`
 
@@ -188,6 +192,10 @@ func (c *Config) ApplyServerConfig(remote model.AgentConfig) {
 		c.NICExclude = remote.NICExclude
 	}
 	c.Targets = remote.Targets
+	// 自动升级开关同样是"被动配置"：后台打开后，下一次拉配置就生效。
+	// MasterURL **不在这里改**：换域名要先验证新地址可用再落盘，
+	// 这段逻辑在 agent.syncConfig 里（那里有 client 可以试连）。
+	c.AutoUpgrade = remote.AutoUpgrade
 	c.ConfigVersion = remote.ConfigVersion
 }
 

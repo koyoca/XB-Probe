@@ -152,6 +152,18 @@ type AgentConfig struct {
 	NICInclude      []string `json:"nic_include,omitempty"`
 	NICExclude      []string `json:"nic_exclude"`
 	Targets         []Target `json:"targets"`
+
+	// MasterURL 是"应切换到的 Master 地址"（为空表示维持现状）。
+	//
+	// 用途：换域名时旧地址先留着，Agent 从**旧地址**拿到这条指令后先验证
+	// 新地址可用、再落盘切换；验证不通就继续用旧地址重试。整个过程不需要
+	// 重新安装，也就不会出现"改域名后一批节点集体失联"。
+	MasterURL string `json:"master_url,omitempty"`
+
+	// AutoUpgrade 开启后，Agent 发现 TargetVersion 与自己不同就自行升级
+	// （下载校验 → 替换 → 等service manager 重启）。
+	AutoUpgrade   bool   `json:"auto_upgrade,omitempty"`
+	TargetVersion string `json:"target_version,omitempty"`
 }
 
 // EnrollRequest 是 POST /api/agent/v1/enroll 的请求体（12.2 新增环境字段）。

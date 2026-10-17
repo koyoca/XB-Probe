@@ -219,6 +219,11 @@ func (h *Handler) handlePublicLatency(w http.ResponseWriter, r *http.Request) {
 		lossSum, lossN int64
 		sum, min, max  int64
 		n              int
+		// maxLoss 是窗口内单桶最高丢包（×100），outages 是"断点"段数。
+		// 综合丢包会稀释短时中断（24h 里断 1 分钟 ≈ 0.07%），必须另给峰值，
+		// 否则界面上就是一句"丢包 0.0%"，而用户明明记得断过。
+		maxLoss int64
+		outages int
 	}
 	byTarget := map[int64]*acc{}
 	for rows.Next() {
@@ -235,6 +240,14 @@ func (h *Handler) handlePublicLatency(w http.ResponseWriter, r *http.Request) {
 		}
 		a.lossSum += loss
 		a.lossN++
+		if loss > a.maxLoss {
+			a.maxLoss = loss
+		}
+		// 断点判据：单桶丢包 ≥ 50%。用 50% 而不是 100%，是因为一轮探测里
+		// 只要过半失败，这条链路实际上已经不可用；100% 会把"严重但不彻底"漏掉。
+		if loss >= 5000 {
+			a.outages++
+		}
 		if rtt.Valid {
 			a.points = append(a.points, model.PublicHistoryPoint{TS: ts, Value: rtt.Int64})
 			a.sum += rtt.Int64
@@ -273,10 +286,15 @@ func (h *Handler) handlePublicLatency(w http.ResponseWriter, r *http.Request) {
 	//
 	// 启用集合为空时输出空数组（而不是"把所有历史数据倒出来"）：
 	// 没有探测目标就是没有，硬塞一堆历史曲线反而是在掩盖配置。
+	//
+	// ★ 白名单必须同时看 ShowInBars：`点阵隐藏` 是"不要把这条探测亮给公众"，
+	//   而详情页的延迟曲线同样是对公输出。只按 Enabled 过滤的话，点阵里已经
+	//   藏掉的目标仍会以折线形式出现在卡片详情里（用户实测的泄漏），
+	//   两处都读同一份数据、却只有一处守住了可见性。
 	var enabled []*model.ProbeTarget
 	if targets, err := h.Repo.ListProbeTargets(rt.NodeID); err == nil {
 		for _, t := range targets {
-			if t.Enabled {
+			if t.Enabled && t.ShowInBars {
 				enabled = append(enabled, t)
 			}
 		}
@@ -319,6 +337,21 @@ func (h *Handler) handlePublicLatency(w http.ResponseWriter, r *http.Request) {
 		}
 		if a.lossN > 0 {
 			s.Loss = int(a.lossSum / a.lossN)
+			s.MaxLoss = int(a.maxLoss)
+			s.Outages = a.outages
+		}
+		// 抖动：相邻采样点 RTT 差的绝对值平均（points 此时已按时间升序）。
+		// 只用相邻两点而不是全量方差：运维关心的是"一跳一跳地抖多少"。
+		if len(a.points) > 1 {
+			var dsum int64
+			for i := 1; i < len(a.points); i++ {
+				d := a.points[i].Value - a.points[i-1].Value
+				if d < 0 {
+					d = -d
+				}
+				dsum += d
+			}
+			s.Jitter = dsum / int64(len(a.points)-1)
 		}
 		if a.n > 0 {
 			last := a.points[len(a.points)-1].Value
@@ -534,4 +567,107 @@ func (h *Handler) stripIPBadgeIfDisabled(p *model.PublicNode) {
 	if h.Repo.GetSettingDefault("public.show_ip_badge", "1") != "1" {
 		p.NetStack = ""
 	}
+}
+
+// handlePublicOnline 对应 GET /nodes/{public_id}/online。
+//
+// 返回"近 N 小时的在线情况"时间线：每个格子代表一个时间桶，
+// 1 = 该桶内有上报，0 = 无上报（离线），null = 该节点当时还不存在/无任何数据。
+//
+// 为什么不做成"状态变更日志"：那样只能从升级那一刻开始记，用户想看
+// "昨天夜里断了多久"就没有数据。用指标落库推导可以立刻回看已有历史，
+// 与告警判定用的 last_seen 也是同一份事实（有上报即在线）。
+func (h *Handler) handlePublicOnline(w http.ResponseWriter, r *http.Request) {
+	publicID := r.PathValue("public_id")
+	rt, ok := h.Registry.GetByPublicID(publicID)
+	if !ok || !rt.PublicVisible || rt.Archived {
+		writeErr(w, http.StatusNotFound, model.ErrNotFound, "节点不存在")
+		return
+	}
+	rangeStr := r.URL.Query().Get("range")
+	if rangeStr == "" {
+		rangeStr = "24h"
+	}
+	span := rangeDuration(rangeStr)
+	if span <= 0 {
+		span = 24 * time.Hour
+	}
+	const step = int64(600) // 10 分钟一格：24h → 144 格，与 10m 聚合层对齐
+	now := time.Now()
+	to := now.Unix() - now.Unix()%step
+	from := to - int64(span.Seconds())
+	segments := int((to - from) / step)
+	if segments < 1 {
+		segments = 1
+	}
+	if segments > 576 { // 最长 4 天（10 分钟粒度），避免前端画上千个格子
+		segments = 576
+		from = to - int64(segments)*step
+	}
+
+	table := h.Repo.MetricsTableForRange(rangeStr)
+	tsList, err := h.Repo.OnlineTimestamps(rt.NodeID, from, table)
+	if err != nil {
+		h.logErr("handlePublicOnline", err)
+		writeErr(w, http.StatusInternalServerError, model.ErrInternal, "查询失败")
+		return
+	}
+
+	// 1/0/null 三态：先全部置 null（未知），再按"有上报"置 1，
+	// 最后把"首个上报之后、末个上报之前没有上报"的格子置 0（离线）。
+	segs := make([]*int, segments)
+	one, zero := 1, 0
+	for _, ts := range tsList {
+		if ts < from || ts >= to {
+			continue
+		}
+		idx := int((ts - from) / step)
+		if idx >= 0 && idx < segments {
+			segs[idx] = &one
+		}
+	}
+	first, last := -1, -1
+	for i, s := range segs {
+		if s != nil {
+			if first < 0 {
+				first = i
+			}
+			last = i
+		}
+	}
+	for i := first; i >= 0 && i <= last; i++ {
+		if segs[i] == nil {
+			segs[i] = &zero
+		}
+	}
+
+	// 顺带统计"断了几次、一共断了多久、最长一次多久"。
+	// 用户提这个需求的原始动机就是"事后想知道离线了多久"，
+	// 所以时长必须由服务端算好，而不是让用户自己数格子。
+	var runs, offlineBuckets, run, longest int
+	for i := first; i >= 0 && i <= last; i++ {
+		if segs[i] != nil && *segs[i] == 0 {
+			run++
+			offlineBuckets++
+			if run > longest {
+				longest = run
+			}
+		} else if run > 0 {
+			runs++
+			run = 0
+		}
+	}
+	if run > 0 {
+		runs++
+	}
+
+	w.Header().Set("Cache-Control", "max-age=10")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"from":         from,
+		"step":         step,
+		"segments":     segs,
+		"offline_runs": runs,
+		"offline_secs": int64(offlineBuckets) * step,
+		"longest_secs": int64(longest) * step,
+	})
 }

@@ -555,7 +555,13 @@
     head.appendChild(el('span', 'lb-name', label));
 
     var lastRtt = lastNonNull(b.rtt);
-    var lastLoss = lastNonNull(b.loss);
+    // 丢包取**整个窗口的综合值**，不是"最后一个桶"。
+    //
+    // 旧写法是 lastNonNull(b.loss)：只要最近一段恢复成 0%，标签就永远显示 0.0%，
+    // 哪怕 20 分钟前刚整段丢包（用户实测"即使一段时间内有丢包，还是显示 0%"）。
+    // 切换 30m/24h 时这个数字必须跟着窗口变，否则上面那行标签与下面那排点
+    // 说的根本不是同一件事。
+    var winLoss = avgOfNonNull(b.loss);
     var rt = el('span', 'lb-val');
     if (lastRtt != null) {
       rt.textContent = (lastRtt / 1000).toFixed(0) + ' ms';
@@ -567,9 +573,10 @@
     head.appendChild(rt);
 
     var ls = el('span', 'lb-val lb-loss');
-    if (lastLoss != null) {
-      ls.textContent = (lastLoss / 100).toFixed(1) + '%';
-      ls.style.color = lossColor(lastLoss);
+    if (winLoss != null) {
+      ls.textContent = fmtLoss(winLoss);
+      ls.title = '本窗口综合丢包（各段平均）';
+      ls.style.color = lossColor(winLoss);
     } else {
       ls.textContent = '—';
       ls.className = 'lb-val muted-v';
@@ -580,6 +587,27 @@
     row.appendChild(dotsLine(b, 'rtt'));
     row.appendChild(dotsLine(b, 'loss'));
     return row;
+  }
+
+  // avgOfNonNull 求一组（可能含 null）数值的**非空平均**。
+  // 空段不计入分母：没有数据不等于"丢包 0%"，把它算进去会把有数据的段稀释掉。
+  function avgOfNonNull(arr) {
+    if (!arr) return null;
+    var sum = 0, n = 0;
+    for (var i = 0; i < arr.length; i++) {
+      if (arr[i] == null) continue;
+      sum += arr[i]; n++;
+    }
+    return n ? sum / n : null;
+  }
+
+  // fmtLoss 把 ×100 的丢包值格式化成百分比。
+  // 小于 0.1% 时多给一位小数：底层粒度本来就是 0.01%，
+  // 统一 toFixed(1) 会把"确实丢过一点"压成 0.0%（就是用户看到的那一行）。
+  function fmtLoss(lossX100) {
+    var pct = (lossX100 || 0) / 100;
+    if (pct > 0 && pct < 0.1) return pct.toFixed(2) + '%';
+    return pct.toFixed(1) + '%';
   }
 
   function lastNonNull(arr) {
@@ -1329,6 +1357,11 @@
     }
 
     if (detailTab === 'latency') {
+      // 在线情况（近 N 小时）：与延迟曲线一起加载，切换时间范围时同步变化。
+      getJSON('/nodes/' + encodeURIComponent(id) + '/online?range=' + range)
+        .then(function (res) { if (current === id) renderOnlineStrip(res); })
+        .catch(function () { });
+
       getJSON('/nodes/' + encodeURIComponent(id) + '/latency?range=' + range)
         .then(function (list) {
           if (current !== id) return;
@@ -1412,6 +1445,53 @@
     });
   }
 
+  // renderOnlineStrip 画"在线情况"时间线。
+  //
+  // 三态：有上报=实心（--online 那颗唯一的彩色），无上报=浅灰，未知（节点当时
+  // 还不存在/还没数据）=几乎不可见的轨道灰。这样"断过多久"一眼能看出来，
+  // 而不会把"还没部署"误读成"离线"。
+  function renderOnlineStrip(res) {
+    var box = $('online-strip');
+    var sum = $('online-summary');
+    if (!box) return;
+    box.textContent = '';
+    var segs = (res && res.segments) || [];
+    if (!segs.length) {
+      if (sum) sum.textContent = '—';
+      return;
+    }
+    var step = res.step || 600;
+    var from = res.from || 0;
+    var online = 0, offline = 0;
+    segs.forEach(function (v) {
+      var d = el('i');
+      if (v === 1) {
+        d.className = 'on';
+        d.style.backgroundColor = cssVar('--online', '#139948');
+        online++;
+      } else if (v === 0) {
+        d.className = 'off';
+        d.style.backgroundColor = cssVar('--c5', '#c4c4c4');
+        offline++;
+      } else {
+        d.className = 'na';
+      }
+      d.title = fmtHM(from + (box.children.length) * step) + ' · ' +
+        (v === 1 ? '在线' : v === 0 ? '离线（无上报）' : '无数据');
+      box.appendChild(d);
+    });
+    if (sum) {
+      if (offline === 0) {
+        sum.textContent = '窗口内一直在线';
+      } else {
+        var mins = Math.round(res.offline_secs / 60);
+        sum.textContent = '离线 ' + res.offline_runs + ' 次 · 累计 ' +
+          (mins >= 60 ? (mins / 60).toFixed(1) + ' 小时' : mins + ' 分钟') +
+          (res.longest_secs ? ' · 最长一次 ' + Math.max(1, Math.round(res.longest_secs / 60)) + ' 分钟' : '');
+      }
+    }
+  }
+
   // renderLatencyList 渲染"延迟明细"。数据来自 /latency（按目标 + 时间窗口统计），
   // 不是节点 DTO 里的 latency 字段——后者只有最后一轮探测的瞬时值，
   // 换时间跨度时不会跟着变。
@@ -1442,11 +1522,32 @@
       c.appendChild(k);
 
       c.appendChild(el('div', 'v', t.avg_rtt == null ? '无数据' : (t.avg_rtt / 1000).toFixed(1) + ' ms'));
-      c.appendChild(el('div', 'sub', t.avg_rtt == null
-        ? '窗口内未探通 · 状态 ' + (CARRIER_NAME[t.status] || t.status || '未知')
-        : '最小 ' + (t.min_rtt / 1000).toFixed(1) + ' · 最大 ' + (t.max_rtt / 1000).toFixed(1) +
-          ' ms · 丢包 ' + ((t.loss || 0) / 100).toFixed(1) + '% · ' +
-          (CARRIER_NAME[t.status] || t.status || '未知')));
+      // 明细行按"这个节点这条链路到底怎么样"排列：延迟区间 → 丢包（综合+峰值）
+      // → 抖动 → 断点次数 → 状态。
+      //
+      // 为什么要把峰值和断点单列：综合丢包是整窗口的平均，短时中断会被
+      // 摊薄成 0.0%（用户实测"明明断过却一直显示 0 丢包"）。峰值回答"最差
+      // 到什么程度"，断点回答"断了几次"，抖动回答"稳不稳"——四个数各管一件事，
+      // 少任何一个都会让人误判。
+      var parts = [];
+      if (t.avg_rtt != null) {
+        parts.push('最小 ' + (t.min_rtt / 1000).toFixed(1) + ' · 最大 ' + (t.max_rtt / 1000).toFixed(1) + ' ms');
+      }
+      parts.push('丢包 ' + fmtLoss(t.loss));
+      if (t.max_loss && t.max_loss > t.loss) {
+        parts.push('峰值 ' + fmtLoss(t.max_loss));
+      }
+      if (t.jitter) {
+        parts.push('抖动 ' + (t.jitter / 1000).toFixed(1) + ' ms');
+      }
+      if (t.outages) {
+        parts.push('断点 ' + t.outages + ' 段');
+      }
+      if (t.avg_rtt == null && t.points && t.points.length === 0) {
+        parts.unshift('窗口内未探通');
+      }
+      parts.push(CARRIER_NAME[t.status] || t.status || '未知');
+      c.appendChild(el('div', 'sub', parts.join(' · ')));
       box.appendChild(c);
     });
   }

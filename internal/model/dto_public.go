@@ -260,8 +260,23 @@ type PublicLatencySeries struct {
 	Avg    *int64 `json:"avg_rtt"`
 	Min    *int64 `json:"min_rtt"`
 	Max    *int64 `json:"max_rtt"`
-	Loss   int    `json:"loss"`   // 窗口平均丢包率 ×100
+	Loss   int    `json:"loss"`   // 窗口综合丢包率 ×100（各桶按样本数加权）
 	Status string `json:"status"` // ok/warn/bad/unknown
+
+	// MaxLoss 是窗口内**单桶最高**丢包率（×100）。
+	//
+	// 为什么除了综合值还要给峰值：综合丢包是"整个窗口的平均"，
+	// 24 小时里断 1 分钟只剩 0.07%，四舍五入后就是 0.0%——用户看到
+	// "明明丢过包却显示 0%"。峰值不会稀释，两者一起看才说得清。
+	MaxLoss int `json:"max_loss"`
+
+	// Outages 是窗口内"断点"的段数：单桶丢包 ≥ 50% 记一次。
+	// 它回答的是"断了几次"，而 Loss 回答的是"总共丢了多少"。
+	Outages int `json:"outages"`
+
+	// Jitter 是抖动（微秒）：相邻采样点 RTT 差的绝对值平均。
+	// 尖刺型抖动在 Min/Max 上只能看到"最大值"，抖动值才能反映波动幅度。
+	Jitter int64 `json:"jitter"`
 }
 
 // ---------------------------------------------------------------------------

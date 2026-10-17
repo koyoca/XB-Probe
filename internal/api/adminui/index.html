@@ -43,6 +43,7 @@
       <button data-view="account" class="nav">账户安全</button>
       <button data-view="releases" class="nav">发布文件</button>
       <button data-view="audit" class="nav">审计日志</button>
+      <button data-view="access" class="nav">访问日志</button>
     </nav>
     <span class="spacer"></span>
     <span id="whoami" class="muted"></span>
@@ -296,6 +297,19 @@
       </table></div>
       <div class="pager" id="audit-pager"></div>
       <p class="muted">说明："对象"列显示被操作实体的类型与 ID（如 node:1 表示节点 #1，billing.update 等无明确对象的动作会显示节点 ID）。</p>
+    </section>
+    <section id="view-access" class="view" hidden>
+      <div class="row"><h2>访问日志</h2><span class="spacer"></span>
+        <label>来源 IP <input id="access-ip" placeholder="精确匹配，留空为全部" style="width:180px"></label>
+        <button id="btn-refresh-access" class="ghost">刷新</button></div>
+      <div id="access-state" class="panel"></div>
+      <div class="table-wrap"><table id="access-table">
+        <thead><tr><th>时间</th><th>来源 IP</th><th>方法</th><th>路径</th><th>状态</th><th>大小</th><th>耗时</th><th>UA</th></tr></thead>
+        <tbody></tbody>
+      </table></div>
+      <div class="pager" id="access-pager"></div>
+      <p class="muted">来源 IP 是 RealIP 还原后的真实客户端地址（经 CDN/反代时按 trusted_proxies 与 CDN 网段逐跳还原）。
+        点某个 IP 可只看它。静态资源与 ACME 挑战不记录。</p>
     </section>
   </main>
 </div>

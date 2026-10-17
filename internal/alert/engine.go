@@ -232,6 +232,22 @@ func (e *Engine) Clear(nodeID int64, kind string) {
 	e.mu.Unlock()
 }
 
+// Reset 把某条告警状态复位为 ok（不发通知、不写事件）。
+//
+// 用途：那些"每次发生都该通知、且没有天然恢复动作"的一次性事件——典型就是
+// **节点上线提醒**。Fire 的冷却判据是「上次仍处于 firing 且未过冷却窗口」，
+// 而上线提醒从来不会被 Recover（没有"上线恢复"这回事），于是它的状态会一直
+// 停在 firing：节点离线后一小时内再上线，第二次提醒会被冷却**静默丢弃**
+// （用户实测"有时候节点上线了也不提醒"）。
+//
+// 因此在"节点离开在线态"（开始 stale）时把这条状态复位，下一次恢复上报
+// 就必然能发出提醒。用状态置 ok 而不是删行：不需要给 Store 接口加方法，
+// 且 ok 与 Recover 写入的状态同语义。
+func (e *Engine) Reset(nodeID int64, stateKind string) {
+	e.Clear(nodeID, stateKind)
+	_ = e.store.UpsertAlertState(AlertState{NodeID: nodeID, Kind: stateKind, State: "ok"})
+}
+
 // Fire 在已确认的条件下触发一次告警（含冷却判定）。
 // kind 可为带梯级的复合键，如 "traffic:80"、"expire:7"。
 func (e *Engine) Fire(ctx context.Context, nodeID int64, baseKind, stateKind, level, detail string, now int64) error {

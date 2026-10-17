@@ -79,6 +79,8 @@ func existingTables(t *testing.T, d *sql.DB) []string {
 // "7d/30d 曲线全靠它"的表（空表不会报错，只是页面永远没有数据）。
 // 增删表必须同时改这里，属于有意为之的摩擦。
 var expectedTables = []string{
+	// 0011：访问日志（后台"访问日志"页）。
+	"access_log",
 	"admin_recovery_codes",
 	"admins",
 	"alert_channels",

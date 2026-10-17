@@ -877,14 +877,15 @@
     settings: function () { loadSettings(); loadThemes(); loadStorage(); loadHeartbeat(); loadBackups(); refreshTotpStatus(); },
     account: function () { loadTOTP(); },
     releases: function () { loadReleases(); },
-    audit: function () { loadAuditRetention(); loadAudit(); }
+    audit: function () { loadAuditRetention(); loadAudit(); },
+    access: function () { loadAccessLog(); }
   };
 
   var currentView = 'nodes'; // 当前视图名：深浅切换后按它重跑 loader 重画图表
 
   function showView(name) {
     currentView = name;
-    var views = ['nodes', 'node', 'targets', 'alerts', 'settings', 'account', 'releases', 'audit'];
+    var views = ['nodes', 'node', 'targets', 'alerts', 'settings', 'account', 'releases', 'audit', 'access'];
     views.forEach(function (v) {
       var node = $('view-' + v);
       if (node) node.hidden = (v !== name);
@@ -4119,7 +4120,10 @@
     events: { limit: 20, offset: 0, total: 0 },
     // 审计日志默认 20 条/页（与事件一致）：审计是低频回看场景，50 条一页
     // 首屏要滚很久才到底；20 条翻页更快，要批量看时下拉里还有 50/100/200。
-    audit: { limit: 20, offset: 0, total: 0 }
+    audit: { limit: 20, offset: 0, total: 0 },
+    // 访问日志：一页 50 条。它比审计密集得多（一次页面加载十几条），
+    // 20 条一页翻起来太碎。
+    access: { limit: 50, offset: 0, total: 0 }
   };
   var PAGE_SIZES = [20, 50, 100, 200];
 
@@ -4358,10 +4362,37 @@
     // 审计日志保留期（天）。它同时由**审计日志页**的专用面板管理（那里带
     // 密码/动态码二次确认、改完立即清理一次）；这里给出同一份可读标签，
     // 免得该键被改过一次之后在设置页里以英文键名形式冒出来（用户反馈"改为中文"）。
-    'audit.retention_days': ['审计日志保留天数', 'number',
-      '审计日志超过这个天数的记录会被自动清理（每小时一次），也可在审计页点「立即清理」。' +
-      '修改本项与审计页的「保存保留期」是同一个值：审计页那条会额外要求密码（TOTP 开启时' +
-      '再加动态码）并立即清理一次。保留期越长，能追溯的历史操作越多，但库也越大。'],
+    // 审计日志保留期**不在设置页提供**：它只能从「审计日志」页的专用面板修改——
+    // 那条路径带密码（TOTP 开启再加动态码）二次确认，并在保存后立即清理一次。
+    // 设置页的保存走的是普通 PUT /settings，没有任何二次确认，于是同一个
+    // 高危配置出现了"两条入口、一条不设防"的落差（用户实测：设置页改它不会弹认证）。
+    // 保留期直接决定能追溯多久的历史操作，属于必须确认的项，所以只留审计页那一条。
+    //
+    // 标 null 而不是直接删掉：该键只要被改过一次就已经落在 settings 表里，
+    // 删掉标签会让设置页的"未知键"兜底逻辑把它以英文键名渲染出来
+    // （这正是上一轮修过的那个问题）。null = 明确不显示（见 buildSettingInput）。
+    'audit.retention_days': null,
+    // 访问日志与黑名单（security.*）。
+    // Agent 远程运维（agent.*）：批量升级无需逐台上机。
+    'agent.auto_upgrade': ['Agent 自动升级', 'select:0=关闭,1=开启',
+      '开启后，Agent 每次拉配置时若发现"目标版本"与自己不同，会自行下载并替换二进制' +
+      '（下载→校验→替换，旧文件留 .old 可回滚）。替换后要等服务管理器重启进程' +
+      '（systemd Restart=always 会自动拉起），不是进程内热替换。'],
+    'agent.target_version': ['Agent 目标版本', 'text',
+      '形如 v0.3.0；留空表示不下发版本（关闭自动升级时填了也没用）。' +
+      '填了之后，**所有**开了自动升级的节点会在各自下一次拉配置时升级到这个版本，' +
+      '因此建议先在一个节点上验证过再全量。'],
+    'security.access_log_enabled': ['记录访问日志', 'select:0=关闭,1=开启',
+      '开启后每个页面/接口请求都会写进 access_log，可在「访问日志」页查看谁在什么时候' +
+      '访问了什么。关掉只是停止新增，库里已有的旧记录仍按下面的保留天数自动清理。'],
+    'security.access_log_days': ['访问日志保留天数', 'number',
+      '超过这个天数的访问记录会被每小时一次的清理删掉（1-365）。' +
+      '这张表随访问量线性增长，个人站点建议 7-30 天。'],
+    'security.ip_blacklist': ['IP 黑名单', 'raw',
+      '一行（或逗号）一条，支持单 IP（1.2.3.4）、网段（1.2.3.0/24）与通配尾段（1.2.3.*）。' +
+      '命中的来源直接返回 403，公开站与管理端都拦；Agent 接口不受影响（误封会静默中断监控）。' +
+      '记录/封禁用的都是 RealIP 还原后的真实地址：经 CDN 或反代时对端是边缘节点，' +
+      '已按 trusted_proxies 与 CDN 网段逐跳还原，不会把整段 CDN 出口封掉。'],
     'alert.retention_days': ['告警事件保留天数', 'number',
       '告警事件（告警页下方那张表）超过这个天数的记录会被每小时一次的清理删掉。' +
       '此前固定保留 90 天、不可调整；现在可以按自己的告警量与磁盘情况调整。' +
@@ -4388,13 +4419,14 @@
     ['登录与会话', ['admin.session_ttl_hours']],
     ['公开看板', ['public.enabled', 'public.cards', 'public.lat_window', 'public.show_ip_badge']],
     ['数据保留', ['retention.raw_hours', 'retention.mid_days', 'retention.days', 'raw_resolution_s',
-      'audit.retention_days', 'alert.retention_days']],
+      'alert.retention_days']],
     ['Agent 与上报', ['report_interval_s', 'probe_interval_s', 'offline_timeout_s', 'disk_min_free_mb',
-      'agent.ip_whitelist_enabled', 'agent.ip_whitelist']],
+      'agent.ip_whitelist_enabled', 'agent.ip_whitelist', 'agent.auto_upgrade', 'agent.target_version']],
     ['安装与下载', ['install.mode', 'install.master_url', 'install.dist_base', 'install.agent_version', 'install.code_ttl_min', 'install.max_enroll_codes', 'install.spki_sha256', 'install.pubkey']],
     ['CDN 与来源 IP', ['cdn.enabled', 'cdn.ranges']],
     ['备份', ['backup.enabled', 'backup.hour', 'backup.keep']],
     ['多币种（月费合计）', ['billing.base_currency', 'billing.rates']],
+    ['访问日志与黑名单', ['security.access_log_enabled', 'security.access_log_days', 'security.ip_blacklist']],
     ['脚本注入', ['inject.script_enabled', 'inject.head', 'inject.body_end']],
     ['外部与高级', ['heartbeat_url', 'node.custom_countries']]
   ];
@@ -5363,6 +5395,84 @@
       box.appendChild(row);
     }).catch(function (e) { toast(e.message, true); });
   }
+
+  // -------------------------------------------------------------------------
+  // 访问日志（security.access_log_*）
+  // -------------------------------------------------------------------------
+  //
+  // 与审计日志的区别：审计是"管理员做了什么"，访问日志是"谁碰了这个站点"。
+  // 两个页面都按时间倒序 + 分页，但这里多一个 IP 过滤（点列表里的 IP 就能
+  // 只看它），因为排查扫描/异常流量时是按来源归因的。
+  function loadAccessLog() {
+    var st = pages.access;
+    var ip = ($('access-ip').value || '').trim();
+    var q = '/access-log?limit=' + st.limit + '&offset=' + st.offset +
+      (ip ? '&ip=' + encodeURIComponent(ip) : '');
+    api(q).then(function (res) {
+      var list = adoptPage(st, res);
+
+      // 状态条：开关是否打开、保留多久。关着的时候必须显眼说明，
+      // 否则用户会以为"日志功能坏了"（其实是没开）。
+      var box = $('access-state');
+      clear(box);
+      var head = el('div', 'panel-head');
+      head.appendChild(el('h3', null, '采集状态'));
+      head.appendChild(el('span', 'muted', '共 ' + st.total + ' 条记录'));
+      box.appendChild(head);
+      box.appendChild(el('p', 'muted note', res.enabled
+        ? '正在记录，保留最近 ' + (res.days || 30) + ' 天。静态资源与 ACME 挑战不记。'
+        : '当前**未开启**：在「系统 → 访问日志与黑名单」里把"记录访问日志"设为开启后才会写入。'));
+
+      var tb = $('access-table').querySelector('tbody');
+      clear(tb);
+      list.forEach(function (a) {
+        var tr = el('tr');
+        tr.appendChild(td(fmtTime(a.ts)));
+        var ipTd = el('td');
+        var link = el('a', null, a.ip || '-');
+        link.href = '#';
+        link.title = '只看这个来源';
+        link.addEventListener('click', function (ev) {
+          ev.preventDefault();
+          $('access-ip').value = a.ip || '';
+          st.offset = 0;
+          loadAccessLog();
+        });
+        ipTd.appendChild(link);
+        tr.appendChild(ipTd);
+        tr.appendChild(td(a.method));
+        var p = td(a.path, 'wrap');
+        p.title = a.path;
+        tr.appendChild(p);
+        var sTd = td(String(a.status));
+        // 4xx/5xx 加一点"墨"：一眼能看出扫描与报错，不用逐行读状态码。
+        if (a.status >= 500) sTd.className = 'wrap';
+        tr.appendChild(sTd);
+        tr.appendChild(td(fmtBytes(a.bytes)));
+        tr.appendChild(td(a.dur_ms + ' ms'));
+        var ua = td(a.ua || '-', 'muted');
+        ua.title = a.ua || '';
+        tr.appendChild(ua);
+        tb.appendChild(tr);
+      });
+      if (!list.length) {
+        var tr0 = el('tr');
+        var td0 = td(st.total ? '这一页没有记录' : '还没有访问记录', 'muted');
+        td0.colSpan = 8;
+        tr0.appendChild(td0);
+        tb.appendChild(tr0);
+      }
+      renderPager($('access-pager'), 'access', loadAccessLog);
+    }).catch(function (e) { toast(e.message, true); });
+  }
+
+  $('btn-refresh-access').addEventListener('click', function () {
+    pages.access.offset = 0;
+    loadAccessLog();
+  });
+  $('access-ip').addEventListener('keydown', function (ev) {
+    if (ev.key === 'Enter') { pages.access.offset = 0; loadAccessLog(); }
+  });
 
   function loadAudit() {
     var st = pages.audit;

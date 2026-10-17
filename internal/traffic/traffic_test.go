@@ -25,11 +25,16 @@ func TestComputeDeltaRules(t *testing.T) {
 		}
 	})
 
-	t.Run("规则3a_boot_time变化按重启处理", func(t *testing.T) {
-		// 累计值变小 + 开机时间变化 → 重启，增量 = 当前值
+	t.Run("规则3a_计数器下降一律只重建基线", func(t *testing.T) {
+		// 累计值变小（重启 / 网卡重建 / 内核计数被清零）→ 只重建基线，增量为 0。
+		//
+		// 这条**故意**不再取"当前值"：只要判定是误判（网卡重建、跨命名空间读到
+		// 另一个同名网卡），当前值就是开机以来的累计值，一次就能把几十 GB～
+		// 几 TB 计进本周期 —— 用户实测的"流量瞬间跑满、连报 80/95/100 三档"。
+		// 代价只是漏记一个上报间隔，远小于虚高一个月的风险。
 		d := ComputeDelta(base, model.NICCounters{Rx: 50, Tx: 20}, 999, 64)
-		if d.Rx != 50 || d.Tx != 20 || !d.Restarted {
-			t.Fatalf("重启应取当前值，得到 %+v", d)
+		if d.Rx != 0 || d.Tx != 0 || !d.Restarted {
+			t.Fatalf("计数器下降应只重建基线（增量 0 且标记重启），得到 %+v", d)
 		}
 	})
 
@@ -45,15 +50,20 @@ func TestComputeDeltaRules(t *testing.T) {
 		}
 	})
 
-	t.Run("规则3c_64位计数器变小按重置处理", func(t *testing.T) {
-		// 计数器位宽未知为 64 且开机时间没变：不回绕，按重置（取当前值）
+	t.Run("规则3c_64位计数器变小不得把累计值当增量", func(t *testing.T) {
+		// 关键回归：基线接近 2^32（64 位计数器的真实大值），当前值掉到 50。
+		// 旧实现返回 Delta{Rx: cur.Rx}，于是"一个 4 GB 量级的累计值"被当成
+		// 一次增量 —— 这正是流量虚高的直接成因。
 		prev := NICBaseline{LastRx: counterWrap32 - 100, LastTx: 10, BootTime: 5, UpdatedAt: 5, Valid: true}
 		d := ComputeDelta(prev, model.NICCounters{Rx: 50, Tx: 5}, 5, 64)
 		if d.Wrapped {
 			t.Fatalf("64 位计数器不应判定为回绕，得到 %+v", d)
 		}
-		if d.Rx != 50 {
-			t.Fatalf("重置应取当前值，得到 %d", d.Rx)
+		if d.Rx != 0 || d.Tx != 0 {
+			t.Fatalf("计数器下降时增量必须为 0（不得取累计值），得到 %d/%d", d.Rx, d.Tx)
+		}
+		if !d.Restarted {
+			t.Fatal("应标记为需要重建基线")
 		}
 	})
 

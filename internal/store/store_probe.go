@@ -254,3 +254,40 @@ func nullIfZero(v int) any {
 	}
 	return v
 }
+
+// OnlineTimestamps 返回某节点窗口内**有指标落库**的时间点（升序）。
+//
+// 用途：公开详情页的"在线情况"时间线。为什么用指标表推导而不是新建一张
+// 状态变更表：
+//   - 指标只在 Agent 上报时才会落库，"有这个时间点"就等于"那一刻在正常上报"，
+//     与告警用的 last_seen 是同一份事实；
+//   - 新表只能记录"从升级那一刻起"的状态变更，用户想看"昨天夜里离线了多久"
+//     时就只能看到一片空白（正是用户提这个需求的场景）。
+//
+// 代价是"指标被丢弃"（队列满/磁盘保护）会表现为短时离线——但那种情况下
+// 看板本来也没有数据，把它显示成离线并不算误导。
+//
+// 表名只接受 MetricsTableForRange 的返回值（metrics_raw/1m/10m），
+// 与 latencyBuckets 一样不接受外部输入。
+func (r *Repo) OnlineTimestamps(nodeID, from int64, table string) ([]int64, error) {
+	switch table {
+	case "metrics_raw", "metrics_1m", "metrics_10m":
+	default:
+		table = "metrics_10m"
+	}
+	rows, err := r.db.Read.Query(
+		`SELECT DISTINCT ts FROM `+table+` WHERE node_id=? AND ts>=? ORDER BY ts`, nodeID, from)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []int64
+	for rows.Next() {
+		var ts int64
+		if err := rows.Scan(&ts); err != nil {
+			return nil, err
+		}
+		out = append(out, ts)
+	}
+	return out, rows.Err()
+}

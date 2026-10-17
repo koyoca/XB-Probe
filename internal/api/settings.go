@@ -143,15 +143,11 @@ var settingDefaults = map[string]string{
 	"backup.enabled": "1",
 	"backup.hour":    "4",
 	"backup.keep":    "7",
-	// audit.retention_days 是审计日志保留期（天）。它同时由**审计日志页**的
-	// 专用面板管理（那里带密码/动态码二次确认、改完立即清理一次）。
-	//
-	// 为什么也要放进设置页白名单：这个键只要被改过一次就落进 settings 表，
-	// 而设置页的兜底逻辑（"后端返回了但分组里没有的键也显示出来"）会把它当
-	// 未知键渲染 —— 表现是页面上冒出一个标题为 `audit.retention_days` 的英文
-	// 输入框（用户反馈"改为中文"），且真去改它还会被白名单拒掉（"不允许的设置项"）。
-	// 现在给它中文标签与校验规则，两处入口共用同一个键、不会各存一份值。
-	"audit.retention_days": "30",
+	// audit.retention_days **故意不在这里**：它只由「审计日志」页的专用面板
+	// 管理，那条路径带密码（TOTP 开启再加动态码）二次确认并立即清理一次。
+	// 放进设置页就会多出一条**不设防**的入口（普通 PUT /settings），
+	// 而保留期决定了能追溯多久的历史操作，属于必须确认的高危项。
+	// 该键仍可存在于 settings 表里，读侧用 GetIntSetting 自带默认值 30。
 	// alert.retention_days 是告警事件的保留天数。此前**硬编码 90 天**
 	// （见调度器清理段），管理员无法调整——而告警量大的部署里 90 天会占掉
 	// 可观的空间，告警量小的又想留更久。默认 90 与升级前行为一致。
@@ -169,6 +165,26 @@ var settingDefaults = map[string]string{
 	// 的语义天然对齐。主币种自身的汇率恒为 1，不需要也不能配置。
 	"billing.base_currency": "",
 	"billing.rates":         "",
+	// 访问日志与 IP 黑名单（对应 migration 0011 的 access_log 表）。
+	//
+	// access_log_enabled 默认 **0**：这张表随页面访问线性增长，个人部署未必
+	// 想看；打开后按 access_log_days 自动清理。开关与保留期都是每次请求现读，
+	// 改完立即生效、不必重启。
+	"security.access_log_enabled": "0",
+	"security.access_log_days":    "30",
+	// ip_blacklist：一行（或逗号）一条，支持单 IP、CIDR、`1.2.3.*`。
+	// 命中即 403，**公开站与管理端都拦**；Agent 接口不受影响
+	// （黑名单是"不许访问网站"，而 Agent 是节点上报通道，误封会让监控静默中断）。
+	"security.ip_blacklist": "",
+	// Agent 远程运维：自动升级 + 目标版本。
+	//
+	// auto_upgrade 打开后，Agent 每次拉配置时若发现 target_version 与自己
+	// 不同就自行下载替换（复用 `xb-probe-agent upgrade` 同一条实现）。
+	// target_version 留空 = 不下发版本（只在"想钉某个版本"时填，如 v0.3.0）。
+	// 注意：**升级后要等 service manager 重启进程**才生效（systemd 的
+	// Restart=always 会自动拉起），不会在进程内热替换。
+	"agent.auto_upgrade":   "0",
+	"agent.target_version": "",
 }
 
 var settingSpecs = map[string]func(string) error{
@@ -215,13 +231,40 @@ var settingSpecs = map[string]func(string) error{
 	// 下限 1：配成 0 会让 PruneBackups 保留 0 份（尽管它自身有兜底，
 	// 也不该让管理员有机会配出一个"永远不保留备份"的状态）。
 	"backup.keep": intRange(1, 90),
-	// 审计日志保留期（天）：与 handleSetAuditRetention 的 1~3650 同一口径，
-	// 两处入口（审计页面板 / 设置页字段）不能有各自的范围。
-	"audit.retention_days": intRange(1, 3650),
+	// audit.retention_days 不在白名单：只允许走审计页那条带二次确认的路径
+	// （见 settingDefaults 处的说明）。范围校验由 handleSetAuditRetention 负责。
 	"alert.retention_days": intRange(1, 3650),
 	// 多币种（见 settingDefaults 的说明）。
-	"billing.base_currency": validateCurrencyCode,
-	"billing.rates":         validateCurrencyRates,
+	"billing.base_currency":       validateCurrencyCode,
+	"billing.rates":               validateCurrencyRates,
+	"security.access_log_enabled": enumValue("0", "1"),
+	"security.access_log_days":    intRange(1, 365),
+	// 黑名单不做强校验：允许存"暂时写错的条目"，解析侧会跳过非法行。
+	// 若在这里直接拒存，管理员改一半保存失败、旧名单还留着，更难排查。
+	"security.ip_blacklist": func(string) error { return nil },
+	"agent.auto_upgrade":    enumValue("0", "1"),
+	// 只接受 vX.Y.Z 或空：写错版本号会让每个 Agent 各下载一次再失败。
+	"agent.target_version": validateVersionTag,
+}
+
+// validateVersionTag 校验版本号形如 v1.2.3（或为空）。
+//
+// 为什么要挡：这个值会被下发到每个 Agent 去拼下载地址，写错一个字符
+// 就是"全部节点各下载一次再失败"，而失败点在节点侧、Master 日志里看不出来。
+func validateVersionTag(v string) error {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return nil
+	}
+	if !strings.HasPrefix(v, "v") || len(v) < 2 {
+		return fmt.Errorf("版本号须形如 v0.3.0")
+	}
+	for _, r := range v[1:] {
+		if (r < '0' || r > '9') && r != '.' {
+			return fmt.Errorf("版本号只能含数字与点")
+		}
+	}
+	return nil
 }
 
 // allowedSettingKey 判断设置键是否在白名单内。

@@ -283,10 +283,18 @@ func run(cfgPath string) error {
 
 	// 12) 接口层
 	distDir := filepath.Join(cfg.DataDir, "dist")
+	// 访问日志记录器（设置项 security.access_log_enabled 控制开关）。
+	// 必须在 api.New 之前启动：它的写协程要一直活着，随进程退出再排空。
+	accessRec := api.NewAccessRecorder(repo, func() bool {
+		return repo.GetSettingDefault("security.access_log_enabled", "0") == "1"
+	})
+	accessRec.Start()
+	defer accessRec.Stop()
+
 	h := api.New(api.Deps{
 		Repo: repo, Registry: registry, Snap: snap, Tokens: tokens, Keyring: keyring,
 		Writer: writer, Multi: multi, Latency: latencyAgg, Alerts: alerts,
-		Themes: themes, Tracker: tracker,
+		Themes: themes, Tracker: tracker, AccessRecorder: accessRec,
 		Version: version, TrustedProxies: cfg.TrustedProxies, DistDir: distDir,
 		AccessLog: cfg.AccessLog,
 		TLSMode:   cfg.TLS.Mode,

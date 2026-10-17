@@ -855,3 +855,18 @@ footer.muted { margin-top: 26px; text-align: center; line-height: 1.7; }
 .foot-bar { display: flex; align-items: center; justify-content: flex-end; gap: 12px; }
 .foot-refresh { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; }
 .foot-refresh select { width: auto; padding: 2px 6px; font-size: 12px; }
+
+/* 在线情况时间线（.online-strip）：每格 10 分钟，靠"实心/浅灰/轨道"三态
+   表达 在线/无上报/未知。用 flex + 1px 间隔而不是 canvas：
+   格数是固定的（24h=144），div 更省事，也能直接吃 title 的悬浮提示。 */
+.online-strip {
+  display: flex; gap: 1px; height: 20px; margin: 2px 0 6px;
+  border-radius: 4px; overflow: hidden; background: var(--line);
+}
+.online-strip > i {
+  flex: 1 1 0; min-width: 0; display: block; height: 100%;
+  /* 未知档：比"离线"更淡，且不参与语义——那是"还没有数据"，不是"断了"。 */
+  background: var(--bg);
+  opacity: .55;
+}
+.online-strip > i.on, .online-strip > i.off { opacity: 1; }
