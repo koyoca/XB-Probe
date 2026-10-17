@@ -944,3 +944,8 @@ canvas.chart { width: 100%; height: clamp(150px, 13vw, 230px); display: block; }
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   letter-spacing: .08em; user-select: none;
 }
+
+/* 访问日志的 IP 过滤框：宽度写在 CSS 里，不用内联 style——
+   后台 CSP 是 style-src 'self'，HTML 里的 style="..." 会被直接拦掉
+   （冒烟测试有一条专门钉这个，写内联会在 CI 红）。 */
+#access-ip { width: 180px; }
