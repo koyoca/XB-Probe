@@ -1,7 +1,9 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/koyoca/xb-probe/internal/model"
 )
@@ -31,22 +33,22 @@ func (h *Handler) handleAccessLog(w http.ResponseWriter, r *http.Request) {
 	// enabled/days 一并回传：页面要显示"当前是否在记录、保留多久"，
 	// 省掉一次 /settings 往返，也避免两处读到不一致的开关状态。
 	type resp struct {
-		Total   int64           `json:"total"`
-		Limit   int             `json:"limit"`
-		Offset  int             `json:"offset"`
-		Enabled bool            `json:"enabled"`
-		Days    int             `json:"days"`
-		Items   []accessLogItem `json:"items"`
-		Note    string          `json:"note,omitempty"`
+		Total  int64           `json:"total"`
+		Limit  int             `json:"limit"`
+		Offset int             `json:"offset"`
+		Level  int             `json:"level"`
+		Days   int             `json:"days"`
+		Items  []accessLogItem `json:"items"`
+		Note   string          `json:"note,omitempty"`
 	}
 
 	out := resp{
-		Total:   total,
-		Limit:   limit,
-		Offset:  offset,
-		Enabled: h.accessLogEnabled(),
-		Days:    int(h.Repo.GetIntSetting("security.access_log_days", 30)),
-		Items:   make([]accessLogItem, 0, len(items)),
+		Total:  total,
+		Limit:  limit,
+		Offset: offset,
+		Level:  h.accessLogLevel(),
+		Days:   int(h.Repo.GetIntSetting("security.access_log_days", 30)),
+		Items:  make([]accessLogItem, 0, len(items)),
 	}
 	for _, e := range items {
 		out.Items = append(out.Items, accessLogItem{
@@ -54,8 +56,8 @@ func (h *Handler) handleAccessLog(w http.ResponseWriter, r *http.Request) {
 			Status: e.Status, Bytes: e.Bytes, DurMs: e.DurMs, UA: e.UA,
 		})
 	}
-	if !out.Enabled {
-		out.Note = "访问日志当前未开启：在「系统设置 → 访问日志与黑名单」里打开后才会开始记录。"
+	if out.Level == 0 {
+		out.Note = "访问日志当前未开启：在「系统设置 → 访问日志与黑名单」里把级别设为「仅网站访问」或「全部」后才会记录。"
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -72,4 +74,19 @@ type accessLogItem struct {
 	Bytes  int64  `json:"bytes"`
 	DurMs  int64  `json:"dur_ms"`
 	UA     string `json:"ua,omitempty"`
+}
+
+// handleClearAccessLog 清空访问日志（POST /api/admin/v1/access-log/clear）。
+//
+// 与"保留期自动清理"并存：保留期管长期回收，这个按钮解决"刚开级别 2 记了一堆
+// 上报请求、想立刻清掉重来"的情况。不可恢复，前端必须二次确认。
+func (h *Handler) handleClearAccessLog(w http.ResponseWriter, r *http.Request) {
+	n, err := h.Repo.ClearAccessLog()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, model.ErrInternal, "清理失败")
+		return
+	}
+	_ = h.Repo.Audit(time.Now().Unix(), actorOf(r), "accesslog.clear",
+		fmt.Sprintf("%d 条", n), RealIP(r))
+	writeJSON(w, http.StatusOK, map[string]any{"deleted": n})
 }

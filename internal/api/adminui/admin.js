@@ -443,7 +443,8 @@
     'token.issue': '签发 Agent 令牌', 'token.revoke': '吊销 Agent 令牌',
     'enroll_code.create': '创建注册码', 'enroll_code.consume': '使用注册码注册',
     'release.upload': '上传 Agent 发布文件', 'release.delete': '删除 Agent 发布文件',
-    'theme.set': '切换主题', 'maintenance.backup': '手动备份数据库',
+    'theme.set': '切换主题', 'theme.upload': '上传主题包', 'accesslog.clear': '清空访问日志',
+    'maintenance.backup': '手动备份数据库',
     'maintenance.backup_auto': '自动备份数据库',
     'maintenance.backup_prune': '清理过期备份',
     'maintenance.backup_delete': '删除备份文件',
@@ -721,7 +722,11 @@
   function api(path, opts) {
     opts = opts || {};
     var init = { method: opts.method || 'GET', credentials: 'same-origin', headers: { Accept: 'application/json' } };
-    if (opts.body !== undefined) {
+    if (opts.form !== undefined) {
+      // FormData 必须让浏览器自己带 Content-Type（里面含 multipart 的 boundary），
+      // 手写 application/json 会让服务端解析失败。
+      init.body = opts.form;
+    } else if (opts.body !== undefined) {
       init.headers['Content-Type'] = 'application/json';
       init.body = JSON.stringify(opts.body);
     }
@@ -4264,6 +4269,11 @@
     'agent.ip_whitelist': ['白名单列表', 'lines',
       '每行一条，支持单 IP 与 CIDR 网段，例如 203.0.113.7 或 198.51.100.0/24。' +
       '仅在上一项「Agent 接口 IP 白名单」启用时生效；列表为空则所有来源都会被拒绝。'],
+    // 在线情况时间线的每格时长（公开详情页）。
+    'online.segment_min': ['在线时间线每格分钟', 'number',
+      '公开详情页「在线情况」里每个格子代表多少分钟（5-120，默认 10）。' +
+      '调小能看到更细的断点；但 24h/7d 窗口读的是 10 分钟聚合层，' +
+      '格长小于 10 分钟时相邻格会取到同一个时间点（不会错，只是没有更细的信息）。'],
     'public.enabled': ['公开看板', 'select:1=开放,0=关闭',
       '是否对外公开节点看板。关闭后未登录访客访问公开页面与公开 API 均返回 404，' +
       '但登录管理员仍可正常打开看板自查效果；一键安装脚本与 Agent 发布文件仍然可用，不影响新节点接入。'],
@@ -4382,9 +4392,14 @@
       '形如 v0.3.0；留空表示不下发版本（关闭自动升级时填了也没用）。' +
       '填了之后，**所有**开了自动升级的节点会在各自下一次拉配置时升级到这个版本，' +
       '因此建议先在一个节点上验证过再全量。'],
-    'security.access_log_enabled': ['记录访问日志', 'select:0=关闭,1=开启',
-      '开启后每个页面/接口请求都会写进 access_log，可在「访问日志」页查看谁在什么时候' +
-      '访问了什么。关掉只是停止新增，库里已有的旧记录仍按下面的保留天数自动清理。'],
+    'security.access_log_level': ['访问日志级别', 'select:0=关闭,1=仅网站访问,2=全部（含静态资源与节点上报）',
+      '仅网站访问：只记页面与 /api 请求，跳过静态资源（css/js/图标）与 Agent 上报，' +
+      '信息量最有用、增长最慢。全部：连节点每 3 秒一次的上报也记，排查' +
+      '"节点到底有没有上报、上报打到哪个地址"时用它，量会很大。' +
+      '关掉只是停止新增，库里已有的旧记录仍按下面的保留天数自动清理。'],
+    // v0.3.0 只有开/关，键名不同；标 null 防止它以英文键名重新冒出来
+    // （读侧仍兼容它，所以升级不会让已开启的部署变回关闭）。
+    'security.access_log_enabled': null,
     'security.access_log_days': ['访问日志保留天数', 'number',
       '超过这个天数的访问记录会被每小时一次的清理删掉（1-365）。' +
       '这张表随访问量线性增长，个人站点建议 7-30 天。'],
@@ -4417,7 +4432,8 @@
     ['站点与全局', ['site.title', 'timezone']],
     ['站点形态', ['site.layout', 'site.public_hosts', 'site.admin_hosts', 'site.admin_url']],
     ['登录与会话', ['admin.session_ttl_hours']],
-    ['公开看板', ['public.enabled', 'public.cards', 'public.lat_window', 'public.show_ip_badge']],
+    ['公开看板', ['public.enabled', 'public.cards', 'public.lat_window', 'public.show_ip_badge',
+      'online.segment_min']],
     ['数据保留', ['retention.raw_hours', 'retention.mid_days', 'retention.days', 'raw_resolution_s',
       'alert.retention_days']],
     ['Agent 与上报', ['report_interval_s', 'probe_interval_s', 'offline_timeout_s', 'disk_min_free_mb',
@@ -4426,7 +4442,7 @@
     ['CDN 与来源 IP', ['cdn.enabled', 'cdn.ranges']],
     ['备份', ['backup.enabled', 'backup.hour', 'backup.keep']],
     ['多币种（月费合计）', ['billing.base_currency', 'billing.rates']],
-    ['访问日志与黑名单', ['security.access_log_enabled', 'security.access_log_days', 'security.ip_blacklist']],
+    ['访问日志与黑名单', ['security.access_log_level', 'security.access_log_days', 'security.ip_blacklist']],
     ['脚本注入', ['inject.script_enabled', 'inject.head', 'inject.body_end']],
     ['外部与高级', ['heartbeat_url', 'node.custom_countries']]
   ];
@@ -4712,6 +4728,39 @@
       sel.value = r.active;
     }).catch(function () { /* 忽略 */ });
   }
+
+  // 主题包上传：zip 文件名就是主题名，同名整体替换（更新同一主题）。
+  // 安装跑在服务端（解压 + zip-slip/体积校验 + 缺 theme.json 拒绝），
+  // 前端只负责选文件、确认、刷新列表。
+  $('btn-upload-theme').addEventListener('click', function () {
+    var inp = $('theme-zip');
+    if (!inp.files || !inp.files.length) { toast('请先选择一个 .zip 主题包', true); return; }
+    var f = inp.files[0];
+    if (!/\.zip$/i.test(f.name)) { toast('只接受 .zip 主题包', true); return; }
+    var activate = $('theme-zip-activate').checked;
+    var name = f.name.replace(/\.zip$/i, '');
+    askDialog({
+      title: '安装主题「' + name + '」',
+      desc: '主题包会解压到 themes/' + name + '/；同名目录会被**整体替换**（旧的会删掉）。' +
+        '第三方主题与页面同源运行，等同于可信代码，可能读取管理会话——请确认来源可信。',
+      okText: '安装'
+    }).then(function (r) {
+      if (!r.ok) return;
+      var fd = new FormData();
+      fd.append('file', f);
+      var btn = $('btn-upload-theme');
+      btn.disabled = true;
+      api('/themes/upload?activate=' + (activate ? '1' : '0'), { method: 'POST', form: fd })
+        .then(function (res) {
+          if (res && res.warning) toast(res.warning, true);
+          else toast('主题「' + ((res && res.name) || name) + '」已安装' + (activate ? '并切换' : ''));
+          inp.value = '';
+          loadThemes();
+        })
+        .catch(function (e) { toast(e.message, true); })
+        .then(function () { btn.disabled = false; });
+    });
+  });
 
   $('btn-apply-theme').addEventListener('click', function () {
     var name = $('theme-select').value;
@@ -5419,9 +5468,37 @@
       head.appendChild(el('h3', null, '采集状态'));
       head.appendChild(el('span', 'muted', '共 ' + st.total + ' 条记录'));
       box.appendChild(head);
-      box.appendChild(el('p', 'muted note', res.enabled
-        ? '正在记录，保留最近 ' + (res.days || 30) + ' 天。静态资源与 ACME 挑战不记。'
-        : '当前**未开启**：在「系统 → 访问日志与黑名单」里把"记录访问日志"设为开启后才会写入。'));
+      var lvl = res.level || 0;
+      var LVL = { 0: '关闭', 1: '仅网站访问', 2: '全部（含静态资源与节点上报）' };
+      var note;
+      if (lvl === 0) {
+        note = '当前**未开启**：在「系统 → 访问日志与黑名单」里把"访问日志级别"设为' +
+          '"仅网站访问"或"全部"后才会写入。';
+      } else if (lvl === 2) {
+        note = '正在记录**全部**请求（含节点上报与静态资源），保留最近 ' +
+          (res.days || 30) + ' 天。量很大，排查完建议切回"仅网站访问"。';
+      } else {
+        note = '正在记录**网站访问**，保留最近 ' + (res.days || 30) +
+          ' 天。静态资源、ACME 挑战与节点上报不记。';
+      }
+      box.appendChild(el('p', 'muted note', note));
+      var row = el('div', 'row');
+      row.appendChild(el('span', 'muted', '级别：' + (LVL[lvl] || lvl)));
+      row.appendChild(btn('清空日志', 'ghost', function () {
+        askDialog({
+          title: '清空访问日志',
+          desc: '将删除当前全部 ' + st.total + ' 条记录（不可恢复）。' +
+            '保留期设置不变，之后的新记录照常写入。',
+          okText: '清空'
+        }).then(function (r) {
+          if (!r.ok) return;
+          guard(api('/access-log/clear', { method: 'POST' }), '已清空').then(function () {
+            pages.access.offset = 0;
+            loadAccessLog();
+          });
+        });
+      }));
+      box.appendChild(row);
 
       var tb = $('access-table').querySelector('tbody');
       clear(tb);

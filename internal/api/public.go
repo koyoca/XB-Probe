@@ -592,7 +592,14 @@ func (h *Handler) handlePublicOnline(w http.ResponseWriter, r *http.Request) {
 	if span <= 0 {
 		span = 24 * time.Hour
 	}
-	const step = int64(600) // 10 分钟一格：24h → 144 格，与 10m 聚合层对齐
+	// 每格时长可配置（设置项 online.segment_min，默认 10 分钟）。
+	// 默认值与 10 分钟聚合层对齐；调小后格子更细，但 24h 窗口仍读 10m 层，
+	// 相邻格会取到同一个时间点（不误导，只是没有更细的信息）。
+	segMin := h.Repo.GetIntSetting("online.segment_min", 10)
+	if segMin < 1 {
+		segMin = 10
+	}
+	step := int64(segMin) * 60
 	now := time.Now()
 	to := now.Unix() - now.Unix()%step
 	from := to - int64(span.Seconds())

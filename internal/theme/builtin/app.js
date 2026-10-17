@@ -550,7 +550,10 @@
     // 与详情页同一规则：名字里已写明运营商就不再缀"· 电信"，
     // 同一个词出现两遍是噪声；读不出时才补后缀兜底。
     var label = b.name || CARRIER[b.carrier] || b.carrier;
-    var carrier = CARRIER[b.carrier] || '';
+    // 只有**真运营组**才补后缀。custom 的中文是"自定义"，它是缺省值、
+    // 不携带任何信息，拼上去只会得到"节点名称 · 自定义"这种噪声
+    // （用户实测：给节点配了专属目标后每行都多这三个字）。
+    var carrier = b.carrier === 'custom' ? '' : (CARRIER[b.carrier] || '');
     if (carrier && label.indexOf(carrier) < 0) label += ' · ' + carrier;
     head.appendChild(el('span', 'lb-name', label));
 
@@ -1462,6 +1465,13 @@
     }
     var step = res.step || 600;
     var from = res.from || 0;
+    var note = $('online-step-note');
+    if (note) {
+      // 格长由服务端设置项决定（online.segment_min），文案跟着变，
+      // 否则改了设置页、这里还写着"每格 10 分钟"。
+      var m = Math.round(step / 60);
+      note.textContent = '每格 ' + (m >= 1 ? m + ' 分钟' : step + ' 秒');
+    }
     var online = 0, offline = 0;
     segs.forEach(function (v) {
       var d = el('i');
@@ -1515,7 +1525,7 @@
       // 目标名多半已经把运营商写进去了（"电信-上海"、"广东移动"），再缀一个
       // "· 电信"就成了同一个词出现两遍。只有名字里读不出运营商时才补后缀，
       // 既去掉噪声，又不会把"这条链路走的哪个网"这个分类信息弄丢。
-      var carrier = CARRIER[t.carrier] || '';
+      var carrier = t.carrier === 'custom' ? '' : (CARRIER[t.carrier] || '');
       var title = t.name || ('目标 #' + t.target_id);
       if (carrier && title.indexOf(carrier) < 0) title += ' · ' + carrier;
       k.appendChild(document.createTextNode(title));
@@ -1529,14 +1539,20 @@
       // 摊薄成 0.0%（用户实测"明明断过却一直显示 0 丢包"）。峰值回答"最差
       // 到什么程度"，断点回答"断了几次"，抖动回答"稳不稳"——四个数各管一件事，
       // 少任何一个都会让人误判。
+      // 文案要**自解释**：这里曾经把状态直接写成"很高"，用户看不懂它指什么
+      // （那是延迟等级，不是丢包）；"峰值 33%"也没说清是丢包的峰值。
+      // 现在每一项都带上主语，缺主语时宁可多两个字。
       var parts = [];
       if (t.avg_rtt != null) {
-        parts.push('最小 ' + (t.min_rtt / 1000).toFixed(1) + ' · 最大 ' + (t.max_rtt / 1000).toFixed(1) + ' ms');
+        parts.push('延迟 ' + (t.min_rtt / 1000).toFixed(1) + '~' + (t.max_rtt / 1000).toFixed(1) + ' ms');
       }
-      parts.push('丢包 ' + fmtLoss(t.loss));
+      var lossTxt = '丢包 ' + fmtLoss(t.loss);
       if (t.max_loss && t.max_loss > t.loss) {
-        parts.push('峰值 ' + fmtLoss(t.max_loss));
+        // 峰值 = 窗口内**单段最高**丢包率（每段 10 分钟）。括号跟在主语后面，
+        // 不会再有"峰值 33.3% 是什么"的疑问。
+        lossTxt += '（最高一段 ' + fmtLoss(t.max_loss) + '）';
       }
+      parts.push(lossTxt);
       if (t.jitter) {
         parts.push('抖动 ' + (t.jitter / 1000).toFixed(1) + ' ms');
       }
@@ -1546,8 +1562,14 @@
       if (t.avg_rtt == null && t.points && t.points.length === 0) {
         parts.unshift('窗口内未探通');
       }
-      parts.push(CARRIER_NAME[t.status] || t.status || '未知');
-      c.appendChild(el('div', 'sub', parts.join(' · ')));
+      // 延迟等级单列，并说明依据（窗口平均 RTT）：<50ms 正常、<150ms 偏高、
+      // ≥150ms 很高。它与丢包是两个维度，不能紧挨着摆成一句话。
+      var st = CARRIER_NAME[t.status] || t.status || '未知';
+      parts.push(t.avg_rtt == null ? ('状态 ' + st) : ('延迟等级 ' + st));
+      var sub = el('div', 'sub', parts.join(' · '));
+      sub.title = '延迟等级按窗口平均 RTT 判定：<50ms 正常、<150ms 偏高、≥150ms 很高；' +
+        '丢包是窗口综合值，括号内是单段（10 分钟）最高值。';
+      c.appendChild(sub);
       box.appendChild(c);
     });
   }

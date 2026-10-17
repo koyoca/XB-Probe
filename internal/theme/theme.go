@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // 主题系统（文档 5.3）。
@@ -40,7 +41,12 @@ type Info struct {
 }
 
 // Manager 管理主题的加载与静态文件读取。
+//
+// mu 保护 themes/active：主题过去只在启动时扫一次，现在支持**运行时安装**
+// （后台上传 zip），而公开站每个请求都在 List/Open/Active——不加锁的话
+// "安装新主题"与"正在渲染页面"会撞在 map 上（并发读写 map 直接 panic）。
 type Manager struct {
+	mu     sync.RWMutex
 	dir    string
 	active string
 	themes map[string]*loaded
@@ -110,6 +116,8 @@ func (m *Manager) scanExternal() error {
 
 // List 返回全部主题（内置在前，其余按名称排序）。
 func (m *Manager) List() []Info {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	out := make([]Info, 0, len(m.themes))
 	for _, t := range m.themes {
 		out = append(out, t.info)
@@ -125,13 +133,17 @@ func (m *Manager) List() []Info {
 
 // Exists 判断主题是否存在。
 func (m *Manager) Exists(name string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	_, ok := m.themes[name]
 	return ok
 }
 
 // SetActive 切换当前主题（热切换，无需重启，5.3）。未知主题返回错误。
 func (m *Manager) SetActive(name string) error {
-	if !m.Exists(name) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.themes[name]; !ok {
 		return fmt.Errorf("主题不存在：%s", name)
 	}
 	m.active = name
@@ -139,12 +151,18 @@ func (m *Manager) SetActive(name string) error {
 }
 
 // Active 返回当前主题名。
-func (m *Manager) Active() string { return m.active }
+func (m *Manager) Active() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.active
+}
 
 // Open 读取主题内文件。
 // 安全：请求路径先 Clean 再校验不含 ".."，且必须落在主题根内（防路径穿越）。
 func (m *Manager) Open(name, rel string) ([]byte, error) {
+	m.mu.RLock()
 	t, ok := m.themes[name]
+	m.mu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("主题不存在")
 	}
@@ -157,7 +175,9 @@ func (m *Manager) Open(name, rel string) ([]byte, error) {
 
 // Entry 返回主题入口文件内容。
 func (m *Manager) Entry(name string) ([]byte, error) {
+	m.mu.RLock()
 	t, ok := m.themes[name]
+	m.mu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("主题不存在")
 	}

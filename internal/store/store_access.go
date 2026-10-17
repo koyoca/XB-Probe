@@ -84,3 +84,12 @@ func (r *Repo) PruneAccessLog(beforeTs int64) (int64, error) {
 	}
 	return res.RowsAffected()
 }
+
+// ClearAccessLog 清空整张表，返回删除行数。
+func (r *Repo) ClearAccessLog() (int64, error) {
+	res, err := r.db.Write.Exec(`DELETE FROM access_log`)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}

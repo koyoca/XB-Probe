@@ -254,6 +254,13 @@
         <button id="btn-apply-theme" class="primary">切换</button>
         <span class="muted">切换立即生效，无需重启。第三方主题与注入脚本等同可信代码。</span>
       </div>
+      <div class="row">
+        <label>上传主题包 <input type="file" id="theme-zip" accept=".zip"></label>
+        <label><input type="checkbox" id="theme-zip-activate" checked> 安装后立即切换</label>
+        <button id="btn-upload-theme" class="ghost">上传并安装</button>
+        <span class="muted">zip 文件名即主题名；同名会**整体替换**（同一主题的更新）。
+          包根目录需含 theme.json 与 index.html。</span>
+      </div>
 
       <h2>外部心跳</h2>
       <p class="muted note">Master 每 5 分钟向你配置的地址发一次 GET，用于让第三方监控（healthchecks.io / Uptime Kuma 等）在 Master 整体失联时报警。地址在「外部与高级」分组的 heartbeat_url 里配置。</p>

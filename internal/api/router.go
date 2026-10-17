@@ -290,12 +290,15 @@ func (h *Handler) AdminRoutes() http.Handler {
 	mux.HandleFunc("PUT /api/admin/v1/settings", h.requireAdmin(h.handlePutSettings))
 	mux.HandleFunc("GET /api/admin/v1/themes", h.requireAdmin(h.handleListThemes))
 	mux.HandleFunc("PUT /api/admin/v1/themes/active", h.requireAdmin(h.handleSetTheme))
+	// 主题包上传（zip 文件名即主题名，同名整体替换）。体积上限在 BodyLimit 里放宽。
+	mux.HandleFunc("POST /api/admin/v1/themes/upload", h.requireAdmin(h.handleUploadTheme))
 	mux.HandleFunc("GET /api/admin/v1/storage/stats", h.requireAdmin(h.handleStorageStats))
 	mux.HandleFunc("GET /api/admin/v1/audit-log", h.requireAdmin(h.handleAuditLog))
 	// 审计日志保留期（6.5）：默认 30 天，可改；改与立即清理都需二次确认密码。
 	mux.HandleFunc("PUT /api/admin/v1/maintenance/audit/retention", h.requireAdmin(h.handleSetAuditRetention))
 	// 访问日志（migration 0011）。只读分页接口，供后台"访问日志"页使用。
 	mux.HandleFunc("GET /api/admin/v1/access-log", h.requireAdmin(h.handleAccessLog))
+	mux.HandleFunc("POST /api/admin/v1/access-log/clear", h.requireAdmin(h.handleClearAccessLog))
 	mux.HandleFunc("POST /api/admin/v1/maintenance/audit/prune", h.requireAdmin(h.handlePruneAuditLog))
 	mux.HandleFunc("POST /api/admin/v1/maintenance/backup", h.requireAdmin(h.handleBackup))
 	mux.HandleFunc("GET /api/admin/v1/maintenance/backups", h.requireAdmin(h.handleListBackups))
@@ -366,6 +369,9 @@ func (h *Handler) AgentRoutes() http.Handler {
 	if h.AccessLog {
 		h2 = AccessLogMiddleware(h.Logger, h2)
 	}
+	// 访问日志：级别 2（全部）时连上报请求也记。级别 0/1 在中间件里直接放行，
+	// 不会为每个 3 秒一次的上报付出包装成本。
+	h2 = accessLogMiddleware(h.AccessRecorder, h2)
 	h2 = RealIPMiddleware(h.TrustedProxies, h.cdnRangeList, h2)
 	return h2
 }

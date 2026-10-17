@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"github.com/koyoca/xb-probe/internal/theme"
 	"log/slog"
 	"net"
 	"net/http"
@@ -357,9 +358,22 @@ func randomNonce() (string, error) {
 }
 
 // BodyLimit 限制请求体大小（9.2 / S9）。超限由处理函数映射为 413。
+// bodyLimitOverrides 给个别路由放宽请求体上限。
+//
+// 目前只有"上传主题包"一条：管理端默认 1 MB，而主题包允许到 32 MB。
+// 写在中间件里而不是逐路由包一层，是因为 BodyLimit 已经挂在整条链路最外层，
+// 内层再包一次改不了已经被包住的 r.Body。
+var bodyLimitOverrides = map[string]int64{
+	"/api/admin/v1/themes/upload": theme.MaxZipBytes,
+}
+
 func BodyLimit(maxBytes int64, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+		limit := maxBytes
+		if v, ok := bodyLimitOverrides[r.URL.Path]; ok && v > limit {
+			limit = v
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, limit)
 		next.ServeHTTP(w, r)
 	})
 }

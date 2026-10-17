@@ -31,8 +31,8 @@ const accessQueueSize = 1000
 
 // AccessRecorder 异步把访问记录写入 access_log 表。
 type AccessRecorder struct {
-	repo    *store.Repo
-	enabled func() bool
+	repo  *store.Repo
+	level func() int
 
 	ch     chan store.AccessLogEntry
 	stopCh chan struct{}
@@ -44,13 +44,13 @@ type AccessRecorder struct {
 }
 
 // NewAccessRecorder 创建记录器。enabled 每次现读设置，改动即时生效。
-func NewAccessRecorder(repo *store.Repo, enabled func() bool) *AccessRecorder {
+func NewAccessRecorder(repo *store.Repo, level func() int) *AccessRecorder {
 	return &AccessRecorder{
-		repo:    repo,
-		enabled: enabled,
-		ch:      make(chan store.AccessLogEntry, accessQueueSize),
-		stopCh:  make(chan struct{}),
-		doneCh:  make(chan struct{}),
+		repo:   repo,
+		level:  level,
+		ch:     make(chan store.AccessLogEntry, accessQueueSize),
+		stopCh: make(chan struct{}),
+		doneCh: make(chan struct{}),
 	}
 }
 
@@ -85,7 +85,7 @@ func (a *AccessRecorder) Stop() {
 
 // Record 记一条访问。非阻塞：关掉时直接返回，队列满时丢弃。
 func (a *AccessRecorder) Record(e store.AccessLogEntry) {
-	if a == nil || a.enabled == nil || !a.enabled() {
+	if a.Level() == 0 {
 		return
 	}
 	select {
@@ -151,12 +151,29 @@ func ipMatches(addr netip.Addr, list []netip.Prefix) bool {
 	return false
 }
 
-// accessLogEnabled 读"是否记录访问日志"（每次现读设置，改完立即生效）。
-func (h *Handler) accessLogEnabled() bool {
+// accessLogLevel 读访问日志级别：0 关闭 / 1 仅网站 / 2 全部。
+//
+// 兼容 v0.3.0 的旧键 security.access_log_enabled（当时只有开/关）：
+// 新键没配过、旧键为 "1" 时按"仅网站"处理，避免升级后日志静默停掉。
+func (h *Handler) accessLogLevel() int {
 	if h.Repo == nil {
-		return false
+		return 0
 	}
-	return h.Repo.GetSettingDefault("security.access_log_enabled", "0") == "1"
+	v := h.Repo.GetSettingDefault("security.access_log_level", "")
+	if v == "" {
+		if h.Repo.GetSettingDefault("security.access_log_enabled", "0") == "1" {
+			return 1
+		}
+		return 0
+	}
+	switch v {
+	case "1":
+		return 1
+	case "2":
+		return 2
+	default:
+		return 0
+	}
 }
 
 // blacklistPrefixes 现读黑名单（改完立即生效，无需重启）。
@@ -205,15 +222,29 @@ func (h *Handler) IPBlacklistMiddleware(next http.Handler) http.Handler {
 //
 // 记录范围：只记真实请求，不记 ACME 挑战与静态资源——静态资源一次页面加载
 // 就是十几个，全记下来会让"谁访问了页面"这件事淹没在噪声里。
+func (a *AccessRecorder) Level() int {
+	if a == nil || a.level == nil {
+		return 0
+	}
+	return a.level()
+}
+
 func accessLogMiddleware(rec *AccessRecorder, next http.Handler) http.Handler {
 	if rec == nil {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		lvl := rec.Level()
+		if lvl == 0 {
+			next.ServeHTTP(w, r)
+			return
+		}
 		start := time.Now()
 		recw := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(recw, r)
-		if skipAccessLog(r.URL.Path) {
+		// 级别 1（仅网站）跳过静态资源、ACME 与 Agent 上报；
+		// 级别 2 全记——排查"节点到底有没有上报"时那条请求就是关键证据。
+		if lvl < 2 && skipAccessLog(r.URL.Path) {
 			return
 		}
 		rec.Record(store.AccessLogEntry{
@@ -235,6 +266,11 @@ func skipAccessLog(p string) bool {
 		return true
 	}
 	switch {
+	// Agent 上报：级别 1 不记（3 秒一条，会把表刷满且淹没真正的访问），
+	// 级别 2 才记。放在这里而不是中间件外层判断，是为了让"级别 2 全记"
+	// 真的覆盖到它。
+	case strings.HasPrefix(p, "/api/agent/"):
+		return true
 	case strings.HasPrefix(p, "/style.css"),
 		strings.HasPrefix(p, "/app.js"),
 		strings.HasPrefix(p, "/theme.json"),

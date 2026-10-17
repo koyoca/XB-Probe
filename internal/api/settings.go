@@ -167,11 +167,16 @@ var settingDefaults = map[string]string{
 	"billing.rates":         "",
 	// 访问日志与 IP 黑名单（对应 migration 0011 的 access_log 表）。
 	//
-	// access_log_enabled 默认 **0**：这张表随页面访问线性增长，个人部署未必
-	// 想看；打开后按 access_log_days 自动清理。开关与保留期都是每次请求现读，
-	// 改完立即生效、不必重启。
-	"security.access_log_enabled": "0",
-	"security.access_log_days":    "30",
+	// access_log_level 三档：
+	//   0 = 关闭（默认，这张表随访问量线性增长，个人部署未必想看）
+	//   1 = 仅网站访问：跳过静态资源与 Agent 上报（默认档，信息量最有用）
+	//   2 = 全部：静态资源、Agent 上报都记（排查"节点到底有没有上报"时用）
+	// 每次请求现读，改完立即生效、不必重启。
+	//
+	// 键名从 v0.3.0 的 access_log_enabled（0/1）迁到 access_log_level，
+	// 读侧保留了旧键兜底，所以升级不会让已开启的部署突然变回关闭。
+	"security.access_log_level": "0",
+	"security.access_log_days":  "30",
 	// ip_blacklist：一行（或逗号）一条，支持单 IP、CIDR、`1.2.3.*`。
 	// 命中即 403，**公开站与管理端都拦**；Agent 接口不受影响
 	// （黑名单是"不许访问网站"，而 Agent 是节点上报通道，误封会让监控静默中断）。
@@ -183,6 +188,10 @@ var settingDefaults = map[string]string{
 	// target_version 留空 = 不下发版本（只在"想钉某个版本"时填，如 v0.3.0）。
 	// 注意：**升级后要等 service manager 重启进程**才生效（systemd 的
 	// Restart=always 会自动拉起），不会在进程内热替换。
+	// online.segment_min：公开详情页「在线情况」时间线每格多少分钟。
+	// 默认 10 与 10 分钟聚合层对齐；调小能看到更细的断点（受指标层精度限制：
+	// 24h 窗口读 metrics_10m，格长小于 10 分钟时相邻格会取到同一个时间点）。
+	"online.segment_min":   "10",
 	"agent.auto_upgrade":   "0",
 	"agent.target_version": "",
 }
@@ -235,13 +244,14 @@ var settingSpecs = map[string]func(string) error{
 	// （见 settingDefaults 处的说明）。范围校验由 handleSetAuditRetention 负责。
 	"alert.retention_days": intRange(1, 3650),
 	// 多币种（见 settingDefaults 的说明）。
-	"billing.base_currency":       validateCurrencyCode,
-	"billing.rates":               validateCurrencyRates,
-	"security.access_log_enabled": enumValue("0", "1"),
-	"security.access_log_days":    intRange(1, 365),
+	"billing.base_currency":     validateCurrencyCode,
+	"billing.rates":             validateCurrencyRates,
+	"security.access_log_level": enumValue("0", "1", "2"),
+	"security.access_log_days":  intRange(1, 365),
 	// 黑名单不做强校验：允许存"暂时写错的条目"，解析侧会跳过非法行。
 	// 若在这里直接拒存，管理员改一半保存失败、旧名单还留着，更难排查。
 	"security.ip_blacklist": func(string) error { return nil },
+	"online.segment_min":    intRange(5, 120),
 	"agent.auto_upgrade":    enumValue("0", "1"),
 	// 只接受 vX.Y.Z 或空：写错版本号会让每个 Agent 各下载一次再失败。
 	"agent.target_version": validateVersionTag,

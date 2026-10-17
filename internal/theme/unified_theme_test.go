@@ -673,8 +673,9 @@ func TestLatencyWindowRegisteredInAdmin(t *testing.T) {
 	// 必须落在「公开看板」分组里，紧邻 public.cards——它是同一次配置动作。
 	// 精确钉住整组内容（含 public.show_ip_badge）：IP 标识开关与 lat_window
 	// 同属公开看板配置，分组漂移（键被挪走/删掉）必须在这里现形。
-	if !strings.Contains(js, "['公开看板', ['public.enabled', 'public.cards', 'public.lat_window', 'public.show_ip_badge']]") {
-		t.Error("public.lat_window 应归入「公开看板」分组（与 public.enabled / public.cards / public.show_ip_badge 同组）")
+	// online.segment_min（在线时间线每格分钟）同属公开看板配置，一并钉在这里。
+	if !strings.Contains(js, "['公开看板', ['public.enabled', 'public.cards', 'public.lat_window', 'public.show_ip_badge',\n      'online.segment_min']]") {
+		t.Error("public.lat_window / online.segment_min 应归入「公开看板」分组（与 public.enabled / public.cards / public.show_ip_badge 同组）")
 	}
 	// 选项文案要与枚举值一一对应（30m/1h/6h/24h），少一个就选不到。
 	for _, opt := range []string{"30m=近 30 分钟", "1h=近 1 小时", "6h=近 6 小时", "24h=近 24 小时"} {

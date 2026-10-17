@@ -285,8 +285,19 @@ func run(cfgPath string) error {
 	distDir := filepath.Join(cfg.DataDir, "dist")
 	// 访问日志记录器（设置项 security.access_log_enabled 控制开关）。
 	// 必须在 api.New 之前启动：它的写协程要一直活着，随进程退出再排空。
-	accessRec := api.NewAccessRecorder(repo, func() bool {
-		return repo.GetSettingDefault("security.access_log_enabled", "0") == "1"
+	accessRec := api.NewAccessRecorder(repo, func() int {
+		// 0 关闭 / 1 仅网站 / 2 全部；旧键 access_log_enabled 作为兜底。
+		switch repo.GetSettingDefault("security.access_log_level", "") {
+		case "1":
+			return 1
+		case "2":
+			return 2
+		case "":
+			if repo.GetSettingDefault("security.access_log_enabled", "0") == "1" {
+				return 1
+			}
+		}
+		return 0
 	})
 	accessRec.Start()
 	defer accessRec.Stop()
